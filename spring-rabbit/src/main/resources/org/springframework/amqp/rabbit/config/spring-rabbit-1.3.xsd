@@ -625,6 +625,13 @@
 				]]></xsd:documentation>
 			</xsd:annotation>
 		</xsd:attribute>
+		<xsd:attribute name="recovery-interval" type="xsd:string">
+			<xsd:annotation>
+				<xsd:documentation><![CDATA[
+	The time in milliseconds between attempts to start a consumer if it fails to start with a non-fatal error. Default 5000.
+				]]></xsd:documentation>
+			</xsd:annotation>
+		</xsd:attribute>
 	</xsd:complexType>
 
 	<xsd:complexType name="listenerType">
@@ -646,6 +653,14 @@
 			<xsd:annotation>
 				<xsd:documentation><![CDATA[
 	The queues (bean references) for this listener as a comma-separated list. Either this or queue-names is required.
+				]]></xsd:documentation>
+			</xsd:annotation>
+		</xsd:attribute>
+		<xsd:attribute name="exclusive" type="xsd:string">
+			<xsd:annotation>
+				<xsd:documentation><![CDATA[
+	When true, a single consumer in the container will have exlusive use of the queue(s), preventing other consumers from
+	receiving messages from the queue(s). When true, requires a concurrency of 1. Default false.
 				]]></xsd:documentation>
 			</xsd:annotation>
 		</xsd:attribute>
@@ -697,6 +712,21 @@
 	a return value, for which each result object will be converted into a
 	response message.
 				]]></xsd:documentation>
+			</xsd:annotation>
+		</xsd:attribute>
+		<xsd:attribute name="admin" type="xsd:string">
+			<xsd:annotation>
+				<xsd:documentation><![CDATA[
+	Reference to a 'RabbitAdmin'. Required if the listener is using auto-delete
+	queues and those queues are configured for conditional declaration. This
+	is the admin that will (re)declare those queues when the container is
+	(re)started. See the reference documentation for more information.
+				]]></xsd:documentation>
+				<xsd:appinfo>
+					<tool:annotation kind="ref">
+						<tool:expected-type type="org.springframework.amqp.rabbit.core.RabbitAdmin" />
+					</tool:annotation>
+				</xsd:appinfo>
 			</xsd:annotation>
 		</xsd:attribute>
 	</xsd:complexType>
@@ -903,6 +933,19 @@
 	correlationId message property is used. Previous versions of spring-amqp used a header 'spring_reply_correlation'; if you
 	wish to continue to use that value, specify it here.
 					]]></xsd:documentation>
+				</xsd:annotation>
+			</xsd:attribute>
+			<xsd:attribute name="retry-template" type="xsd:string">
+				<xsd:annotation>
+					<xsd:documentation><![CDATA[
+	Reference to a RetryTemplate - used to invoke retries on Rabbit operations (such as when a connection fails).
+	By default, retries are not attempted.
+					]]></xsd:documentation>
+					<xsd:appinfo>
+						<tool:annotation kind="ref">
+							<tool:expected-type type="org.springframework.retry.support.RetryTemplate" />
+						</tool:annotation>
+					</xsd:appinfo>
 				</xsd:annotation>
 			</xsd:attribute>
 		</xsd:complexType>

@@ -13,6 +13,13 @@
 
 package org.springframework.amqp.rabbit.listener;
 
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Set;
+import java.util.concurrent.CopyOnWriteArrayList;
+
 import org.springframework.amqp.core.AcknowledgeMode;
 import org.springframework.amqp.core.Message;
 import org.springframework.amqp.core.MessageListener;
@@ -25,6 +32,8 @@ import org.springframework.amqp.rabbit.connection.RabbitUtils;
 import org.springframework.amqp.rabbit.core.ChannelAwareMessageListener;
 import org.springframework.beans.factory.BeanNameAware;
 import org.springframework.beans.factory.DisposableBean;
+import org.springframework.context.ApplicationContext;
+import org.springframework.context.ApplicationContextAware;
 import org.springframework.context.SmartLifecycle;
 import org.springframework.transaction.support.TransactionSynchronizationManager;
 import org.springframework.util.Assert;
@@ -39,8 +48,8 @@ import com.rabbitmq.client.Channel;
  * @author James Carr
  * @author Gary Russell
  */
-public abstract class AbstractMessageListenerContainer extends RabbitAccessor implements BeanNameAware, DisposableBean,
-		SmartLifecycle {
+public abstract class AbstractMessageListenerContainer extends RabbitAccessor
+		implements ApplicationContextAware, BeanNameAware, DisposableBean, SmartLifecycle {
 
 	private volatile String beanName;
 
@@ -54,7 +63,7 @@ public abstract class AbstractMessageListenerContainer extends RabbitAccessor im
 
 	private final Object lifecycleMonitor = new Object();
 
-	private volatile String[] queueNames;
+	private volatile List<String> queueNames = new CopyOnWriteArrayList<String>();
 
 	private ErrorHandler errorHandler;
 
@@ -65,6 +74,8 @@ public abstract class AbstractMessageListenerContainer extends RabbitAccessor im
 	private volatile AcknowledgeMode acknowledgeMode = AcknowledgeMode.AUTO;
 
 	private boolean initialized;
+
+	private volatile ApplicationContext applicationContext;
 
 	/**
 	 * <p>
@@ -101,19 +112,24 @@ public abstract class AbstractMessageListenerContainer extends RabbitAccessor im
 	}
 
 	/**
-	 * Set the name of the queue to receive messages from.
-	 * @param queueName the desired queue (can not be <code>null</code>)
+	 * Set the name of the queue(s) to receive messages from.
+	 * @param queueName the desired queueName(s) (can not be <code>null</code>)
 	 */
 	public void setQueueNames(String... queueName) {
-		this.queueNames = queueName;
+		this.queueNames = new CopyOnWriteArrayList<String>(Arrays.asList(queueName));
 	}
 
+	/**
+	 * Set the name of the queue(s) to receive messages from.
+	 * @param queues the desired queue(s) (can not be <code>null</code>)
+	 */
 	public void setQueues(Queue... queues) {
-		String[] queueNames = new String[queues.length];
+		List<String> queueNames = new ArrayList<String>(queues.length);
 		for (int i = 0; i < queues.length; i++) {
 			Assert.notNull(queues[i], "Queue must not be null.");
-			queueNames[i] = queues[i].getName();
+			queueNames.add(queues[i].getName());
 		}
+		queueNames = new CopyOnWriteArrayList<String>(queueNames);
 		this.queueNames = queueNames;
 	}
 
@@ -121,13 +137,67 @@ public abstract class AbstractMessageListenerContainer extends RabbitAccessor im
 	 * @return the name of the queues to receive messages from.
 	 */
 	public String[] getQueueNames() {
-		return this.queueNames;
+		return this.queueNames.toArray(new String[this.queueNames.size()]);
 	}
 
 	protected String[] getRequiredQueueNames() {
-		Assert.notNull(this.queueNames, "Queue names must not be null.");
-		Assert.state(this.queueNames.length > 0, "Queue names must not be empty.");
-		return this.queueNames;
+		Assert.state(this.queueNames.size() > 0, "Queue names must not be empty.");
+		return this.getQueueNames();
+	}
+
+	protected Set<String> getQueueNamesAsSet() {
+		return new HashSet<String>(this.queueNames);
+	}
+
+	/**
+	 * Add queue(s) to this container's list of queues.
+	 * @param queueNames The queue(s) to add.
+	 */
+	public void addQueueNames(String... queueNames) {
+		Assert.notNull(queueNames, "'queueNames' cannot be null");
+		Assert.noNullElements(queueNames, "'queueNames' cannot contain null elements");
+		this.queueNames.addAll(Arrays.asList(queueNames));
+	}
+
+	/**
+	 * Add queue(s) to this container's list of queues.
+	 * @param queues The queue(s) to add.
+	 */
+	public void addQueues(Queue... queues) {
+		Assert.notNull(queues, "'queues' cannot be null");
+		Assert.noNullElements(queues, "'queues' cannot contain null elements");
+		String[] queueNames = new String[queues.length];
+		for (int i = 0; i< queues.length; i++) {
+			queueNames[i] = queues[i].getName();
+		}
+		this.addQueueNames(queueNames);
+	}
+
+	/**
+	 * Remove queue(s) from this container's list of queues.
+	 * @param queueNames The queue(s) to remove.
+	 * @return the boolean result of removal on the target {@code queueNames} List.
+	 */
+	public boolean removeQueueNames(String... queueNames) {
+		Assert.notNull(queueNames, "'queueNames' cannot be null");
+		Assert.noNullElements(queueNames, "'queueNames' cannot contain null elements");
+		Assert.isTrue(this.queueNames.size() - queueNames.length > 0, "Cannot remove the last queue");
+		return this.queueNames.removeAll(Arrays.asList(queueNames));
+	}
+
+	/**
+	 * Remove queue(s) from this container's list of queues.
+	 * @param queues The queue(s) to remove.
+	 * @return the boolean result of removal on the target {@code queueNames} List.
+	 */
+	public boolean removeQueues(Queue... queues) {
+		Assert.notNull(queues, "'queues' cannot be null");
+		Assert.noNullElements(queues, "'queues' cannot contain null elements");
+		String[] queueNames = new String[queues.length];
+		for (int i = 0; i< queues.length; i++) {
+			queueNames[i] = queues[i].getName();
+		}
+		return this.removeQueueNames(queueNames);
 	}
 
 	/**
@@ -250,6 +320,15 @@ public abstract class AbstractMessageListenerContainer extends RabbitAccessor im
 	 */
 	protected final String getBeanName() {
 		return this.beanName;
+	}
+
+	protected final ApplicationContext getApplicationContext() {
+		return applicationContext;
+	}
+
+	@Override
+	public final void setApplicationContext(ApplicationContext applicationContext) {
+		this.applicationContext = applicationContext;
 	}
 
 	/**
@@ -397,6 +476,7 @@ public abstract class AbstractMessageListenerContainer extends RabbitAccessor im
 
 	/**
 	 * Stop this container.
+	 * @see #doStop
 	 * @see #doStop
 	 */
 	@Override

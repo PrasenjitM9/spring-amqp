@@ -19,8 +19,11 @@ import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertTrue;
 
+import java.util.Collection;
+
 import org.junit.Before;
 import org.junit.Test;
+
 import org.springframework.amqp.core.AmqpTemplate;
 import org.springframework.amqp.core.Queue;
 import org.springframework.amqp.rabbit.core.RabbitTemplate;
@@ -30,6 +33,7 @@ import org.springframework.beans.DirectFieldAccessor;
 import org.springframework.beans.factory.support.DefaultListableBeanFactory;
 import org.springframework.beans.factory.xml.XmlBeanDefinitionReader;
 import org.springframework.core.io.ClassPathResource;
+import org.springframework.retry.support.RetryTemplate;
 
 /**
  *
@@ -75,6 +79,7 @@ public final class TemplateParserTests {
 		assertTrue(template.getMessageConverter() instanceof SerializerMessageConverter);
 		DirectFieldAccessor accessor = new DirectFieldAccessor(template);
 		assertEquals("foo", accessor.getPropertyValue("correlationKey"));
+		assertSame(beanFactory.getBean(RetryTemplate.class), accessor.getPropertyValue("retryTemplate"));
 	}
 
 	@Test
@@ -93,8 +98,9 @@ public final class TemplateParserTests {
 		assertSame(template, dfa.getPropertyValue("messageListener"));
 		SimpleMessageListenerContainer messageListenerContainer = beanFactory.getBean(SimpleMessageListenerContainer.class);
 		dfa = new DirectFieldAccessor(messageListenerContainer);
-		String[] queueNames = (String[]) dfa.getPropertyValue("queueNames");
-		assertEquals(queueBean.getName(), queueNames[0]);
+		Collection<?> queueNames = (Collection<?>) dfa.getPropertyValue("queueNames");
+		assertEquals(1, queueNames.size());
+		assertEquals(queueBean.getName(), queueNames.iterator().next());
 	}
 
 }

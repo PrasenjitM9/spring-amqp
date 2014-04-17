@@ -14,10 +14,31 @@
 			</para>
 		</section>
 		<section>
+			<title>Listener Queues</title>
+			<para>
+				The listener container now permits the queue(s) on which it is listening to
+				be modified at runtime. Also, the container will now start if at least one
+				of its configured queues is available for use.
+				See <xref linkend="listener-queues" />
+			</para>
+			<para>
+				This listener container will now redeclare any auto-delete queues during
+				startup. See <xref linkend="lc-auto-delete"/>.
+			</para>
+		</section>
+		<section>
 			<title>Consumer Priority</title>
 			<para>
 				The listener container now supports consumer arguments, allowing the
 				<code>x-priority</code> argument to be set. See <xref linkend="consumer-priority" />.
+			</para>
+		</section>
+		<section>
+			<title>Exclusive Consumer</title>
+			<para>
+				The <classname>SimpleMessageListenerContainer</classname> can now be configured
+				with a single <code>exclusive</code> consumer, preventing other consumers from
+				listening to the queue. See <xref linkend="exclusive-consumer" />.
 			</para>
 		</section>
 		<section>
@@ -43,8 +64,15 @@
 			<title>AMQP Template</title>
 			<para>
 				The <interfacename>AmqpTemplate</interfacename> now
-				provides several synchronous <code>receiveAndReply</code> methods.
+				provides several synchronous <code>receiveAndReply</code> methods. These are implemented
+				by the <classname>RabbitTemplate</classname>.
 				For more information see <xref linkend="receiving-messages" />.
+			</para>
+			<para>
+				The <classname>RabbitTemplate</classname> now supports configuring a
+				<classname>RetryTemplate</classname> to attempt retries (with optional back off
+				policy) for when the broker is not available. For more information see
+				<xref linkend="template-retry" />.
 			</para>
 		</section>
 		<section>
@@ -80,6 +108,21 @@
 			<para>
 				"Fluent APIs" for building messages and/or message properties is now provided.
 				See <xref linkend="message-builder"/>.
+			</para>
+		</section>
+		<section>
+			<title>RetryInterceptorBuilder</title>
+			<para>
+				A "Fluent API" for building listener container retry interceptors is now provided.
+				See <xref linkend="retry"/>.
+			</para>
+		</section>
+		<section>
+			<title>RepublishMessageRecoverer</title>
+			<para>
+				This new <interfacename>MessageRecoverer</interfacename> is provided to allow publishing
+				a failed message to another queue (including stack trace information in the header) when
+				retries are exhausted. See <xref linkend="async-listeners"/>.
 			</para>
 		</section>
 	</section>
