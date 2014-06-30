@@ -1,5 +1,5 @@
 /*
- * Copyright 2002-2012 the original author or authors.
+ * Copyright 2002-2014 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -14,6 +14,9 @@
  * limitations under the License.
  */
 package org.springframework.amqp.rabbit.retry;
+
+import org.apache.commons.logging.Log;
+import org.apache.commons.logging.LogFactory;
 
 import org.springframework.amqp.AmqpRejectAndDontRequeueException;
 import org.springframework.amqp.core.Message;
@@ -31,9 +34,15 @@ import org.springframework.amqp.rabbit.listener.ListenerExecutionFailedException
  */
 public class RejectAndDontRequeueRecoverer implements MessageRecoverer {
 
+	protected Log logger = LogFactory.getLog(RejectAndDontRequeueRecoverer.class);
+
+	@Override
 	public void recover(Message message, Throwable cause) {
+		if (logger.isWarnEnabled()) {
+			logger.warn("Retries exhausted for message " + message, cause);
+		}
 		throw new ListenerExecutionFailedException("Retry Policy Exhausted",
-					new AmqpRejectAndDontRequeueException(cause));
+					new AmqpRejectAndDontRequeueException(cause), message);
 	}
 
 }

@@ -800,7 +800,7 @@ public class RabbitTemplate extends RabbitAccessor implements RabbitOperations, 
 	public <T> T execute(final ChannelCallback<T> action) {
 		if (this.retryTemplate != null) {
 			try {
-				return this.retryTemplate.execute(new RetryCallback<T>() {
+				return this.retryTemplate.execute(new RetryCallback<T, Exception>() {
 
 					@Override
 					public T doWithRetry(RetryContext context) throws Exception {
@@ -974,7 +974,7 @@ public class RabbitTemplate extends RabbitAccessor implements RabbitOperations, 
 	@Override
 	public void handleConfirm(PendingConfirm pendingConfirm, boolean ack) {
 		if (this.confirmCallback != null) {
-			this.confirmCallback.confirm(pendingConfirm.getCorrelationData(), ack);
+			this.confirmCallback.confirm(pendingConfirm.getCorrelationData(), ack, pendingConfirm.getCause());
 		}
 		else {
 			if (logger.isDebugEnabled()) {
@@ -1127,7 +1127,15 @@ public class RabbitTemplate extends RabbitAccessor implements RabbitOperations, 
 	}
 
 	public interface ConfirmCallback {
-		void confirm(CorrelationData correlationData, boolean ack);
+
+		/**
+		 * Confirmation callback.
+		 * @param correlationData Correlation data for the callback.
+		 * @param ack true for ack, false for nack
+		 * @param cause An optional cause, for nack, when available, otherwise null.
+		 */
+		void confirm(CorrelationData correlationData, boolean ack, String cause);
+
 	}
 
 	public interface ReturnCallback {

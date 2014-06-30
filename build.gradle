@@ -11,6 +11,7 @@ buildscript {
 	dependencies {
 		classpath 'org.springframework.build.gradle:docbook-reference-plugin:0.2.6'
 		classpath 'me.champeau.gradle:gradle-javadoc-hotfix-plugin:0.1'
+		classpath 'org.springframework.build.gradle:spring-io-plugin:0.0.3.RELEASE'
 	}
 }
 
@@ -52,6 +53,18 @@ subprojects { subproject ->
 	apply plugin: 'idea'
 	apply plugin: 'project-report'
 
+	if (project.hasProperty('platformVersion')) {
+		apply plugin: 'spring-io'
+
+		repositories {
+			maven { url 'http://repo.spring.io/libs-snapshot' }
+		}
+
+		dependencies {
+			springIoVersions "io.spring.platform:platform-versions:$platformVersion@properties"
+		}
+	}
+
 	// ensure JDK 6 compatibility
 	sourceCompatibility=1.6
 	targetCompatibility=1.6
@@ -66,11 +79,11 @@ subprojects { subproject ->
 		junitVersion = '4.11'
 		log4jVersion = '1.2.17'
 		mockitoVersion = '1.9.5'
-		rabbitmqVersion = '3.2.4'
+		rabbitmqVersion = project.hasProperty('rabbitmqVersion') ? project.rabbitmqVersion : '3.3.4'
 
-		springVersion = project.hasProperty('springVersion') ? project.springVersion : '3.2.8.RELEASE'
+		springVersion = project.hasProperty('springVersion') ? project.springVersion : '4.0.5.RELEASE'
 
-		springRetryVersion = '1.0.3.RELEASE'
+		springRetryVersion = '1.1.0.RELEASE'
 	}
 
 	eclipse {
@@ -88,15 +101,14 @@ subprojects { subproject ->
 	// dependencies that are common across all java projects
 	dependencies {
 		testCompile "cglib:cglib-nodep:$cglibVersion"
-		testCompile "junit:junit-dep:$junitVersion"
-		testCompile ("log4j:log4j:$log4jVersion") {
-			exclude group: 'javax.jms', module: 'jms'
-			exclude group: 'com.sun.jdmk', module: 'jmxtools'
-			exclude group: 'com.sun.jmx', module: 'jmxri'
+		testCompile ("junit:junit:$junitVersion") {
+			exclude group: 'org.hamcrest'
 		}
-
+		testCompile "log4j:log4j:$log4jVersion"
 		testCompile "org.hamcrest:hamcrest-all:$hamcrestVersion"
-		testCompile "org.mockito:mockito-all:$mockitoVersion"
+		testCompile ("org.mockito:mockito-core:$mockitoVersion") {
+			exclude group: 'org.hamcrest'
+		}
 		testCompile "org.springframework:spring-test:$springVersion"
 
 		jacoco group: "org.jacoco", name: "org.jacoco.agent", version: "0.5.6.201201232323", classifier: "runtime"
@@ -105,29 +117,6 @@ subprojects { subproject ->
 	// enable all compiler warnings; individual projects may customize further
 	ext.xLintArg = '-Xlint:all,-options'
 	[compileJava, compileTestJava]*.options*.compilerArgs = [xLintArg]
-
-	test {
-		// suppress all console output during testing unless running `gradle -i`
-		logging.captureStandardOutput(LogLevel.INFO)
-		jvmArgs "-javaagent:${configurations.jacoco.asPath}=destfile=${buildDir}/jacoco.exec,includes=org.springframework.*"
-	}
-
-	task testAll() {
-		doFirst {
-			tasks.test.systemProperty 'RUN_LONG_INTEGRATION_TESTS', 'true'
-		}
-		finalizedBy test
-	}
-
-	task sourcesJar(type: Jar) {
-		classifier = 'sources'
-		from sourceSets.main.allJava
-	}
-
-	task javadocJar(type: Jar) {
-		classifier = 'javadoc'
-		from javadoc
-	}
 
 	task checkTestConfigs << {
 		def configFiles = []
@@ -147,7 +136,31 @@ subprojects { subproject ->
 		}
 	}
 
-	test.dependsOn checkTestConfigs
+	test {
+		jvmArgs "-javaagent:${configurations.jacoco.asPath}=destfile=${buildDir}/jacoco.exec,includes=org.springframework.*"
+	}
+
+	task testAll(type: Test)
+
+	tasks.withType(Test).all {
+		// suppress all console output during testing unless running `gradle -i`
+		logging.captureStandardOutput(LogLevel.INFO)
+		dependsOn checkTestConfigs
+
+		if (name ==~ /(springIo.*)|(testAll)/) {
+			systemProperty 'RUN_LONG_INTEGRATION_TESTS', 'true'
+		}
+	}
+
+	task sourcesJar(type: Jar) {
+		classifier = 'sources'
+		from sourceSets.main.allJava
+	}
+
+	task javadocJar(type: Jar) {
+		classifier = 'javadoc'
+		from javadoc
+	}
 
 	artifacts {
 		archives sourcesJar

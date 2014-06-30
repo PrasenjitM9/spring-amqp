@@ -56,11 +56,13 @@ import com.rabbitmq.client.ShutdownSignalException;
 import com.rabbitmq.utility.Utility;
 
 /**
- * Specialized consumer encapsulating knowledge of the broker connections and having its own lifecycle (start and stop).
+ * Specialized consumer encapsulating knowledge of the broker
+ * connections and having its own lifecycle (start and stop).
  *
  * @author Mark Pollack
  * @author Dave Syer
  * @author Gary Russell
+ * @author Casper Mout
  *
  */
 public class BlockingQueueConsumer {
@@ -117,9 +119,9 @@ public class BlockingQueueConsumer {
 	private long lastRetryDeclaration;
 
 	/**
-	 * Create a consumer. The consumer must not attempt to use the connection factory or communicate with the broker
+	 * Create a consumer. The consumer must not attempt to use
+	 * the connection factory or communicate with the broker
 	 * until it is started. RequeueRejected defaults to true.
-	 *
 	 * @param connectionFactory The connection factory.
 	 * @param messagePropertiesConverter The properties converter.
 	 * @param activeObjectCounter The active object counter; used during shutdown.
@@ -137,9 +139,9 @@ public class BlockingQueueConsumer {
 	}
 
 	/**
-	 * Create a consumer. The consumer must not attempt to use the connection factory or communicate with the broker
+	 * Create a consumer. The consumer must not attempt to use
+	 * the connection factory or communicate with the broker
 	 * until it is started.
-	 *
 	 * @param connectionFactory The connection factory.
 	 * @param messagePropertiesConverter The properties converter.
 	 * @param activeObjectCounter The active object counter; used during shutdown.
@@ -158,9 +160,9 @@ public class BlockingQueueConsumer {
 	}
 
 	/**
-	 * Create a consumer. The consumer must not attempt to use the connection factory or communicate with the broker
+	 * Create a consumer. The consumer must not attempt to use the
+	 * connection factory or communicate with the broker
 	 * until it is started.
-	 *
 	 * @param connectionFactory The connection factory.
 	 * @param messagePropertiesConverter The properties converter.
 	 * @param activeObjectCounter The active object counter; used during shutdown.
@@ -181,9 +183,9 @@ public class BlockingQueueConsumer {
 	}
 
 	/**
-	 * Create a consumer. The consumer must not attempt to use the connection factory or communicate with the broker
+	 * Create a consumer. The consumer must not attempt to use
+	 * the connection factory or communicate with the broker
 	 * until it is started.
-	 *
 	 * @param connectionFactory The connection factory.
 	 * @param messagePropertiesConverter The properties converter.
 	 * @param activeObjectCounter The active object counter; used during shutdown.
@@ -245,9 +247,9 @@ public class BlockingQueueConsumer {
 	}
 
 	/**
-	 * If this is a non-POISON non-null delivery simply return it. If this is POISON we are in shutdown mode, throw
+	 * If this is a non-POISON non-null delivery simply return it.
+	 * If this is POISON we are in shutdown mode, throw
 	 * shutdown. If delivery is null, we may be in shutdown mode. Check and see.
-	 *
 	 * @throws InterruptedException
 	 */
 	private Message handle(Delivery delivery) throws InterruptedException {
@@ -273,7 +275,6 @@ public class BlockingQueueConsumer {
 
 	/**
 	 * Main application-side API: wait for the next message delivery and return it.
-	 *
 	 * @return the next message
 	 * @throws InterruptedException if an interrupt is received while waiting
 	 * @throws ShutdownSignalException if the connection is shut down while waiting
@@ -285,7 +286,6 @@ public class BlockingQueueConsumer {
 
 	/**
 	 * Main application-side API: wait for the next message delivery and return it.
-	 *
 	 * @param timeout timeout in millisecond
 	 * @return the next message or null if timed out
 	 * @throws InterruptedException if an interrupt is received while waiting
@@ -322,14 +322,14 @@ public class BlockingQueueConsumer {
 					try {
 						channel = this.connectionFactory.createConnection().createChannel(false);
 						channel.queueDeclarePassive(queue);
-						if (logger.isDebugEnabled()) {
-							logger.debug("Queue '" + queue + "' is now available");
+						if (logger.isInfoEnabled()) {
+							logger.info("Queue '" + queue + "' is now available");
 						}
 					}
 					catch (IOException e) {
 						available = false;
-						if (logger.isDebugEnabled()) {
-							logger.debug("Queue '" + queue + "' is still not available");
+						if (logger.isWarnEnabled()) {
+							logger.warn("Queue '" + queue + "' is still not available");
 						}
 					}
 					finally {
@@ -337,7 +337,9 @@ public class BlockingQueueConsumer {
 							try {
 								channel.close();
 							}
-							catch (IOException e) {}
+							catch (IOException e) {
+								//Ignore it
+							}
 						}
 					}
 					if (available) {
@@ -374,12 +376,10 @@ public class BlockingQueueConsumer {
 		int passiveDeclareTries = 3;
 		do {
 			try {
-				if (!acknowledgeMode.isAutoAck()) {
-					// Set basicQos before calling basicConsume (otherwise if we are not acking the broker
-					// will send blocks of 100 messages)
-					channel.basicQos(prefetchCount);
-				}
 				attemptPassiveDeclarations();
+				if (passiveDeclareTries < 3 && logger.isInfoEnabled()) {
+					logger.info("Queue declaration succeeded after retrying");
+				}
 				passiveDeclareTries = 0;
 			}
 			catch (DeclarationException e) {
@@ -404,21 +404,30 @@ public class BlockingQueueConsumer {
 				}
 				else {
 					this.activeObjectCounter.release(this);
-					throw new FatalListenerStartupException("Cannot prepare queue for listener. "
+					throw new QueuesNotAvailableException("Cannot prepare queue for listener. "
 							+ "Either the queue doesn't exist or the broker will not allow us to use it.", e);
 				}
+			}
+		}
+		while (passiveDeclareTries-- > 0);
+
+		if (!acknowledgeMode.isAutoAck()) {
+			// Set basicQos before calling basicConsume (otherwise if we are not acking the broker
+			// will send blocks of 100 messages)
+			try {
+				channel.basicQos(prefetchCount);
 			}
 			catch (IOException e) {
 				this.activeObjectCounter.release(this);
 				throw new FatalListenerStartupException("Cannot set basicQos.", e);
 			}
 		}
-		while (passiveDeclareTries-- > 0);
+
 
 		try {
-			for (int i = 0; i < queues.length; i++) {
-				if (!this.missingQueues.contains(this.queues[i])) {
-					consumeFromQueue(this.queues[i]);
+			for (String queueName : queues) {
+				if (!this.missingQueues.contains(queueName)) {
+					consumeFromQueue(queueName);
 				}
 			}
 		}
@@ -437,18 +446,18 @@ public class BlockingQueueConsumer {
 
 	private void attemptPassiveDeclarations() {
 		DeclarationException failures = null;
-		for (int i = 0; i < this.queues.length; i++) {
+		for (String queueName : this.queues) {
 			try {
-				this.channel.queueDeclarePassive(this.queues[i]);
+				this.channel.queueDeclarePassive(queueName);
 			}
 			catch (IOException e) {
 				if (logger.isWarnEnabled()) {
-					logger.warn("Failed to declare queue:" + this.queues[i]);
+					logger.warn("Failed to declare queue:" + queueName);
 				}
 				if (failures == null) {
 					failures = new DeclarationException();
 				}
-				failures.addFailedQueue(this.queues[i]);
+				failures.addFailedQueue(queueName);
 			}
 		}
 		if (failures != null) {
@@ -675,7 +684,6 @@ public class BlockingQueueConsumer {
 
 	/**
 	 * Perform a commit or message acknowledgement, as appropriate.
-	 *
 	 * @param locallyTransacted Whether the channel is locally transacted.
 	 * @throws IOException Any IOException.
 	 * @return true if at least one delivery tag exists.
@@ -701,12 +709,8 @@ public class BlockingQueueConsumer {
 					}
 
 				} else {
-
-					if (!deliveryTags.isEmpty()) {
-						long deliveryTag = new ArrayList<Long>(deliveryTags).get(deliveryTags.size() - 1);
-						channel.basicAck(deliveryTag, true);
-					}
-
+					long deliveryTag = new ArrayList<Long>(deliveryTags).get(deliveryTags.size() - 1);
+					channel.basicAck(deliveryTag, true);
 				}
 			}
 

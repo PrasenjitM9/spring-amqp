@@ -1,5 +1,5 @@
 /*
- * Copyright 2010-2013 the original author or authors.
+ * Copyright 2010-2014 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except in compliance with
  * the License. You may obtain a copy of the License at
@@ -13,12 +13,20 @@
 
 package org.springframework.amqp.rabbit.core;
 
+import static org.hamcrest.Matchers.containsString;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNull;
+import static org.junit.Assert.assertThat;
 import static org.junit.Assert.assertTrue;
+import static org.junit.Assert.fail;
+import static org.mockito.Matchers.any;
 import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.spy;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import java.util.ArrayList;
@@ -29,22 +37,27 @@ import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.UUID;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 
+import org.apache.commons.logging.Log;
 import org.junit.After;
 import org.junit.Before;
 import org.junit.Rule;
 import org.junit.Test;
 import org.mockito.invocation.InvocationOnMock;
 import org.mockito.stubbing.Answer;
+
 import org.springframework.amqp.core.Message;
 import org.springframework.amqp.core.MessageProperties;
 import org.springframework.amqp.rabbit.connection.CachingConnectionFactory;
+import org.springframework.amqp.rabbit.connection.ChannelProxy;
 import org.springframework.amqp.rabbit.connection.SingleConnectionFactory;
 import org.springframework.amqp.rabbit.core.RabbitTemplate.ConfirmCallback;
 import org.springframework.amqp.rabbit.core.RabbitTemplate.ReturnCallback;
@@ -53,11 +66,13 @@ import org.springframework.amqp.rabbit.support.PublisherCallbackChannelImpl;
 import org.springframework.amqp.rabbit.test.BrokerRunning;
 import org.springframework.amqp.rabbit.test.BrokerTestUtils;
 import org.springframework.amqp.support.converter.SimpleMessageConverter;
+import org.springframework.amqp.utils.test.TestUtils;
 import org.springframework.beans.DirectFieldAccessor;
 
 import com.rabbitmq.client.Channel;
 import com.rabbitmq.client.Connection;
 import com.rabbitmq.client.ConnectionFactory;
+import com.rabbitmq.client.Consumer;
 
 /**
  * @author Gary Russell
@@ -82,9 +97,11 @@ public class RabbitTemplatePublisherCallbacksIntegrationTests {
 	@Before
 	public void create() {
 		connectionFactory = new CachingConnectionFactory();
+		connectionFactory.setHost("localhost");
 		connectionFactory.setChannelCacheSize(1);
 		connectionFactory.setPort(BrokerTestUtils.getPort());
 		connectionFactoryWithConfirmsEnabled = new CachingConnectionFactory();
+		connectionFactoryWithConfirmsEnabled.setHost("localhost");
 		// When using publisher confirms, the cache size needs to be large enough
 		// otherwise channels can be closed before confirms are received.
 		connectionFactoryWithConfirmsEnabled.setChannelCacheSize(10);
@@ -92,6 +109,7 @@ public class RabbitTemplatePublisherCallbacksIntegrationTests {
 		connectionFactoryWithConfirmsEnabled.setPublisherConfirms(true);
 		templateWithConfirmsEnabled = new RabbitTemplate(connectionFactoryWithConfirmsEnabled);
 		connectionFactoryWithReturnsEnabled = new CachingConnectionFactory();
+		connectionFactoryWithReturnsEnabled.setHost("localhost");
 		connectionFactoryWithReturnsEnabled.setChannelCacheSize(1);
 		connectionFactoryWithReturnsEnabled.setPort(BrokerTestUtils.getPort());
 		connectionFactoryWithReturnsEnabled.setPublisherReturns(true);
@@ -118,16 +136,38 @@ public class RabbitTemplatePublisherCallbacksIntegrationTests {
 
 	@Test
 	public void testPublisherConfirmReceived() throws Exception {
-		final CountDownLatch latch = new CountDownLatch(1);
+		final CountDownLatch latch = new CountDownLatch(10);
 		templateWithConfirmsEnabled.setConfirmCallback(new ConfirmCallback() {
 
-			public void confirm(CorrelationData correlationData, boolean ack) {
+			@Override
+			public void confirm(CorrelationData correlationData, boolean ack, String cause) {
 				latch.countDown();
 			}
 		});
-		templateWithConfirmsEnabled.convertAndSend(ROUTE, (Object) "message", new CorrelationData("abc"));
-		assertTrue(latch.await(1000, TimeUnit.MILLISECONDS));
+		for (int i = 0; i < 10; i++) {
+			templateWithConfirmsEnabled.convertAndSend(ROUTE, (Object) "message", new CorrelationData("abc"));
+		}
+		assertTrue(latch.await(10, TimeUnit.SECONDS));
 		assertNull(templateWithConfirmsEnabled.getUnconfirmed(0));
+		this.templateWithConfirmsEnabled.execute(new ChannelCallback<Void>() {
+
+			@Override
+			public Void doInRabbit(Channel channel) throws Exception {
+				Map<?,?> listenerMap = TestUtils.getPropertyValue(((ChannelProxy) channel).getTargetChannel(), "listenerForSeq",
+																Map.class);
+				int n = 0;
+				while (n++ < 100 && listenerMap.size() > 0) {
+					Thread.sleep(100);
+				}
+				assertEquals(0, listenerMap.size());
+				return null;
+			}
+		});
+
+		Log logger = spy(TestUtils.getPropertyValue(connectionFactoryWithConfirmsEnabled, "logger", Log.class));
+		new DirectFieldAccessor(connectionFactoryWithConfirmsEnabled).setPropertyValue("logger", logger);
+		cleanUp();
+		verify(logger, never()).error(any());
 	}
 
 	@Test
@@ -135,7 +175,8 @@ public class RabbitTemplatePublisherCallbacksIntegrationTests {
 		final CountDownLatch latch = new CountDownLatch(2);
 		templateWithConfirmsEnabled.setConfirmCallback(new ConfirmCallback() {
 
-			public void confirm(CorrelationData correlationData, boolean ack) {
+			@Override
+			public void confirm(CorrelationData correlationData, boolean ack, String cause) {
 				latch.countDown();
 			}
 		});
@@ -145,8 +186,10 @@ public class RabbitTemplatePublisherCallbacksIntegrationTests {
 		//Thread 1
 		Executors.newSingleThreadExecutor().execute(new Runnable() {
 
+			@Override
 			public void run() {
 				templateWithConfirmsEnabled.execute(new ChannelCallback<Object>() {
+					@Override
 					public Object doInRabbit(Channel channel) throws Exception {
 						try {
 							threadLatch.await(10, TimeUnit.SECONDS);
@@ -175,7 +218,8 @@ public class RabbitTemplatePublisherCallbacksIntegrationTests {
 		final CountDownLatch latch2 = new CountDownLatch(1);
 		templateWithConfirmsEnabled.setConfirmCallback(new ConfirmCallback() {
 
-			public void confirm(CorrelationData correlationData, boolean ack) {
+			@Override
+			public void confirm(CorrelationData correlationData, boolean ack, String cause) {
 				latch1.countDown();
 			}
 		});
@@ -183,13 +227,14 @@ public class RabbitTemplatePublisherCallbacksIntegrationTests {
 		RabbitTemplate secondTemplate = new RabbitTemplate(connectionFactoryWithConfirmsEnabled);
 		secondTemplate.setConfirmCallback(new ConfirmCallback() {
 
-			public void confirm(CorrelationData correlationData, boolean ack) {
+			@Override
+			public void confirm(CorrelationData correlationData, boolean ack, String cause) {
 				latch2.countDown();
 			}
 		});
 		secondTemplate.convertAndSend(ROUTE, (Object) "message", new CorrelationData("def"));
-		assertTrue(latch1.await(1000, TimeUnit.MILLISECONDS));
-		assertTrue(latch2.await(1000, TimeUnit.MILLISECONDS));
+		assertTrue(latch1.await(10, TimeUnit.SECONDS));
+		assertTrue(latch2.await(10, TimeUnit.SECONDS));
 		assertNull(templateWithConfirmsEnabled.getUnconfirmed(0));
 		assertNull(secondTemplate.getUnconfirmed(0));
 	}
@@ -199,6 +244,7 @@ public class RabbitTemplatePublisherCallbacksIntegrationTests {
 		final CountDownLatch latch = new CountDownLatch(1);
 		final List<Message> returns = new ArrayList<Message>();
 		templateWithReturnsEnabled.setReturnCallback(new ReturnCallback() {
+			@Override
 			public void returnedMessage(Message message, int replyCode,
 					String replyText, String exchange, String routingKey) {
 				returns.add(message);
@@ -221,14 +267,15 @@ public class RabbitTemplatePublisherCallbacksIntegrationTests {
 
 		when(mockConnectionFactory.newConnection((ExecutorService) null)).thenReturn(mockConnection);
 		when(mockConnection.isOpen()).thenReturn(true);
-		when(mockConnection.createChannel()).thenReturn(new PublisherCallbackChannelImpl(mockChannel));
+		doReturn(new PublisherCallbackChannelImpl(mockChannel)).when(mockConnection).createChannel();
 
 		final RabbitTemplate template = new RabbitTemplate(new SingleConnectionFactory(mockConnectionFactory));
 
 		final AtomicBoolean confirmed = new AtomicBoolean();
 		template.setConfirmCallback(new ConfirmCallback() {
 
-			public void confirm(CorrelationData correlationData, boolean ack) {
+			@Override
+			public void confirm(CorrelationData correlationData, boolean ack, String cause) {
 				confirmed.set(true);
 			}
 		});
@@ -257,7 +304,8 @@ public class RabbitTemplatePublisherCallbacksIntegrationTests {
 		final AtomicBoolean confirmed = new AtomicBoolean();
 		template.setConfirmCallback(new ConfirmCallback() {
 
-			public void confirm(CorrelationData correlationData, boolean ack) {
+			@Override
+			public void confirm(CorrelationData correlationData, boolean ack, String cause) {
 				confirmed.set(true);
 			}
 		});
@@ -268,8 +316,10 @@ public class RabbitTemplatePublisherCallbacksIntegrationTests {
 		//Thread 1
 		Executors.newSingleThreadExecutor().execute(new Runnable() {
 
+			@Override
 			public void run() {
 				template.execute(new ChannelCallback<Object>() {
+					@Override
 					public Object doInRabbit(Channel channel) throws Exception {
 						try {
 							threadLatch.await(10, TimeUnit.SECONDS);
@@ -317,10 +367,11 @@ public class RabbitTemplatePublisherCallbacksIntegrationTests {
 
 		when(mockConnectionFactory.newConnection((ExecutorService) null)).thenReturn(mockConnection);
 		when(mockConnection.isOpen()).thenReturn(true);
-		when(mockConnection.createChannel()).thenReturn(new PublisherCallbackChannelImpl(mockChannel));
+		doReturn(new PublisherCallbackChannelImpl(mockChannel)).when(mockConnection).createChannel();
 
 		final AtomicInteger count = new AtomicInteger();
 		doAnswer(new Answer<Object>(){
+			@Override
 			public Object answer(InvocationOnMock invocation) throws Throwable {
 				return count.incrementAndGet();
 			}}).when(mockChannel).getNextPublishSeqNo();
@@ -330,7 +381,8 @@ public class RabbitTemplatePublisherCallbacksIntegrationTests {
 		final AtomicBoolean confirmed = new AtomicBoolean();
 		template.setConfirmCallback(new ConfirmCallback() {
 
-			public void confirm(CorrelationData correlationData, boolean ack) {
+			@Override
+			public void confirm(CorrelationData correlationData, boolean ack, String cause) {
 				confirmed.set(true);
 			}
 		});
@@ -361,6 +413,7 @@ public class RabbitTemplatePublisherCallbacksIntegrationTests {
 
 		final AtomicInteger count = new AtomicInteger();
 		doAnswer(new Answer<Object>(){
+			@Override
 			public Object answer(InvocationOnMock invocation) throws Throwable {
 				return count.incrementAndGet();
 			}}).when(mockChannel).getNextPublishSeqNo();
@@ -371,7 +424,8 @@ public class RabbitTemplatePublisherCallbacksIntegrationTests {
 		final CountDownLatch latch = new CountDownLatch(2);
 		template.setConfirmCallback(new ConfirmCallback() {
 
-			public void confirm(CorrelationData correlationData, boolean ack) {
+			@Override
+			public void confirm(CorrelationData correlationData, boolean ack, String cause) {
 				if (ack) {
 					confirms.add(correlationData.getId());
 					latch.countDown();
@@ -404,6 +458,7 @@ public class RabbitTemplatePublisherCallbacksIntegrationTests {
 
 		final AtomicInteger count = new AtomicInteger();
 		doAnswer(new Answer<Object>(){
+			@Override
 			public Object answer(InvocationOnMock invocation) throws Throwable {
 				return count.incrementAndGet();
 			}}).when(mockChannel).getNextPublishSeqNo();
@@ -414,7 +469,8 @@ public class RabbitTemplatePublisherCallbacksIntegrationTests {
 		final CountDownLatch latch1 = new CountDownLatch(1);
 		template1.setConfirmCallback(new ConfirmCallback() {
 
-			public void confirm(CorrelationData correlationData, boolean ack) {
+			@Override
+			public void confirm(CorrelationData correlationData, boolean ack, String cause) {
 				if (ack) {
 					confirms.add(correlationData.getId() + "1");
 					latch1.countDown();
@@ -426,7 +482,8 @@ public class RabbitTemplatePublisherCallbacksIntegrationTests {
 		final CountDownLatch latch2 = new CountDownLatch(1);
 		template2.setConfirmCallback(new ConfirmCallback() {
 
-			public void confirm(CorrelationData correlationData, boolean ack) {
+			@Override
+			public void confirm(CorrelationData correlationData, boolean ack, String cause) {
 				if (ack) {
 					confirms.add(correlationData.getId() + "2");
 					latch2.countDown();
@@ -455,6 +512,7 @@ public class RabbitTemplatePublisherCallbacksIntegrationTests {
 	 * time as adding a new pending ack to the map. Test verifies we don't
 	 * get a {@link ConcurrentModificationException}.
 	 */
+	@SuppressWarnings({ "rawtypes", "unchecked", "deprecation" })
 	@Test
 	public void testConcurrentConfirms() throws Exception {
 		ConnectionFactory mockConnectionFactory = mock(ConnectionFactory.class);
@@ -477,7 +535,8 @@ public class RabbitTemplatePublisherCallbacksIntegrationTests {
 		final AtomicInteger acks = new AtomicInteger();
 		template.setConfirmCallback(new ConfirmCallback() {
 
-			public void confirm(CorrelationData correlationData, boolean ack) {
+			@Override
+			public void confirm(CorrelationData correlationData, boolean ack, String cause) {
 				try {
 					startedProcessingMultiAcksLatch.countDown();
 					// delay processing here; ensures thread 2 put would be concurrent
@@ -520,5 +579,96 @@ public class RabbitTemplatePublisherCallbacksIntegrationTests {
 		channel.handleAck(3, false);
 		assertTrue(waitForAll3AcksLatch.await(10, TimeUnit.SECONDS));
 		assertEquals(3, acks.get());
+
+
+		// 3.3.1 client
+		channel.basicConsume("foo", false, (Map) null, (Consumer) null);
+		verify(mockChannel).basicConsume("foo", false, (Map) null, (Consumer) null);
+
+		channel.basicQos(3, false);
+		verify(mockChannel).basicQos(3, false);
+
+		doReturn(true).when(mockChannel).flowBlocked();
+		assertTrue(channel.flowBlocked());
+
+		try {
+			channel.flow(true);
+			fail("Expected exception");
+		}
+		catch (UnsupportedOperationException e) {}
+
+		try {
+			channel.getFlow();
+			fail("Expected exception");
+		}
+		catch (UnsupportedOperationException e) {}
+
+		// 3.2.4 client
+/*
+		try {
+			channel.basicConsume("foo", false, (Map) null, (Consumer) null);
+			fail("Expected exception");
+		}
+		catch (UnsupportedOperationException e) {}
+
+		try {
+			channel.basicQos(3, false);
+			fail("Expected exception");
+		}
+		catch (UnsupportedOperationException e) {}
+
+		try {
+			channel.flowBlocked();
+			fail("Expected exception");
+		}
+		catch (UnsupportedOperationException e) {}
+
+		channel.flow(true);
+		verify(mockChannel).flow(true);
+
+		channel.getFlow();
+		verify(mockChannel).getFlow();
+*/
 	}
+
+	@Test
+	public void testNackForBadExchange() throws Exception {
+		final AtomicBoolean nack = new AtomicBoolean(true);
+		final AtomicReference<CorrelationData> correlation = new AtomicReference<CorrelationData>();
+		final AtomicReference<String> reason = new AtomicReference<String>();
+		final CountDownLatch latch = new CountDownLatch(2);
+		this.templateWithConfirmsEnabled.setConfirmCallback(new ConfirmCallback() {
+
+			@Override
+			public void confirm(CorrelationData correlationData, boolean ack, String cause) {
+				nack.set(ack);
+				correlation.set(correlationData);
+				reason.set(cause);
+				latch.countDown();
+			}
+		});
+		Log logger = spy(TestUtils.getPropertyValue(connectionFactoryWithConfirmsEnabled, "logger", Log.class));
+		new DirectFieldAccessor(connectionFactoryWithConfirmsEnabled).setPropertyValue("logger", logger);
+		final AtomicReference<String> log = new AtomicReference<String>();
+		doAnswer(new Answer<Object>() {
+
+			@Override
+			public Object answer(InvocationOnMock invocation) throws Throwable {
+				log.set((String) invocation.getArguments()[0]);
+				invocation.callRealMethod();
+				latch.countDown();
+				return null;
+			}
+		}).when(logger).error(any());
+
+		CorrelationData correlationData = new CorrelationData("bar");
+		String exchange = UUID.randomUUID().toString();
+		this.templateWithConfirmsEnabled.convertAndSend(exchange, "key", "foo", correlationData);
+		assertTrue(latch.await(10, TimeUnit.SECONDS));
+		assertFalse(nack.get());
+		assertEquals(correlationData.toString(), correlation.get().toString());
+		assertThat(reason.get(), containsString("NOT_FOUND - no exchange '" + exchange));
+		assertThat(log.get(), containsString("NOT_FOUND - no exchange '" + exchange));
+	}
+
 }

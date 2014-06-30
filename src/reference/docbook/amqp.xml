@@ -375,11 +375,11 @@ Connection connection = connectionFactory.createConnection();]]></programlisting
 		  For convenience, Spring AMQP provides the <classname>SimpleRoutingConnectionFactory</classname>,
 		  which gets the current thread-bound <code>lookupKey</code> from the <classname>SimpleResourceHolder</classname>:
 		  <programlisting language="xml"><![CDATA[<bean id="connectionFactory"
-      class="org.springframework.amqp.rabbit.connection.SimpleRoutingConnectionFactory>
+      class="org.springframework.amqp.rabbit.connection.SimpleRoutingConnectionFactory">
 	<property name="targetConnectionFactories">
 		<map>
 			<entry key="#{connectionFactory1.virtualHost}" ref="connectionFactory1"/>
-			<entry key="#{connectionFactory1.virtualHost}" ref="connectionFactory2"/>
+			<entry key="#{connectionFactory2.virtualHost}" ref="connectionFactory2"/>
 		</map>
 	</property>
 </bean>
@@ -493,7 +493,7 @@ public AmqpTemplate rabbitTemplate();
 		return template;
 }]]></programlisting>
 	</section>
-    <section>
+    <section id="template-confirms">
       <title>Publisher Confirms and Returns</title>
       <para>
         The <classname>RabbitTemplate</classname> implementation of <interfacename>AmqpTemplate</interfacename>
@@ -524,10 +524,15 @@ public AmqpTemplate rabbitTemplate();
         by calling <code>setConfirmCallback(ConfirmCallback callback)</code>. The callback
         must implement this method:
       </para>
-      <programlisting language="java"><![CDATA[void confirm(CorrelationData correlationData, boolean ack);]]></programlisting>
+      <programlisting language="java"><![CDATA[void confirm(CorrelationData correlationData, boolean ack, String cause);]]></programlisting>
       <para>
         The <classname>CorrelationData</classname> is an object supplied by the client when sending the
-        original message. This is described further in the next section.
+        original message. This is described further in the next section. The <code>ack</code> is true for
+        an <code>ack</code> and false for a <code>nack</code>. For <code>nack</code>s, the cause may
+        contain a reason for the nack, if it is available when the <code>nack</code> is generated. An example
+        is when sending a message to a non-existent exchange. In that case the broker closes the channel; the
+        reason for the closure is included in the <code>cause</code>. <code>cause</code> was added in
+        <emphasis>version 1.4</emphasis>.
       </para>
       <para>
         Only one <interfacename>ConfirmCallback</interfacename> is supported by a
@@ -734,19 +739,20 @@ public static MessagePropertiesBuilder fromClonedProperties(MessageProperties pr
     <para>Message reception is always a bit more complicated than sending. The
     reason is that there are two ways to receive a
     <classname>Message</classname>. The simpler option is to poll for a single
-    <classname>Message</classname> at a time with a synchronous, blocking
+    <classname>Message</classname> at a time with a polling
     method call. The more complicated yet more common approach is to register
     a listener that will receive <classname>Messages</classname> on-demand,
     asynchronously. We will look at an example of each approach in the next
     two sub-sections.</para>
 
     <section>
-      <title>Synchronous Consumer</title>
+      <title>Polling Consumer</title>
 
       <para>The <interfacename>AmqpTemplate</interfacename> itself can be used
-      for synchronous Message reception. There are two 'receive' methods
+      for polled Message reception. If no message is available, <code>null</code> is returned
+      immediately; there is no blocking. There are two simple 'receive' methods
       available. As with the Exchange on the sending side, there is a method
-      that requires a queue property having been set directly on the template
+      that requires a default queue property having been set directly on the template
       itself, and there is a method that accepts a queue parameter at
       runtime.</para>
 
@@ -1710,7 +1716,6 @@ public class RabbitClientConfiguration extends AbstractStockAppRabbitConfigurati
         The <code>auto-declare</code> attribute is <code>true</code> by default and if the <code>declared-by</code>
         is not supplied (or is empty) then all <classname>RabbitAdmin</classname>s will declare the
         object (as long as the admin's <code>auto-startup</code> attribute is true; the default).
-        <code></code>
       </note>
       <para>
         Similarly, you can use Java-based <code>@Configuration</code> to achieve the same
@@ -1754,7 +1759,7 @@ public Binding binding() {
     </section>
   </section>
 
-  <section>
+  <section id="exception-handling">
     <title>Exception Handling</title>
 
     <para>Many operations with the RabbitMQ Java client can throw checked
@@ -1765,15 +1770,40 @@ public Binding binding() {
     'org.springframework.amqp' package, and AmqpException is the base of the
     hierarchy.</para>
 
-    <para>If you are using a
-    <classname>SimpleMessageListenerContainer</classname> you will also be
-    able to inject a Spring <classname>ErrorHandler</classname> instance that
-    can be used to react to an exception in the listener. The
-    <classname>ErrorHandler</classname> can influence whether or not
-    the errant message is requeued by throwing a
-    <classname>AmqpRejectAndDontRequeueException</classname>. See
-    <xref linkend="async-listeners" /> for more information about this
-    exception.</para>
+    <para>
+      When a listener throws an exception, it is wrapped in a
+      <classname>ListenerExecutionFailedException</classname> and, normally the message
+      is rejected and requeued by the broker. Setting <code>defaultRequeueRejected</code>
+      to false will cause messages to be discarded (or routed to a dead letter exchange).
+      As discussed in <xref linkend="async-listeners"/>, the listener can throw an
+      <classname>AmqpRejectAndDontRequeueException</classname> to conditionally control
+      this behavior.
+    </para>
+    <para>
+      However, there is a class of errors where the listener cannot control the behavior.
+      When a message that cannot be converted is encountered (for example an invalid
+      <code>content_encoding</code> header), the <classname>MessageConversionException</classname>
+      is thrown before the message reaches user code. With <code>defaultRequeueRejected</code>
+      set to <code>true</code> (default), such messages would be redelivered over and over.
+      Before <emphasis>version 1.3.2</emphasis>,
+      users needed to write a custom <interface>ErrorHandler</interface>, as discussed
+      in <xref linkend="exception-handling"/> to avoid this situation.
+    </para>
+    <para>
+      Starting with <emphasis>version 1.3.2</emphasis>, the default
+      <interfacename>ErrorHandler</interfacename> is now a
+      <classname>ConditionalRejectingErrorHandler</classname> which will reject (and not
+      requeue) messages that fail with a <classname>MessageConversionException</classname>.
+      An instance of this error handler can be configured with a
+      <interfacename>FatalExceptionStrategy</interfacename> so users can provide
+      their own rules for conditional message rejection, e.g. a delegate implementation to the
+	  <classname>BinaryExceptionClassifier</classname> from Spring Retry (<xref linkend="async-listeners"/>).
+      In addition, the <classname>ListenerExecutionFailedException</classname> now has a
+      <code>failedMessage</code> property which can be used in the decision.
+      If the <code>FatalExceptionStrategy.isFatal()</code> method returns <code>true</code>,
+      the error handler throws an <classname>AmqpRejectAndDontRequeueException</classname>.
+      The default <interface>FatalExceptionStrategy</interface> logs a warning message.
+    </para>
   </section>
 
   <section>
@@ -2106,7 +2136,8 @@ public RabbitTransactionManager rabbitTransactionManager() {
 
               <entry>A reference to an ErrorHandler strategy for handling any
               uncaught Exceptions that may occur during the execution of the
-              MessageListener.</entry>
+              MessageListener.
+              Default: <classname>ConditionalRejectingErrorHandler</classname></entry>
             </row>
 
             <row>
@@ -2219,6 +2250,35 @@ public RabbitTransactionManager rabbitTransactionManager() {
               <code>auto-startup</code> to <code>false</code> on the admin.
               Defaults to a <classname>RabbitAdmin</classname> that
               will declare all non-conditional elements.</entry>
+            </row>
+            <row>
+              <entry><literallayout>missingQueuesFatal
+(missing-queues-fatal)</literallayout></entry>
+
+              <entry><para>Starting with <emphasis>version 1.3.5</emphasis>,
+              <classname>SimpleMessageListenerContainer</classname> has this new
+              property.</para>
+              <para>When set to <code>true</code> (default), if none of the configured
+              queues are available on the broker, it is considered fatal. This causes
+              the application context to fail to initialize during startup; also, when the queues
+              are deleted while the container is running, the consumers make 3 attempts
+              to connect to the queues (at 5 second intervals) and stop the container
+              if these attempts fail.</para>
+              <para>This was not configurable in previous versions.</para>
+              <para>When set to <code>false</code>, after making the 3 attempts, the container
+              will go into recovery mode, as with other problems, such as the broker being
+              down. The container will attempt to recover according to the <code>recoveryInterval</code>
+              property. During each recovery attempt, each consumer will again try 3 times
+              to passively declare the queues at 5 second intervals. This process will
+              continue indefinitely.</para>
+              <para>You can also use a properties bean to set the property
+              globally for all containers, as follows:</para>
+              <programlisting language="xml"><![CDATA[<util:properties id="spring.amqp.global.properties">
+    <prop key="smlc.missing.queues.fatal">false</prop>
+</util:properties>]]></programlisting>
+              <para>This global property will not be applied to any containers that have an explicit
+              <code>missingQueuesFatal</code> property set.</para>
+              </entry>
             </row>
           </tbody>
         </tgroup>
