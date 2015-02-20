@@ -1,5 +1,5 @@
 /*
- * Copyright 2002-2014 the original author or authors.
+ * Copyright 2002-2015 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,8 +16,10 @@
 
 package org.springframework.amqp.rabbit.listener;
 
+import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collection;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
@@ -26,6 +28,8 @@ import java.util.concurrent.CopyOnWriteArrayList;
 import org.springframework.amqp.core.AcknowledgeMode;
 import org.springframework.amqp.core.Message;
 import org.springframework.amqp.core.MessageListener;
+import org.springframework.amqp.core.MessagePostProcessor;
+import org.springframework.amqp.core.MessageProperties;
 import org.springframework.amqp.core.Queue;
 import org.springframework.amqp.rabbit.connection.AbstractRoutingConnectionFactory;
 import org.springframework.amqp.rabbit.connection.Connection;
@@ -37,7 +41,9 @@ import org.springframework.amqp.rabbit.connection.RabbitUtils;
 import org.springframework.amqp.rabbit.core.ChannelAwareMessageListener;
 import org.springframework.amqp.rabbit.listener.exception.FatalListenerExecutionException;
 import org.springframework.amqp.rabbit.listener.exception.ListenerExecutionFailedException;
+import org.springframework.amqp.support.converter.MessageConversionException;
 import org.springframework.amqp.support.converter.MessageConverter;
+import org.springframework.amqp.support.postprocessor.MessagePostProcessorUtils;
 import org.springframework.beans.factory.BeanNameAware;
 import org.springframework.beans.factory.DisposableBean;
 import org.springframework.context.ApplicationContext;
@@ -58,6 +64,8 @@ import com.rabbitmq.client.Channel;
  */
 public abstract class AbstractMessageListenerContainer extends RabbitAccessor
 		implements MessageListenerContainer, ApplicationContextAware, BeanNameAware, DisposableBean, SmartLifecycle {
+
+	public static final boolean DEFAULT_DEBATCHING_ENABLED = true;
 
 	private volatile String beanName;
 
@@ -83,7 +91,11 @@ public abstract class AbstractMessageListenerContainer extends RabbitAccessor
 
 	private volatile AcknowledgeMode acknowledgeMode = AcknowledgeMode.AUTO;
 
-	private boolean initialized;
+	private volatile boolean deBatchingEnabled = DEFAULT_DEBATCHING_ENABLED;
+
+	private volatile boolean initialized;
+
+	private Collection<MessagePostProcessor> afterReceivePostProcessors;
 
 	private volatile ApplicationContext applicationContext;
 
@@ -296,6 +308,27 @@ public abstract class AbstractMessageListenerContainer extends RabbitAccessor
 	@Override
 	public MessageConverter getMessageConverter() {
 		return messageConverter;
+	}
+
+	/**
+	 * Determine whether or not the container should de-batch batched
+	 * messages (true) or call the listener with the batch (false). Default: true.
+	 * @param deBatchingEnabled the deBatchingEnabled to set.
+	 */
+	public void setDeBatchingEnabled(boolean deBatchingEnabled) {
+		this.deBatchingEnabled = deBatchingEnabled;
+	}
+
+	/**
+	 * Set {@link MessagePostProcessor}s that will be applied after message reception, before
+	 * invoking the {@link MessageListener}. Often used to decompress data.  Processors are invoked in order,
+	 * depending on {@code PriorityOrder}, {@code Order} and finally unordered.
+	 * @param afterReceivePostProcessors the post processor.
+	 */
+	public void setAfterReceivePostProcessors(MessagePostProcessor... afterReceivePostProcessors) {
+		Assert.notNull(afterReceivePostProcessors, "'afterReceivePostProcessors' cannot be null");
+		Assert.noNullElements(afterReceivePostProcessors, "'afterReceivePostProcessors' cannot have null elements");
+		this.afterReceivePostProcessors = MessagePostProcessorUtils.sort(Arrays.asList(afterReceivePostProcessors));
 	}
 
 	/**
@@ -583,22 +616,51 @@ public abstract class AbstractMessageListenerContainer extends RabbitAccessor
 	 * Execute the specified listener, committing or rolling back the transaction afterwards (if necessary).
 	 *
 	 * @param channel the Rabbit Channel to operate on
-	 * @param message the received Rabbit Message
+	 * @param messageIn the received Rabbit Message
 	 * @throws Throwable Any Throwable.
 	 *
 	 * @see #invokeListener
 	 * @see #handleListenerException
 	 */
-	protected void executeListener(Channel channel, Message message) throws Throwable {
+	protected void executeListener(Channel channel, Message messageIn) throws Throwable {
 		if (!isRunning()) {
 			if (logger.isWarnEnabled()) {
-				logger.warn("Rejecting received message because the listener container has been stopped: " + message);
+				logger.warn("Rejecting received message because the listener container has been stopped: " + messageIn);
 			}
 			throw new MessageRejectedWhileStoppingException();
 		}
 		try {
-			invokeListener(channel, message);
-		} catch (Throwable ex) {
+			Message message = messageIn;
+			if (this.afterReceivePostProcessors != null) {
+				for (MessagePostProcessor processor : this.afterReceivePostProcessors) {
+					message = processor.postProcessMessage(message);
+				}
+			}
+			Object batchFormat = message.getMessageProperties().getHeaders().get(MessageProperties.SPRING_BATCH_FORMAT);
+			if (MessageProperties.BATCH_FORMAT_LENGTH_HEADER4.equals(batchFormat) && this.deBatchingEnabled) {
+				ByteBuffer byteBuffer = ByteBuffer.wrap(message.getBody());
+				MessageProperties messageProperties = message.getMessageProperties();
+				messageProperties.getHeaders().remove(MessageProperties.SPRING_BATCH_FORMAT);
+				while (byteBuffer.hasRemaining()) {
+					int length = byteBuffer.getInt();
+					if (length < 0 || length > byteBuffer.remaining()) {
+						throw new ListenerExecutionFailedException("Bad batched message received",
+								new MessageConversionException("Insufficient batch data at offset " + byteBuffer.position()),
+										message);
+					}
+					byte[] body = new byte[length];
+					byteBuffer.get(body);
+					messageProperties.setContentLength(length);
+					// Caveat - shared MessageProperties.
+					Message fragment = new Message(body, messageProperties);
+					invokeListener(channel, fragment);
+				}
+			}
+			else {
+				invokeListener(channel, message);
+			}
+		}
+		catch (Exception ex) {
 			handleListenerException(ex);
 			throw ex;
 		}

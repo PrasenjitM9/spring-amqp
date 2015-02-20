@@ -280,6 +280,25 @@
 	    would be most suitable.
 	  </para>
 	</important>
+    <para>
+        It is important to understand that the cache size is (by default) not a limit, but merely the number
+        of channels that can be cached. With a cache size of, say, 10, any number of channels can actually
+        be in use. If more than 10 channels are being used and they are all returned to the cache, 10 will
+        go in the cache; the remainder will be physically closed.
+    </para>
+    <para>
+        Starting with <emphasis>version 1.4.2</emphasis>, the <classname>CachingConnectionFactory</classname>
+        has a property <code>channelCheckoutTimeout</code>. When this property is greater than zero,
+        the <code>channelCacheSize</code> becomes a limit on the number of channels that can be created
+        on a connection. If the limit is reached, calling threads will block until a channel is available
+        or this timeout is reached, in which case a <classname>AmqpTimeoutException</classname> is thrown.
+    </para>
+    <caution>
+        Channels used within the framework (e.g. <classname>RabbitTemplate</classname>) will be reliably
+        returned to the cache. If you create channels outside of the framework, (e.g. by accessing
+        the connection(s) directly and invoking <code>createChannel()</code>), you must return them (by closing)
+        reliably, perhaps in a <code>finally</code> block, to avoid running out of channels.
+    </caution>
 
     <programlisting language="java"><![CDATA[CachingConnectionFactory connectionFactory = new CachingConnectionFactory("somehost");
 connectionFactory.setUsername("guest");
@@ -1376,7 +1395,7 @@ public Message<OrderStatus> processOrder(Order order) {
     </section>
   </section>
 
-  <section>
+  <section id="message-converters">
     <title>Message Converters</title>
 
     <para>The <interfacename>AmqpTemplate</interfacename> also defines several
@@ -1575,6 +1594,26 @@ Object receiveAndConvert(String queueName) throws AmqpException;]]></programlist
     </property>
 </bean>]]></programlisting>
     </sect2>
+      <sect2>
+          <title>ContentTypeDelegatingMessageConverter</title>
+
+          <para>
+              This class was introduced in <emphasis>version 1.4.2</emphasis> and allows delegation
+              to a specific <interfacename>MessageConverter</interfacename> based on the content type
+              property in the <classname>MessageProperties</classname>. By default, it will delegate
+              to a <classname>SimpleMessageConverter</classname> if there is no <code>contentType</code>
+              property, or a value that matches none of the configured converters.
+          </para>
+
+          <programlisting language="xml"><![CDATA[<bean id="contentTypeConverter" class="ContentTypeDelegatingMessageConverter">
+    <property name="delegates">
+        <map>
+            <entry key="application/json" value-ref="jsonMessageConverter" />
+            <entry key="application/xml" value-ref="xmlMessageConverter" />
+        </map>
+    </property>
+</bean>]]></programlisting>
+      </sect2>
   </section>
 
   <section id="request-reply">
@@ -1591,7 +1630,8 @@ Object receiveAndConvert(String queueName) throws AmqpException;]]></programlist
     is applied to both the request and reply. Those methods are named <methodname>convertSendAndReceive</methodname>.
     See the Javadoc of <classname>AmqpTemplate</classname> for more detail.</para>
     <para>
-    By default, a new temporary queue is used for each reply. However, a single reply queue can be configured on the template,
+    By default, a new temporary queue is used for each reply (but see <xref linkend="direct-reply-to" />).
+    However, a single reply queue can be configured on the template,
     which can be more efficient, and also allows you to set arguments on that queue. In this case, however,
     you must also provide a &lt;reply-listener/&gt; sub element. This element provides a listener container for the
     reply queue, with the template being the listener. All of the <xref linkend="containerAttributes" /> attributes
@@ -1607,10 +1647,29 @@ Object receiveAndConvert(String queueName) throws AmqpException;]]></programlist
     While the container and template share a connection factory, they do not share a channel and therefore requests
     and replies are not performed within the same transaction (if transactional).
     </para>
+    <section id="direct-reply-to">
+        <title>RabbitMQ Direct reply-to</title>
+        <important>
+        Starting with <emphasis>version 3.4.0</emphasis>, the RabbitMQ server now supports
+        <ulink url="http://www.rabbitmq.com/direct-reply-to.html">Direct reply-to</ulink>; this eliminates the main reason
+        for a fixed reply queue (to avoid the need to create a temporary queue for each request).
+        Starting with <emphasis>Spring AMQP version 1.4.1</emphasis> Direct reply-to will be used by default
+        (if supported by the server) instead of creating temporary reply queues.
+        When no <code>replyQueue</code> is provided (or it is set with the name <code>amq.rabbitmq.reply-to</code>),
+        the <classname>RabbitTemplate</classname> will automatically
+        detect whether Direct reply-to is supported and either use it or fall back to using a temporary reply queue.
+        When using Direct reply-to, a <code>reply-listener</code> is not required and should not be configured.
+        </important>
+        <para>
+        Reply listeners are still supported with named queues (other than <code>amq.rabbitmq.reply-to</code>),
+        allowing control of reply concurrency etc.
+        </para>
+    </section>
     <section>
       <title>Message Correlation With A Reply Queue</title>
       <para>
-      When using a fixed reply queue, it is necessary to provide correlation data so that replies can be correlated
+      When using a fixed reply queue (other than <code>amq.rabbitmq.reply-to</code>),
+      it is necessary to provide correlation data so that replies can be correlated
       to requests. See <ulink url="http://www.rabbitmq.com/tutorials/tutorial-six-java.html">
       RabbitMQ Remote Procedure Call (RPC)</ulink>. By default, the standard <code>correlationId</code> property will
       be used to hold the correlation data. However, if you wish to use a custom propertry to hold correlation
@@ -1632,7 +1691,8 @@ Object receiveAndConvert(String queueName) throws AmqpException;]]></programlist
         the parser defines the container and wires in the template as the listener.
         </para>
         <note>
-        When the template does not use a fixed <code>replyQueue</code>, a listener container is not needed.
+        When the template does not use a fixed <code>replyQueue</code> (or is using Direct reply-to - see
+        <xref linkend="direct-reply-to" />) a listener container is not needed.
         </note>
         <para>
         If you define your <classname>RabbitTemplate</classname> as a <code>&lt;bean/&gt;</code>, or using an
@@ -2682,14 +2742,14 @@ public RabbitTransactionManager rabbitTransactionManager() {
               <para>When set to <code>true</code> (default), if none of the configured
               queues are available on the broker, it is considered fatal. This causes
               the application context to fail to initialize during startup; also, when the queues
-              are deleted while the container is running, the consumers make 3 attempts
+              are deleted while the container is running, by default, the consumers make 3 retries
               to connect to the queues (at 5 second intervals) and stop the container
               if these attempts fail.</para>
               <para>This was not configurable in previous versions.</para>
-              <para>When set to <code>false</code>, after making the 3 attempts, the container
+              <para>When set to <code>false</code>, after making the 3 retries, the container
               will go into recovery mode, as with other problems, such as the broker being
               down. The container will attempt to recover according to the <code>recoveryInterval</code>
-              property. During each recovery attempt, each consumer will again try 3 times
+              property. During each recovery attempt, each consumer will again try 4 times
               to passively declare the queues at 5 second intervals. This process will
               continue indefinitely.</para>
               <para>You can also use a properties bean to set the property
@@ -2699,10 +2759,13 @@ public RabbitTransactionManager rabbitTransactionManager() {
 </util:properties>]]></programlisting>
               <para>This global property will not be applied to any containers that have an explicit
               <code>missingQueuesFatal</code> property set.</para>
+              <para>The default retry properties (3 retries at 5 second intervals)
+              can be overridden using the properties below.</para>
               </entry>
             </row>
 			  <row>
-				  <entry><literallayout>autoDeclare (auto-declare)</literallayout></entry>
+				  <entry><literallayout>autoDeclare
+(auto-declare)</literallayout></entry>
 
 				  <entry><para>Starting with <emphasis>version 1.4</emphasis>,
 					  <classname>SimpleMessageListenerContainer</classname> has this new
@@ -2717,6 +2780,56 @@ public RabbitTransactionManager rabbitTransactionManager() {
 					</para>
 				  </entry>
 			  </row>
+			<row>
+				<entry><literallayout>declarationRetries
+(declaration-retries)</literallayout></entry>
+
+				<entry><para>Starting with <emphasis>versions 1.4.3, 1.3.9</emphasis>,
+					<classname>SimpleMessageListenerContainer</classname> has this new
+					property. The namespace attribute is available in <emphasis>version 1.5.</emphasis></para>
+					<para>
+						The number of retry attempts when passive queue declaration fails. Passive queue
+						declaration occurs when the consumer starts or, when consuming from multiple queues,
+						when not all queues were available during initialization. When none of the configured
+						queues can be passively declared (for any reason) after the retries are exhausted,
+						the container behavior is controlled by the 'missingQueuesFatal` property above.
+						Default: 3 retries (4 attempts).
+					</para>
+				</entry>
+			</row>
+			<row>
+				<entry><literallayout>failedDeclarationRetryInterval
+(failed-declaration-retry-interval)</literallayout></entry>
+
+				<entry><para>Starting with <emphasis>versions 1.4.3, 1.3.9</emphasis>,
+					<classname>SimpleMessageListenerContainer</classname> has this new
+					property. The namespace attribute is available in <emphasis>version 1.5.</emphasis></para>
+					<para>
+						The interval between passive queue declaration retry attempts. Passive queue
+						declaration occurs when the consumer starts or, when consuming from multiple queues,
+						when not all queues were available during initialization. Default: 5000
+						(5 seconds).
+					</para>
+				</entry>
+			</row>
+			<row>
+				<entry><literallayout>retryDeclarationInterval
+(missing-queue-retry-interval)</literallayout></entry>
+
+				<entry><para>Starting with <emphasis>versions 1.4.3, 1.3.9</emphasis>,
+					<classname>SimpleMessageListenerContainer</classname> has this new
+					property. The namespace attribute is available in <emphasis>version 1.5.</emphasis></para>
+					<para>
+						If a subset of the configured queues are available during consumer initialization,
+						the consumer starts consuming from those queues. The consumer will attempt to
+						passively declare the missing queues using this interval. When this interval elapses,
+						the 'declarationRetries' and 'failedDeclarationRetryInterval' will again be used.
+						If there are still missing queues, the consumer will again wait for this
+						interval before trying again. This process will continue indefinitely until
+						all queues are available. Default: 60000 (1 minute).
+					</para>
+				</entry>
+			</row>
           </tbody>
         </tgroup>
       </table></para>

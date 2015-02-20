@@ -1,5 +1,5 @@
 /*
- * Copyright 2002-2014 the original author or authors.
+ * Copyright 2002-2015 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except in compliance with
  * the License. You may obtain a copy of the License at
@@ -15,6 +15,7 @@ package org.springframework.amqp.rabbit.core;
 
 import java.io.IOException;
 import java.io.UnsupportedEncodingException;
+import java.util.Arrays;
 import java.util.Collection;
 import java.util.HashSet;
 import java.util.Iterator;
@@ -56,6 +57,7 @@ import org.springframework.amqp.rabbit.support.RabbitExceptionTranslator;
 import org.springframework.amqp.rabbit.support.ValueExpression;
 import org.springframework.amqp.support.converter.MessageConverter;
 import org.springframework.amqp.support.converter.SimpleMessageConverter;
+import org.springframework.amqp.support.postprocessor.MessagePostProcessorUtils;
 import org.springframework.beans.BeansException;
 import org.springframework.beans.factory.BeanFactory;
 import org.springframework.beans.factory.BeanFactoryAware;
@@ -177,6 +179,14 @@ public class RabbitTemplate extends RabbitAccessor
 
 	private volatile Expression receiveConnectionFactorySelectorExpression;
 
+	private volatile boolean usingFastReplyTo;
+
+	private volatile boolean evaluatedFastReplyTo;
+
+	private volatile Collection<MessagePostProcessor> beforePublishPostProcessors;
+
+	private volatile Collection<MessagePostProcessor> afterReceivePostProcessors;
+
 	/**
 	 * Convenient constructor for use with setter injection. Don't forget to set the connection factory.
 	 */
@@ -244,12 +254,14 @@ public class RabbitTemplate extends RabbitAccessor
 
 	/**
 	 * A queue for replies; if not provided, a temporary exclusive, auto-delete queue will
-	 * be used for each reply.
+	 * be used for each reply, unless RabbitMQ supports 'amq.rabbitmq.reply-to' - see
+	 * http://www.rabbitmq.com/direct-reply-to.html
 	 *
 	 * @param replyQueue the replyQueue to set
 	 */
 	public void setReplyQueue(Queue replyQueue) {
 		this.replyQueue = replyQueue;
+		this.evaluatedFastReplyTo = false;
 	}
 
 	/**
@@ -421,6 +433,33 @@ public class RabbitTemplate extends RabbitAccessor
 	}
 
 	/**
+	 * Set {@link MessagePostProcessor}s that will be invoked immediately before invoking
+	 * {@code Channel#basicPublish()}, after all other processing, except creating the
+	 * {@link BasicProperties} from {@link MessageProperties}. May be used for operations
+	 * such as compression. Processors are invoked in order, depending on {@code PriorityOrder},
+	 * {@code Order} and finally unordered.
+	 * @param beforePublishPostProcessors the post processor.
+	 */
+	public void setBeforePublishPostProcessors(MessagePostProcessor... beforePublishPostProcessors) {
+		Assert.notNull(beforePublishPostProcessors, "'beforePublishPostProcessors' cannot be null");
+		Assert.noNullElements(beforePublishPostProcessors, "'beforePublishPostProcessors' cannot have null elements");
+		this.beforePublishPostProcessors = MessagePostProcessorUtils.sort(Arrays.asList(beforePublishPostProcessors));
+	}
+
+	/**
+	 * Set a {@link MessagePostProcessor} that will be invoked immediately after a {@code Channel#basicGet()}
+	 * and before any message conversion is performed.
+	 * May be used for operations such as decompression  Processors are invoked in order,
+	 * depending on {@code PriorityOrder}, {@code Order} and finally unordered.
+	 * @param afterReceivePostProcessors the post processor.
+	 */
+	public void setAfterReceivePostProcessor(MessagePostProcessor... afterReceivePostProcessors) {
+		Assert.notNull(afterReceivePostProcessors, "'afterReceivePostProcessors' cannot be null");
+		Assert.noNullElements(afterReceivePostProcessors, "'afterReceivePostProcessors' cannot have null elements");
+		this.afterReceivePostProcessors = MessagePostProcessorUtils.sort(Arrays.asList(afterReceivePostProcessors));
+	}
+
+	/**
 	 * Gets unconfirmed correlation data older than age and removes them.
 	 * @param age in milliseconds
 	 * @return the collection of correlation data for which confirms have
@@ -447,6 +486,37 @@ public class RabbitTemplate extends RabbitAccessor
 			}
 		}
 		return unconfirmed.size() > 0 ? unconfirmed : null;
+	}
+
+	private void evaluateFastReplyTo() {
+		this.usingFastReplyTo = false;
+		if (this.replyQueue == null || Address.AMQ_RABBITMQ_REPLY_TO.equals(this.replyQueue.getName())) {
+			try {
+				execute(new ChannelCallback<Void>() {
+
+					@Override
+					public Void doInRabbit(Channel channel) throws Exception {
+						channel.queueDeclarePassive(Address.AMQ_RABBITMQ_REPLY_TO);
+						return null;
+					}
+				});
+				this.usingFastReplyTo = true;
+			}
+			catch (Exception e) {
+				if (replyQueue != null) {
+					logger.error("Broker does not support fast replies via 'amq.rabbitmq.reply-to', temporary "
+							+ "queues will be used:" + e.getMessage() + ".");
+				}
+				else {
+					if (logger.isDebugEnabled()) {
+						logger.debug("Broker does not support fast replies via 'amq.rabbitmq.reply-to', temporary "
+								+ "queues will be used:" + e.getMessage() + ".");
+					}
+				}
+				RabbitTemplate.this.replyQueue = null;
+			}
+		}
+		this.evaluatedFastReplyTo = true;
 	}
 
 	@Override
@@ -813,7 +883,14 @@ public class RabbitTemplate extends RabbitAccessor
 	 * @return the message that is received in reply
 	 */
 	protected Message doSendAndReceive(final String exchange, final String routingKey, final Message message) {
-		if (this.replyQueue == null) {
+		if (!this.evaluatedFastReplyTo) {
+			synchronized(this) {
+				if (!this.evaluatedFastReplyTo) {
+					evaluateFastReplyTo();
+				}
+			}
+		}
+		if (this.replyQueue == null || this.usingFastReplyTo) {
 			return doSendAndReceiveWithTemporary(exchange, routingKey, message);
 		}
 		else {
@@ -830,8 +907,14 @@ public class RabbitTemplate extends RabbitAccessor
 
 				Assert.isNull(message.getMessageProperties().getReplyTo(),
 						"Send-and-receive methods can only be used if the Message does not already have a replyTo property.");
-				DeclareOk queueDeclaration = channel.queueDeclare();
-				String replyTo = queueDeclaration.getQueue();
+				String replyTo;
+				if (RabbitTemplate.this.usingFastReplyTo) {
+					replyTo = Address.AMQ_RABBITMQ_REPLY_TO;
+				}
+				else {
+					DeclareOk queueDeclaration = channel.queueDeclare();
+					replyTo = queueDeclaration.getQueue();
+				}
 				message.getMessageProperties().setReplyTo(replyTo);
 
 				String consumerTag = UUID.randomUUID().toString();
@@ -1008,6 +1091,11 @@ public class RabbitTemplate extends RabbitAccessor
 		if (mandatory) {
 			messageProperties.getHeaders().put(PublisherCallbackChannel.RETURN_CORRELATION, this.uuid);
 		}
+		if (this.beforePublishPostProcessors != null) {
+			for (MessagePostProcessor processor : this.beforePublishPostProcessors) {
+				message = processor.postProcessMessage(message);
+			}
+		}
 		BasicProperties convertedMessageProperties = this.messagePropertiesConverter
 				.fromMessageProperties(messageProperties, encoding);
 		channel.basicPublish(exchange, routingKey, mandatory, convertedMessageProperties, message.getBody());
@@ -1035,7 +1123,13 @@ public class RabbitTemplate extends RabbitAccessor
 		MessageProperties messageProps = this.messagePropertiesConverter.toMessageProperties(
 				response.getProps(), response.getEnvelope(), this.encoding);
 		messageProps.setMessageCount(response.getMessageCount());
-		return new Message(response.getBody(), messageProps);
+		Message message = new Message(response.getBody(), messageProps);
+		if (this.afterReceivePostProcessors != null) {
+			for (MessagePostProcessor processor : this.afterReceivePostProcessors) {
+				message = processor.postProcessMessage(message);
+			}
+		}
+		return message;
 	}
 
 	private MessageConverter getRequiredMessageConverter() throws IllegalStateException {

@@ -1,5 +1,5 @@
 /*
- * Copyright 2002-2014 the original author or authors.
+ * Copyright 2002-2015 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except in compliance with
  * the License. You may obtain a copy of the License at
@@ -28,9 +28,12 @@ import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.Semaphore;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 import org.springframework.amqp.AmqpException;
+import org.springframework.amqp.AmqpTimeoutException;
 import org.springframework.amqp.rabbit.support.PublisherCallbackChannel;
 import org.springframework.amqp.rabbit.support.PublisherCallbackChannelImpl;
 import org.springframework.beans.factory.InitializingBean;
@@ -47,23 +50,21 @@ import com.rabbitmq.client.ShutdownSignalException;
  * returns the same Connection from all {@link #createConnection()}
  * calls, and ignores calls to {@link com.rabbitmq.client.Connection#close()} and caches
  * {@link com.rabbitmq.client.Channel}.
- *
  * <p>
  * By default, only one Channel will be cached, with further requested Channels being created and disposed on demand.
  * Consider raising the {@link #setChannelCacheSize(int) "channelCacheSize" value} in case of a high-concurrency
  * environment.
- *
  * <p>
- * When the cache mode is {@link CacheMode#CONNECTION}, a new (or cached) connection is used for each request. In this case,
- * no channels are cached, just connections. The intended use case is a dedicated connection for long-lived
- * channels, such as those used in listener container threads. In those cases, the channel must be closed
- * anyway in order to re-queue any un-acked messages.
+ * When the cache mode is {@link CacheMode#CONNECTION}, a new (or cached) connection is used for each {@link #createConnection()};
+ * connections are cached according to the {@link #setConnectionCacheSize(int) "connectionCacheSize" value}.
+ * Both connections and channels are cached in this mode.
  * <p>
  * <b>{@link CacheMode#CONNECTION} is not compatible with a Rabbit Admin that auto-declares queues etc.</b>
  * <p>
- * <b>NOTE: This ConnectionFactory requires explicit closing of all Channels obtained form its shared Connection.</b>
+ * <b>NOTE: This ConnectionFactory requires explicit closing of all Channels obtained form its Connection(s).</b>
  * This is the usual recommendation for native Rabbit access code anyway. However, with this ConnectionFactory, its use
- * is mandatory in order to actually allow for Channel reuse.
+ * is mandatory in order to actually allow for Channel reuse. {@link Channel#close()} returns the channel to the
+ * cache, if there is room, or physically closes the channel otherwise.
  *
  * @author Mark Pollack
  * @author Mark Fisher
@@ -79,12 +80,10 @@ public class CachingConnectionFactory extends AbstractConnectionFactory implemen
 		 */
 		CHANNEL,
 		/**
-		 * Cache connections - no channel caching
+		 * Cache connections and channels within each connection
 		 */
 		CONNECTION
 	}
-
-	private volatile CacheMode cacheMode = CacheMode.CHANNEL;
 
 	private final Set<ChannelCachingConnectionProxy> openConnections = new HashSet<ChannelCachingConnectionProxy>();
 
@@ -95,6 +94,12 @@ public class CachingConnectionFactory extends AbstractConnectionFactory implemen
 			openConnectionTransactionalChannels = new HashMap<ChannelCachingConnectionProxy, LinkedList<ChannelProxy>>();
 
 	private final BlockingQueue<ChannelCachingConnectionProxy> idleConnections = new LinkedBlockingQueue<ChannelCachingConnectionProxy>();
+
+	private final Map<Connection, Semaphore> checkoutPermits = new HashMap<Connection, Semaphore>();
+
+	private volatile long channelCheckoutTimeout = 0;
+
+	private volatile CacheMode cacheMode = CacheMode.CHANNEL;
 
 	private volatile int channelCacheSize = 1;
 
@@ -132,7 +137,6 @@ public class CachingConnectionFactory extends AbstractConnectionFactory implemen
 	/**
 	 * Create a new CachingConnectionFactory given a host name
 	 * and port.
-	 *
 	 * @param hostname the host name to connect to
 	 * @param port the port number
 	 */
@@ -148,7 +152,6 @@ public class CachingConnectionFactory extends AbstractConnectionFactory implemen
 	/**
 	 * Create a new CachingConnectionFactory given a port on the hostname returned from
 	 * InetAddress.getLocalHost(), or "localhost" if getLocalHost() throws an exception.
-	 *
 	 * @param port the port number
 	 */
 	public CachingConnectionFactory(int port) {
@@ -157,7 +160,6 @@ public class CachingConnectionFactory extends AbstractConnectionFactory implemen
 
 	/**
 	 * Create a new CachingConnectionFactory given a host name.
-	 *
 	 * @param hostname the host name to connect to
 	 */
 	public CachingConnectionFactory(String hostname) {
@@ -166,13 +168,19 @@ public class CachingConnectionFactory extends AbstractConnectionFactory implemen
 
 	/**
 	 * Create a new CachingConnectionFactory for the given target ConnectionFactory.
-	 *
 	 * @param rabbitConnectionFactory the target ConnectionFactory
 	 */
 	public CachingConnectionFactory(com.rabbitmq.client.ConnectionFactory rabbitConnectionFactory) {
 		super(rabbitConnectionFactory);
 	}
 
+	/**
+	 * The number of channels to maintain in the cache. By default, channels are allocated on
+	 * demand (unbounded) and this represents the maximum cache size. To limit the available
+	 * channels, see {@link #setChannelCheckoutTimeout(long)}.
+	 * @param sessionCacheSize the channel cache size.
+	 * @see #setChannelCheckoutTimeout(long)
+	 */
 	public void setChannelCacheSize(int sessionCacheSize) {
 		Assert.isTrue(sessionCacheSize >= 1, "Channel cache size must be 1 or higher");
 		this.channelCacheSize = sessionCacheSize;
@@ -192,8 +200,13 @@ public class CachingConnectionFactory extends AbstractConnectionFactory implemen
 		this.cacheMode = cacheMode;
 	}
 
+	@Deprecated
 	public int getConnectionCachesize() {
-		return connectionCacheSize;
+		return getConnectionCacheSize();
+	}
+
+	public int getConnectionCacheSize() {
+		return this.connectionCacheSize;
 	}
 
 	public void setConnectionCacheSize(int connectionCacheSize) {
@@ -202,11 +215,11 @@ public class CachingConnectionFactory extends AbstractConnectionFactory implemen
 	}
 
 	public boolean isPublisherConfirms() {
-		return publisherConfirms;
+		return this.publisherConfirms;
 	}
 
 	public boolean isPublisherReturns() {
-		return publisherReturns;
+		return this.publisherReturns;
 	}
 
 	public void setPublisherReturns(boolean publisherReturns) {
@@ -217,11 +230,25 @@ public class CachingConnectionFactory extends AbstractConnectionFactory implemen
 		this.publisherConfirms = publisherConfirms;
 	}
 
+	/**
+	 * Sets the channel checkout timeout. When greater than 0, enables channel limiting
+	 * in that the {@link #channelCacheSize} becomes the total number of available channels per
+	 * connection rather than a simple cache size. Note that changing the {@link #channelCacheSize}
+	 * does not affect the limit on existing connection(s), invoke {@link #destroy()} to cause a
+	 * new connection to be created with the new limit.
+	 * @param channelCheckoutTimeout the timeout in milliseconds; default 0 (channel limiting not enabled).
+	 * @since 1.4.2
+	 */
+	public void setChannelCheckoutTimeout(long channelCheckoutTimeout) {
+		this.channelCheckoutTimeout = channelCheckoutTimeout;
+	}
+
 	@Override
 	public void afterPropertiesSet() throws Exception {
 		this.initialized = true;
 		if (this.cacheMode == CacheMode.CHANNEL) {
-			Assert.isTrue(this.connectionCacheSize == 1, "When the cache mode is 'CHANNEL', the connection cache size cannot be configured.");
+			Assert.isTrue(this.connectionCacheSize == 1,
+					"When the cache mode is 'CHANNEL', the connection cache size cannot be configured.");
 		}
 	}
 
@@ -245,12 +272,31 @@ public class CachingConnectionFactory extends AbstractConnectionFactory implemen
 
 	@Override
 	public void shutdownCompleted(ShutdownSignalException cause) {
-		if (!RabbitUtils.isNormalChannelClose(cause)) {
+		if (RabbitUtils.isPassiveDeclarationChannelClose(cause)) {
+			if (logger.isDebugEnabled()) {
+				logger.debug("Channel shutdown: " + cause.getMessage());
+			}
+		}
+		else if (!RabbitUtils.isNormalChannelClose(cause)) {
 			logger.error("Channel shutdown: " + cause.getMessage());
 		}
 	}
 
 	private Channel getChannel(ChannelCachingConnectionProxy connection, boolean transactional) {
+		if (this.channelCheckoutTimeout > 0) {
+			Semaphore checkoutPermits = this.checkoutPermits.get(connection);
+			if (checkoutPermits != null) {
+				try {
+					if (!checkoutPermits.tryAcquire(this.channelCheckoutTimeout, TimeUnit.MILLISECONDS)) {
+						throw new AmqpTimeoutException("No available channels");
+					}
+				}
+				catch (InterruptedException e) {
+					Thread.currentThread().interrupt();
+					throw new AmqpTimeoutException("Interrupted while acquiring a channel", e);
+				}
+			}
+		}
 		LinkedList<ChannelProxy> channelList;
 		if (this.cacheMode == CacheMode.CHANNEL) {
 			channelList = transactional ? this.cachedChannelsTransactional
@@ -335,6 +381,7 @@ public class CachingConnectionFactory extends AbstractConnectionFactory implemen
 				synchronized (this.connectionMonitor) {
 					if (this.connection != null && !this.connection.isOpen()) {
 						this.connection.notifyCloseIfNecessary();
+						this.checkoutPermits.remove(this.connection);
 					}
 					if (this.connection == null || !this.connection.isOpen()) {
 						this.connection = null;
@@ -394,6 +441,7 @@ public class CachingConnectionFactory extends AbstractConnectionFactory implemen
 					this.connection = new ChannelCachingConnectionProxy(super.createBareConnection());
 					// invoke the listener *after* this.connection is assigned
 					getConnectionListener().onCreate(connection);
+					this.checkoutPermits.put(this.connection, new Semaphore(this.channelCacheSize));
 				}
 				return this.connection;
 			}
@@ -410,6 +458,7 @@ public class CachingConnectionFactory extends AbstractConnectionFactory implemen
 							this.openConnections.remove(connection);
 							this.openConnectionNonTransactionalChannels.remove(connection);
 							this.openConnectionTransactionalChannels.remove(connection);
+							this.checkoutPermits.remove(connection);
 							connection = null;
 						}
 					}
@@ -423,6 +472,7 @@ public class CachingConnectionFactory extends AbstractConnectionFactory implemen
 					this.openConnections.add(connection);
 					this.openConnectionNonTransactionalChannels.put(connection, new LinkedList<ChannelProxy>());
 					this.openConnectionTransactionalChannels.put(connection, new LinkedList<ChannelProxy>());
+					this.checkoutPermits.put(connection, new Semaphore(this.channelCacheSize));
 				}
 				else {
 					if (logger.isDebugEnabled()) {
@@ -446,10 +496,12 @@ public class CachingConnectionFactory extends AbstractConnectionFactory implemen
 		synchronized (this.connectionMonitor) {
 			if (connection != null) {
 				this.connection.destroy();
+				this.checkoutPermits.remove(this.connection);
 				this.connection = null;
 			}
 			for (ChannelCachingConnectionProxy connection : this.openConnections) {
 				connection.destroy();
+				this.checkoutPermits.remove(connection);
 			}
 			this.openConnections.clear();
 			this.idleConnections.clear();
@@ -469,7 +521,7 @@ public class CachingConnectionFactory extends AbstractConnectionFactory implemen
 					try {
 						channel.close();
 					}
-					catch (Throwable ex) {
+					catch (Exception ex) {
 						logger.trace("Could not close cached Rabbit Channel", ex);
 					}
 				}
@@ -479,7 +531,8 @@ public class CachingConnectionFactory extends AbstractConnectionFactory implemen
 				for (ChannelProxy channel : txChannels) {
 					try {
 						channel.close();
-					} catch (Throwable ex) {
+					}
+					catch (Exception ex) {
 						logger.trace("Could not close cached Rabbit Channel", ex);
 					}
 				}
@@ -542,6 +595,7 @@ public class CachingConnectionFactory extends AbstractConnectionFactory implemen
 						if (!RabbitUtils.isPhysicalCloseRequired() && this.channelList.size() < getChannelCacheSize()) {
 							logicalClose((ChannelProxy) proxy);
 							// Remain open in the channel list.
+							releasePermit();
 							return null;
 						}
 					}
@@ -549,6 +603,7 @@ public class CachingConnectionFactory extends AbstractConnectionFactory implemen
 
 				// If we get here, we're supposed to shut down.
 				physicalClose();
+				releasePermit();
 				return null;
 			}
 			else if (methodName.equals("getTargetChannel")) {
@@ -587,9 +642,17 @@ public class CachingConnectionFactory extends AbstractConnectionFactory implemen
 			}
 		}
 
+		private void releasePermit() {
+			if (CachingConnectionFactory.this.channelCheckoutTimeout > 0) {
+				Semaphore checkoutPermits = CachingConnectionFactory.this.checkoutPermits.get(this.theConnection);
+				if (checkoutPermits != null) {
+					checkoutPermits.release();
+				}
+			}
+		}
+
 		/**
 		 * GUARDED by channelList
-		 *
 		 * @param proxy the channel to close
 		 */
 		private void logicalClose(ChannelProxy proxy) throws Exception {

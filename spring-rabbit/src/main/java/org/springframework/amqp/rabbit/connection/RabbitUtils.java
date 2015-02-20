@@ -1,5 +1,5 @@
 /*
- * Copyright 2002-2014 the original author or authors.
+ * Copyright 2002-2015 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except in compliance with
  * the License. You may obtain a copy of the License at
@@ -87,7 +87,7 @@ public abstract class RabbitUtils {
 					logger.debug("Unexpected exception on closing RabbitMQ Channel", sig);
 				}
 			}
-			catch (Throwable ex) {
+			catch (Exception ex) {
 				logger.debug("Unexpected exception on closing RabbitMQ Channel", ex);
 			}
 		}
@@ -120,10 +120,8 @@ public abstract class RabbitUtils {
 			return;
 		}
 		try {
-			synchronized(consumerTags) {
-				for (String consumerTag : consumerTags) {
-					channel.basicCancel(consumerTag);
-				}
+			for (String consumerTag : consumerTags) {
+				channel.basicCancel(consumerTag);
 			}
 			if (transactional) {
 				/*
@@ -191,7 +189,16 @@ public abstract class RabbitUtils {
 				&& "OK".equals(((AMQP.Channel.Close) shutdownReason).getReplyText());
 	}
 
-	protected static Object determineShutdownReason(ShutdownSignalException sig) {
+	public static boolean isPassiveDeclarationChannelClose(ShutdownSignalException sig) {
+		Object shutdownReason = determineShutdownReason(sig);
+		return shutdownReason instanceof AMQP.Channel.Close
+				&& AMQP.NOT_FOUND == ((AMQP.Channel.Close) shutdownReason).getReplyCode()
+				&& ((((AMQP.Channel.Close) shutdownReason).getClassId() == 40 // exchange
+					|| ((AMQP.Channel.Close) shutdownReason).getClassId() == 50) // queue
+					&& ((AMQP.Channel.Close) shutdownReason).getMethodId() == 10); // declare
+	}
+
+	public static Object determineShutdownReason(ShutdownSignalException sig) {
 		if (shutDownSignalReasonMethod == null) {
 			return false;
 		}

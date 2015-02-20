@@ -1,5 +1,5 @@
 /*
- * Copyright 2002-2014 the original author or authors.
+ * Copyright 2002-2015 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except in compliance with
  * the License. You may obtain a copy of the License at
@@ -16,7 +16,6 @@ package org.springframework.amqp.rabbit.listener;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Arrays;
-import java.util.Collection;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -26,6 +25,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.BlockingQueue;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -35,6 +35,7 @@ import org.apache.commons.logging.LogFactory;
 
 import org.springframework.amqp.AmqpAuthenticationException;
 import org.springframework.amqp.AmqpException;
+import org.springframework.amqp.AmqpIOException;
 import org.springframework.amqp.AmqpRejectAndDontRequeueException;
 import org.springframework.amqp.core.AcknowledgeMode;
 import org.springframework.amqp.core.Message;
@@ -66,6 +67,7 @@ import com.rabbitmq.utility.Utility;
  * @author Gary Russell
  * @author Casper Mout
  * @author Artem Bilan
+ * @author Alex Panchenko
  */
 public class BlockingQueueConsumer {
 
@@ -108,11 +110,15 @@ public class BlockingQueueConsumer {
 
 	private final boolean defaultRequeuRejected;
 
-	private final Collection<String> consumerTags = Collections.synchronizedSet(new HashSet<String>());
+	private final Map<String, String> consumerTags = new ConcurrentHashMap<String, String>();
 
 	private final Set<String> missingQueues = Collections.synchronizedSet(new HashSet<String>());
 
-	private final long retryDeclarationInterval = 60000;
+	private long retryDeclarationInterval = 60000;
+
+	private long failedDeclarationRetryInterval = 5000;
+
+	private int declarationRetries = 3;
 
 	private long lastRetryDeclaration;
 
@@ -232,25 +238,54 @@ public class BlockingQueueConsumer {
 	public final void setQuiesce(long shutdownTimeout) {
 	}
 
+	/**
+	 * Set the number of retries after passive queue declaration fails.
+	 * @param declarationRetries The number of retries, default 3.
+	 * @see #setFailedDeclarationRetryInterval(long)
+	 * @since 1.3.9
+	 */
+	public void setDeclarationRetries(int declarationRetries) {
+		this.declarationRetries = declarationRetries;
+	}
+
+	/**
+	 * Set the interval between passive queue declaration attempts in milliseconds.
+	 * @param failedDeclarationRetryInterval the interval, default 5000.
+	 * @see #setDeclarationRetries(int)
+	 * @since 1.3.9
+	 */
+	public void setFailedDeclarationRetryInterval(long failedDeclarationRetryInterval) {
+		this.failedDeclarationRetryInterval = failedDeclarationRetryInterval;
+	}
+
+	/**
+	 * When consuming multiple queues, set the interval between declaration attempts when only
+	 * a subset of the queues were available (milliseconds).
+	 * @param retryDeclarationInterval the interval, default 60000.
+	 * @since 1.3.9
+	 */
+	public void setRetryDeclarationInterval(long retryDeclarationInterval) {
+		this.retryDeclarationInterval = retryDeclarationInterval;
+	}
+
 	protected void basicCancel() {
-		try {
-			synchronized (this.consumerTags) {
-				for (String consumerTag : this.consumerTags) {
-					this.channel.basicCancel(consumerTag);
+		for (String consumerTag : this.consumerTags.keySet()) {
+			try {
+				this.channel.basicCancel(consumerTag);
+			}
+			catch (IOException e) {
+				if (logger.isDebugEnabled()) {
+					logger.debug("Error performing 'basicCancel'", e);
 				}
-				this.consumerTags.clear();
+			}
+			catch (AlreadyClosedException e) {
+				if (logger.isTraceEnabled()) {
+					logger.trace(this.channel + " is already closed");
+				}
+				break;
 			}
 		}
-		catch (IOException e) {
-			if (logger.isDebugEnabled()) {
-				logger.debug("Error performing 'basicCancel'", e);
-			}
-		}
-		catch (AlreadyClosedException e) {
-			if (logger.isTraceEnabled()) {
-				logger.trace(this.channel + " is already closed");
-			}
-		}
+		this.consumerTags.clear();
 		this.cancelled.set(true);
 	}
 
@@ -286,6 +321,8 @@ public class BlockingQueueConsumer {
 		MessageProperties messageProperties = this.messagePropertiesConverter.toMessageProperties(
 				delivery.getProperties(), envelope, "UTF-8");
 		messageProperties.setMessageCount(0);
+		messageProperties.setConsumerTag(delivery.getConsumerTag());
+		messageProperties.setConsumerQueue(this.consumerTags.get(delivery.getConsumerTag()));
 		Message message = new Message(body, messageProperties);
 		if (logger.isDebugEnabled()) {
 			logger.debug("Received message: " + message);
@@ -394,21 +431,21 @@ public class BlockingQueueConsumer {
 		this.activeObjectCounter.add(this);
 
 		// mirrored queue might be being moved
-		int passiveDeclareTries = 3;
+		int passiveDeclareRetries = this.declarationRetries;
 		do {
 			try {
 				attemptPassiveDeclarations();
-				if (passiveDeclareTries < 3 && logger.isInfoEnabled()) {
+				if (passiveDeclareRetries < this.declarationRetries && logger.isInfoEnabled()) {
 					logger.info("Queue declaration succeeded after retrying");
 				}
-				passiveDeclareTries = 0;
+				passiveDeclareRetries = 0;
 			}
 			catch (DeclarationException e) {
-				if (passiveDeclareTries > 0 && channel.isOpen()) {
+				if (passiveDeclareRetries > 0 && channel.isOpen()) {
 					if (logger.isWarnEnabled()) {
-						logger.warn("Queue declaration failed; retries left=" + (passiveDeclareTries-1), e);
+						logger.warn("Queue declaration failed; retries left=" + (passiveDeclareRetries), e);
 						try {
-							Thread.sleep(5000);
+							Thread.sleep(this.failedDeclarationRetryInterval);
 						}
 						catch (InterruptedException e1) {
 							Thread.currentThread().interrupt();
@@ -430,7 +467,7 @@ public class BlockingQueueConsumer {
 				}
 			}
 		}
-		while (passiveDeclareTries-- > 0);
+		while (passiveDeclareRetries-- > 0);
 
 		if (!acknowledgeMode.isAutoAck()) {
 			// Set basicQos before calling basicConsume (otherwise if we are not acking the broker
@@ -440,7 +477,7 @@ public class BlockingQueueConsumer {
 			}
 			catch (IOException e) {
 				this.activeObjectCounter.release(this);
-				throw new FatalListenerStartupException("Cannot set basicQos.", e);
+				throw new AmqpIOException(e);
 			}
 		}
 
@@ -458,10 +495,16 @@ public class BlockingQueueConsumer {
 	}
 
 	private void consumeFromQueue(String queue) throws IOException {
-		this.channel.basicConsume(queue, this.acknowledgeMode.isAutoAck(), "", false, this.exclusive,
+		String consumerTag = this.channel.basicConsume(queue, this.acknowledgeMode.isAutoAck(), "", false, this.exclusive,
 				this.consumerArgs, this.consumer);
-		if (logger.isDebugEnabled()) {
-			logger.debug("Started on queue '" + queue + "': " + this);
+		if (consumerTag != null) {
+			this.consumerTags.put(consumerTag, queue);
+			if (logger.isDebugEnabled()) {
+				logger.debug("Started on queue '" + queue + "' with tag " + consumerTag + ": " + this);
+			}
+		}
+		else {
+			logger.error("Null consumer tag received for queue " + queue);
 		}
 	}
 
@@ -475,8 +518,11 @@ public class BlockingQueueConsumer {
 				if (logger.isWarnEnabled()) {
 					logger.warn("Failed to declare queue:" + queueName);
 				}
+				if (!this.channel.isOpen()) {
+					throw new AmqpIOException(e);
+				}
 				if (failures == null) {
-					failures = new DeclarationException();
+					failures = new DeclarationException(e);
 				}
 				failures.addFailedQueue(queueName);
 			}
@@ -491,7 +537,8 @@ public class BlockingQueueConsumer {
 		if (consumer != null && consumer.getChannel() != null && this.consumerTags.size() > 0
 				&& !this.cancelReceived.get()) {
 			try {
-				RabbitUtils.closeMessageConsumer(this.consumer.getChannel(), this.consumerTags, this.transactional);
+				RabbitUtils.closeMessageConsumer(this.consumer.getChannel(), this.consumerTags.keySet(),
+						this.transactional);
 			}
 			catch (Exception e) {
 				if (logger.isDebugEnabled()) {
@@ -517,9 +564,6 @@ public class BlockingQueueConsumer {
 		@Override
 		public void handleConsumeOk(String consumerTag) {
 			super.handleConsumeOk(consumerTag);
-			synchronized(BlockingQueueConsumer.this.consumerTags) {
-				BlockingQueueConsumer.this.consumerTags.add(consumerTag);
-			}
 			if (logger.isDebugEnabled()) {
 				logger.debug("ConsumeOK : " + BlockingQueueConsumer.this);
 			}
@@ -546,9 +590,7 @@ public class BlockingQueueConsumer {
 			if (logger.isWarnEnabled()) {
 				logger.warn("Cancel received for " + consumerTag + "; " + BlockingQueueConsumer.this);
 			}
-			synchronized (BlockingQueueConsumer.this.consumerTags) {
-				BlockingQueueConsumer.this.consumerTags.remove(consumerTag);
-			}
+			BlockingQueueConsumer.this.consumerTags.remove(consumerTag);
 			BlockingQueueConsumer.this.cancelReceived.set(true);
 		}
 
@@ -569,7 +611,7 @@ public class BlockingQueueConsumer {
 				logger.debug("Storing delivery for " + BlockingQueueConsumer.this);
 			}
 			try {
-				queue.put(new Delivery(envelope, properties, body));
+				queue.put(new Delivery(consumerTag, envelope, properties, body));
 			}
 			catch (InterruptedException e) {
 				Thread.currentThread().interrupt();
@@ -583,14 +625,23 @@ public class BlockingQueueConsumer {
 	 */
 	private static class Delivery {
 
+		private final String consumerTag;
+
 		private final Envelope envelope;
+
 		private final AMQP.BasicProperties properties;
+
 		private final byte[] body;
 
-		public Delivery(Envelope envelope, AMQP.BasicProperties properties, byte[] body) {
+		public Delivery(String consumerTag, Envelope envelope, AMQP.BasicProperties properties, byte[] body) {//NOSONAR
+			this.consumerTag = consumerTag;
 			this.envelope = envelope;
 			this.properties = properties;
 			this.body = body;
+		}
+
+		public String getConsumerTag() {
+			return consumerTag;
 		}
 
 		public Envelope getEnvelope() {
@@ -607,10 +658,14 @@ public class BlockingQueueConsumer {
 	}
 
 	@SuppressWarnings("serial")
-	public class DeclarationException extends AmqpException {
+	private static class DeclarationException extends AmqpException {
 
 		public DeclarationException() {
 			super("Failed to declare queue(s):");
+		}
+
+		public DeclarationException(Throwable t) {
+			super("Failed to declare queue(s):", t);
 		}
 
 		private final List<String> failedQueues = new ArrayList<String>();

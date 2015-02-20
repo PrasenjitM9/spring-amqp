@@ -1,5 +1,5 @@
 /*
- * Copyright 2014 the original author or authors.
+ * Copyright 2014-2015 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -73,6 +73,7 @@ import ch.qos.logback.core.Layout;
  * </pre>
  *
  * @author Artem Bilan
+ * @author Gary Russell
  * @since 1.4
  */
 public class AmqpAppender extends AppenderBase<ILoggingEvent> {
@@ -215,7 +216,7 @@ public class AmqpAppender extends AppenderBase<ILoggingEvent> {
 	private TargetLengthBasedClassNameAbbreviator abbreviator;
 
 	public void setRoutingKeyPattern(String routingKeyPattern) {
-		this.routingKeyLayout.setPattern("%nopex" + routingKeyPattern);
+		this.routingKeyLayout.setPattern("%nopex{}" + routingKeyPattern);
 	}
 
 	public String getHost() {
@@ -377,6 +378,8 @@ public class AmqpAppender extends AppenderBase<ILoggingEvent> {
 	@Override
 	public void start() {
 		super.start();
+		this.routingKeyLayout.setPattern(this.routingKeyLayout.getPattern()
+				.replaceAll("%property\\{applicationId\\}", this.applicationId));
 		this.routingKeyLayout.setContext(getContext());
 		this.routingKeyLayout.start();
 		this.locationLayout.setContext(getContext());
@@ -454,6 +457,7 @@ public class AmqpAppender extends AppenderBase<ILoggingEvent> {
 	 * Helper class to actually send LoggingEvents asynchronously.
 	 */
 	protected class EventSender implements Runnable {
+
 		@Override
 		public void run() {
 			try {
@@ -495,14 +499,11 @@ public class AmqpAppender extends AppenderBase<ILoggingEvent> {
 								String.format("%s.%s()[%s]", location[0], location[1], location[2]));
 					}
 					String msgBody;
-					String routingKey;
+					String routingKey = routingKeyLayout.doLayout(logEvent);
 					// Set applicationId, if we're using one
-					if (null != applicationId) {
+					if (applicationId != null) {
 						amqpProps.setAppId(applicationId);
-						logEvent.getLoggerContextVO().getPropertyMap().put(APPLICATION_ID, applicationId);
 					}
-
-					routingKey = routingKeyLayout.doLayout(logEvent);
 
 					if (abbreviator != null && logEvent instanceof LoggingEvent) {
 						((LoggingEvent) logEvent).setLoggerName(abbreviator.abbreviate(name));
@@ -521,7 +522,7 @@ public class AmqpAppender extends AppenderBase<ILoggingEvent> {
 								message = new Message(msgBody.getBytes(AmqpAppender.this.charset), amqpProps);
 							}
 							catch (UnsupportedEncodingException e) {
-								message = new Message(msgBody.getBytes(), amqpProps);
+								message = new Message(msgBody.getBytes(), amqpProps);//NOSONAR (default charset)
 							}
 						}
 
@@ -546,8 +547,8 @@ public class AmqpAppender extends AppenderBase<ILoggingEvent> {
 					}
 				}
 			}
-			catch (Throwable t) {
-				throw new RuntimeException(t.getMessage(), t);
+			catch (InterruptedException e) {
+				Thread.currentThread().interrupt();
 			}
 		}
 	}
@@ -555,7 +556,7 @@ public class AmqpAppender extends AppenderBase<ILoggingEvent> {
 	/**
 	 * Small helper class to encapsulate a LoggingEvent, its MDC properties, and the number of retries.
 	 */
-	protected class Event {
+	protected static class Event {
 
 		final ILoggingEvent event;
 

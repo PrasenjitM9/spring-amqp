@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2011-2014 by the original author(s).
+ * Copyright (c) 2011-2015 by the original author(s).
  *
  * Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except in compliance with
  * the License. You may obtain a copy of the License at
@@ -24,13 +24,11 @@ import java.util.UUID;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.LinkedBlockingQueue;
-import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import org.apache.log4j.AppenderSkeleton;
 import org.apache.log4j.Layout;
 import org.apache.log4j.Level;
-import org.apache.log4j.MDC;
 import org.apache.log4j.PatternLayout;
 import org.apache.log4j.spi.ErrorCode;
 import org.apache.log4j.spi.LocationInfo;
@@ -144,17 +142,12 @@ public class AmqpAppender extends AppenderSkeleton {
 	/**
 	 * Log4J Layout to use to generate routing key.
 	 */
-	private Layout routingKeyLayout = new PatternLayout(routingKeyPattern);
+	private Layout routingKeyLayout;
 
 	/**
 	 * Used to synchronize access to pattern layouts.
 	 */
 	private final Object layoutMutex = new Object();
-
-	/**
-	 * Whether or not we've tried to declare this exchange yet.
-	 */
-	private final AtomicBoolean exchangeDeclared = new AtomicBoolean(false);
 
 	/**
 	 * Configuration arbitrary application ID.
@@ -249,8 +242,6 @@ public class AmqpAppender extends AppenderSkeleton {
 	 */
 	private boolean generateId = false;
 
-	private final AtomicBoolean initializing = new AtomicBoolean();
-
 	public String getHost() {
 		return host;
 	}
@@ -313,7 +304,6 @@ public class AmqpAppender extends AppenderSkeleton {
 
 	public void setRoutingKeyPattern(String routingKeyPattern) {
 		this.routingKeyPattern = routingKeyPattern;
-		this.routingKeyLayout = new PatternLayout(routingKeyPattern);
 	}
 
 	public boolean isDeclareExchange() {
@@ -404,14 +394,18 @@ public class AmqpAppender extends AppenderSkeleton {
 		this.charset = charset;
 	}
 
-	/**
-	 * Submit the required number of senders into the pool.
-	 */
-	protected void startSenders() {
-		senderPool = Executors.newCachedThreadPool();
-		for (int i = 0; i < senderPoolSize; i++) {
-			senderPool.submit(new EventSender());
-		}
+	@Override
+	public void activateOptions() {
+		this.routingKeyLayout = new PatternLayout(this.routingKeyPattern
+				.replaceAll("%X\\{applicationId\\}", this.applicationId));
+		this.connectionFactory = new CachingConnectionFactory();
+		this.connectionFactory.setHost(host);
+		this.connectionFactory.setPort(port);
+		this.connectionFactory.setUsername(username);
+		this.connectionFactory.setPassword(password);
+		this.connectionFactory.setVirtualHost(virtualHost);
+		maybeDeclareExchange();
+		startSenders();
 	}
 
 	/**
@@ -441,26 +435,19 @@ public class AmqpAppender extends AppenderSkeleton {
 		}
 	}
 
+	/**
+	 * Submit the required number of senders into the pool.
+	 */
+	protected void startSenders() {
+		this.senderPool = Executors.newCachedThreadPool();
+		for (int i = 0; i < senderPoolSize; i++) {
+			senderPool.submit(new EventSender());
+		}
+	}
+
 	@Override
 	public void append(LoggingEvent event) {
-		if (null == senderPool && this.initializing.compareAndSet(false, true)) {
-			try {
-				connectionFactory = new CachingConnectionFactory();
-				connectionFactory.setHost(host);
-				connectionFactory.setPort(port);
-				connectionFactory.setUsername(username);
-				connectionFactory.setPassword(password);
-				connectionFactory.setVirtualHost(virtualHost);
-				maybeDeclareExchange();
-				exchangeDeclared.set(true);
-
-				startSenders();
-			}
-			finally {
-				this.initializing.set(false);
-			}
-		}
-		events.add(new Event(event, event.getProperties()));
+		this.events.add(new Event(event, event.getProperties()));
 	}
 
 	@Override
@@ -495,6 +482,7 @@ public class AmqpAppender extends AppenderSkeleton {
 	 * Helper class to actually send LoggingEvents asynchronously.
 	 */
 	protected class EventSender implements Runnable {
+
 		@Override
 		public void run() {
 			try {
@@ -521,7 +509,6 @@ public class AmqpAppender extends AppenderSkeleton {
 					// Set applicationId, if we're using one
 					if (null != applicationId) {
 						amqpProps.setAppId(applicationId);
-						MDC.put(APPLICATION_ID, applicationId);
 					}
 
 					// Set timestamp
@@ -568,7 +555,7 @@ public class AmqpAppender extends AppenderSkeleton {
 							catch (UnsupportedEncodingException e) {/* fall back to default */}
 						}
 						if (message == null) {
-							message = new Message(msgBody.toString().getBytes(), amqpProps);
+							message = new Message(msgBody.toString().getBytes(), amqpProps);//NOSONAR (default charset)
 						}
 						message = postProcessMessageBeforeSend(message, event);
 						rabbitTemplate.send(exchangeName, routingKey, message);
@@ -589,15 +576,10 @@ public class AmqpAppender extends AppenderSkeleton {
 									+ " after " + maxSenderRetries + " retries", e, ErrorCode.WRITE_FAILURE, logEvent);
 						}
 					}
-					finally {
-						if (null != applicationId) {
-							MDC.remove(APPLICATION_ID);
-						}
-					}
 				}
 			}
-			catch (Throwable t) {
-				throw new RuntimeException(t.getMessage(), t);
+			catch (InterruptedException e) {
+				Thread.currentThread().interrupt();
 			}
 		}
 	}
@@ -606,7 +588,7 @@ public class AmqpAppender extends AppenderSkeleton {
 	 * Small helper class to encapsulate a LoggingEvent, its MDC properties, and the number of retries.
 	 */
 	@SuppressWarnings("rawtypes")
-	protected class Event {
+	protected static class Event {
 
 		final LoggingEvent event;
 

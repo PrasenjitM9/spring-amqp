@@ -1,5 +1,5 @@
 /*
- * Copyright 2002-2014 the original author or authors.
+ * Copyright 2002-2015 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,14 +16,18 @@
 
 package org.springframework.amqp.rabbit.listener;
 
-import static org.mockito.Mockito.*;
+import static org.mockito.Matchers.any;
+import static org.mockito.Matchers.anyBoolean;
+import static org.mockito.Matchers.anyMap;
+import static org.mockito.Matchers.anyString;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
 
 import java.io.IOException;
 import java.util.HashSet;
 import java.util.Set;
 
-import com.rabbitmq.client.AMQP;
-import com.rabbitmq.client.Channel;
 import org.junit.Test;
 import org.mockito.Mockito;
 import org.mockito.invocation.InvocationOnMock;
@@ -35,6 +39,10 @@ import org.springframework.amqp.rabbit.connection.Connection;
 import org.springframework.amqp.rabbit.connection.ConnectionFactory;
 import org.springframework.amqp.rabbit.support.DefaultMessagePropertiesConverter;
 import org.springframework.beans.DirectFieldAccessor;
+
+import com.rabbitmq.client.AMQP;
+import com.rabbitmq.client.Channel;
+import com.rabbitmq.client.Consumer;
 
 /**
  * @author Gary Russell
@@ -96,6 +104,7 @@ public class BlockingQueueConsumerTests {
 		testRequeueOrNotDefaultNo(new MessageRejectedWhileStoppingException(), true);
 	}
 
+	@SuppressWarnings("unchecked")
 	@Test
 	public void testPrefetchIsSetOnFailedPassiveDeclaration() throws IOException {
 		ConnectionFactory connectionFactory = mock(ConnectionFactory.class);
@@ -104,6 +113,7 @@ public class BlockingQueueConsumerTests {
 
 		when(connectionFactory.createConnection()).thenReturn(connection);
 		when(connection.createChannel(Mockito.anyBoolean())).thenReturn(channel);
+		when(channel.isOpen()).thenReturn(true);
 		when(channel.queueDeclarePassive(Mockito.anyString()))
 				.then(new Answer<Object>() {
 
@@ -118,11 +128,16 @@ public class BlockingQueueConsumerTests {
 						}
 					}
 				});
+		when(channel.basicConsume(anyString(), anyBoolean(), anyString(), anyBoolean(), anyBoolean(),
+						anyMap(), any(Consumer.class))).thenReturn("consumerTag");
 
 		BlockingQueueConsumer blockingQueueConsumer = new BlockingQueueConsumer(connectionFactory,
 				new DefaultMessagePropertiesConverter(), new ActiveObjectCounter<BlockingQueueConsumer>(),
 				AcknowledgeMode.AUTO, true, 20, "good", "bad");
 
+		blockingQueueConsumer.setDeclarationRetries(1);
+		blockingQueueConsumer.setRetryDeclarationInterval(10);
+		blockingQueueConsumer.setFailedDeclarationRetryInterval(10);
 		blockingQueueConsumer.start();
 
 		verify(channel).basicQos(20);
