@@ -1,5 +1,5 @@
 /*
- * Copyright 2002-2014 the original author or authors.
+ * Copyright 2002-2016 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -13,7 +13,10 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
 package org.springframework.amqp.rabbit.test;
+
+import static org.junit.Assert.fail;
 
 import java.util.HashMap;
 import java.util.Map;
@@ -26,10 +29,13 @@ import org.junit.rules.TestWatcher;
 import org.junit.runner.Description;
 import org.junit.runners.model.Statement;
 
+import org.springframework.amqp.AmqpTimeoutException;
 import org.springframework.amqp.core.Queue;
 import org.springframework.amqp.rabbit.connection.CachingConnectionFactory;
 import org.springframework.amqp.rabbit.core.RabbitAdmin;
 import org.springframework.util.StringUtils;
+
+import com.rabbitmq.http.client.Client;
 
 /**
  * <p>
@@ -75,6 +81,8 @@ public class BrokerRunning extends TestWatcher {
 
 	private final boolean purge;
 
+	private final boolean management;
+
 	private final Queue[] queues;
 
 	private final int DEFAULT_PORT = BrokerTestUtils.getPort();
@@ -119,10 +127,23 @@ public class BrokerRunning extends TestWatcher {
 		return new BrokerRunning(false);
 	}
 
+	/**
+	 * @return a new rule that assumes an existing broker with the management plugin
+	 * @since 1.5
+	 */
+	public static BrokerRunning isBrokerAndManagementRunning() {
+		return new BrokerRunning(true, false, true);
+	}
+
 	private BrokerRunning(boolean assumeOnline, boolean purge, Queue... queues) {
+		this(assumeOnline, purge, false, queues);
+	}
+
+	private BrokerRunning(boolean assumeOnline, boolean purge, boolean management, Queue... queues) {
 		this.assumeOnline = assumeOnline;
 		this.queues = queues;
 		this.purge = purge;
+		this.management = management;
 		setPort(DEFAULT_PORT);
 	}
 
@@ -132,6 +153,10 @@ public class BrokerRunning extends TestWatcher {
 
 	private BrokerRunning(boolean assumeOnline) {
 		this(assumeOnline, new Queue(DEFAULT_QUEUE_NAME));
+	}
+
+	private BrokerRunning(boolean assumeOnline, boolean purge, boolean management) {
+		this(assumeOnline, purge, management, new Queue(DEFAULT_QUEUE_NAME));
 	}
 
 	/**
@@ -198,6 +223,16 @@ public class BrokerRunning extends TestWatcher {
 				Assume.assumeTrue(brokerOffline.get(port));
 			}
 
+			if (this.management) {
+				Client client = new Client("http://localhost:15672/api/", "guest", "guest");
+				if (!client.alivenessTest("/")) {
+					throw new RuntimeException("Aliveness test failed for localhost:15672 guest/quest; "
+							+ "management not available");
+				}
+			}
+		}
+		catch (AmqpTimeoutException e) {
+			fail("Timed out getting connection");
 		}
 		catch (Exception e) {
 			logger.warn("Not executing tests because basic connectivity test failed", e);
@@ -216,6 +251,16 @@ public class BrokerRunning extends TestWatcher {
 
 	private boolean isDefaultQueue(String queue) {
 		return DEFAULT_QUEUE_NAME.equals(queue);
+	}
+
+	public void removeTestQueues() {
+		CachingConnectionFactory connectionFactory = new CachingConnectionFactory();
+		connectionFactory.setHost("localhost");
+		RabbitAdmin admin = new RabbitAdmin(connectionFactory);
+		for (Queue queue : this.queues) {
+			admin.deleteQueue(queue.getName());
+		}
+		connectionFactory.destroy();
 	}
 
 }

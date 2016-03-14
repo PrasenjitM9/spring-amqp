@@ -1,5 +1,5 @@
 /*
- * Copyright 2014 the original author or authors.
+ * Copyright 2014-2016 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -13,6 +13,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
 package org.springframework.amqp.rabbit.core;
 
 import static org.hamcrest.Matchers.containsString;
@@ -24,11 +25,11 @@ import static org.junit.Assert.assertTrue;
 import static org.mockito.Matchers.any;
 import static org.mockito.Matchers.anyString;
 import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
-import static org.mockito.Mockito.when;
 
 import java.io.OutputStream;
 import java.lang.reflect.Method;
@@ -40,6 +41,7 @@ import java.util.concurrent.atomic.AtomicReference;
 import java.util.zip.Deflater;
 
 import org.apache.commons.logging.Log;
+import org.junit.After;
 import org.junit.Before;
 import org.junit.Rule;
 import org.junit.Test;
@@ -95,6 +97,12 @@ public class BatchingRabbitTemplateTests {
 		scheduler = new ThreadPoolTaskScheduler();
 		scheduler.setPoolSize(1);
 		scheduler.initialize();
+	}
+
+	@After
+	public void tearDown() {
+		this.brokerIsRunning.removeTestQueues();
+		this.connectionFactory.destroy();
 	}
 
 	@Test
@@ -314,9 +322,9 @@ public class BatchingRabbitTemplateTests {
 		container.afterPropertiesSet();
 		container.start();
 		Log logger = spy(TestUtils.getPropertyValue(errorHandler, "logger", Log.class));
-		new DirectFieldAccessor(errorHandler).setPropertyValue("logger", logger);
-		when(logger.isWarnEnabled()).thenReturn(true);
+		doReturn(true).when(logger).isWarnEnabled();
 		doAnswer(new DoesNothing()).when(logger).warn(anyString(), any(Throwable.class));
+		new DirectFieldAccessor(errorHandler).setPropertyValue("logger", logger);
 		try {
 			RabbitTemplate template = new RabbitTemplate();
 			template.setConnectionFactory(this.connectionFactory);
@@ -364,7 +372,7 @@ public class BatchingRabbitTemplateTests {
 		gZipPostProcessor.setLevel(Deflater.BEST_COMPRESSION);
 		assertEquals(Deflater.BEST_COMPRESSION, getStreamLevel(gZipPostProcessor));
 		template.setBeforePublishPostProcessors(gZipPostProcessor);
-		template.setAfterReceivePostProcessor(new GUnzipPostProcessor());
+		template.setAfterReceivePostProcessors(new GUnzipPostProcessor());
 		MessageProperties props = new MessageProperties();
 		Message message = new Message("foo".getBytes(), props);
 		template.send("", ROUTE, message);
@@ -400,7 +408,7 @@ public class BatchingRabbitTemplateTests {
 		BatchingRabbitTemplate template = new BatchingRabbitTemplate(batchingStrategy, this.scheduler);
 		template.setConnectionFactory(this.connectionFactory);
 		template.setBeforePublishPostProcessors(new GZipPostProcessor());
-		template.setAfterReceivePostProcessor(new DelegatingDecompressingPostProcessor());
+		template.setAfterReceivePostProcessors(new DelegatingDecompressingPostProcessor());
 		MessageProperties props = new MessageProperties();
 		props.setContentEncoding("foo");
 		Message message = new Message("foo".getBytes(), props);

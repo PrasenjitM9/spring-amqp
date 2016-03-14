@@ -1,5 +1,5 @@
 /*
- * Copyright 2002-2015 the original author or authors.
+ * Copyright 2002-2016 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -31,13 +31,13 @@ import org.springframework.amqp.core.MessageListener;
 import org.springframework.amqp.core.MessagePostProcessor;
 import org.springframework.amqp.core.MessageProperties;
 import org.springframework.amqp.core.Queue;
-import org.springframework.amqp.rabbit.connection.AbstractRoutingConnectionFactory;
 import org.springframework.amqp.rabbit.connection.Connection;
 import org.springframework.amqp.rabbit.connection.ConnectionFactory;
 import org.springframework.amqp.rabbit.connection.ConnectionFactoryUtils;
 import org.springframework.amqp.rabbit.connection.RabbitAccessor;
 import org.springframework.amqp.rabbit.connection.RabbitResourceHolder;
 import org.springframework.amqp.rabbit.connection.RabbitUtils;
+import org.springframework.amqp.rabbit.connection.RoutingConnectionFactory;
 import org.springframework.amqp.rabbit.core.ChannelAwareMessageListener;
 import org.springframework.amqp.rabbit.listener.exception.FatalListenerExecutionException;
 import org.springframework.amqp.rabbit.listener.exception.ListenerExecutionFailedException;
@@ -98,6 +98,8 @@ public abstract class AbstractMessageListenerContainer extends RabbitAccessor
 	private Collection<MessagePostProcessor> afterReceivePostProcessors;
 
 	private volatile ApplicationContext applicationContext;
+
+	private String listenerId;
 
 	/**
 	 * <p>
@@ -324,6 +326,7 @@ public abstract class AbstractMessageListenerContainer extends RabbitAccessor
 	 * invoking the {@link MessageListener}. Often used to decompress data.  Processors are invoked in order,
 	 * depending on {@code PriorityOrder}, {@code Order} and finally unordered.
 	 * @param afterReceivePostProcessors the post processor.
+	 * @since 1.4.2
 	 */
 	public void setAfterReceivePostProcessors(MessagePostProcessor... afterReceivePostProcessors) {
 		Assert.notNull(afterReceivePostProcessors, "'afterReceivePostProcessors' cannot be null");
@@ -390,14 +393,26 @@ public abstract class AbstractMessageListenerContainer extends RabbitAccessor
 	@Override
 	public ConnectionFactory getConnectionFactory() {
 		ConnectionFactory connectionFactory = super.getConnectionFactory();
-		if (connectionFactory instanceof AbstractRoutingConnectionFactory) {
-			ConnectionFactory targetConnectionFactory = ((AbstractRoutingConnectionFactory) connectionFactory)
+		if (connectionFactory instanceof RoutingConnectionFactory) {
+			ConnectionFactory targetConnectionFactory = ((RoutingConnectionFactory) connectionFactory)
 					.getTargetConnectionFactory(this.queueNames.toString().replaceAll(" ", ""));
 			if (targetConnectionFactory != null) {
 				return targetConnectionFactory;
 			}
 		}
 		return connectionFactory;
+	}
+
+	/**
+	 * The 'id' attribute of the listener.
+	 * @return the id (or the container bean name if no id set).
+	 */
+	public String getListenerId() {
+		return this.listenerId != null ? this.listenerId : this.beanName;
+	}
+
+	public void setListenerId(String listenerId) {
+		this.listenerId = listenerId;
 	}
 
 	/**

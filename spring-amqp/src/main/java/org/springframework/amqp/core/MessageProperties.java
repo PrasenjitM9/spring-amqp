@@ -1,14 +1,17 @@
 /*
- * Copyright 2002-2015 the original author or authors.
+ * Copyright 2002-2016 the original author or authors.
  *
- * Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except in compliance with
- * the License. You may obtain a copy of the License at
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
  *
- * http://www.apache.org/licenses/LICENSE-2.0
+ *      http://www.apache.org/licenses/LICENSE-2.0
  *
- * Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on
- * an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the
- * specific language governing permissions and limitations under the License.
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
 
 package org.springframework.amqp.core;
@@ -48,6 +51,7 @@ public class MessageProperties implements Serializable {
 
 	public static final String SPRING_AUTO_DECOMPRESS = "springAutoDecompress";
 
+	public static final String X_DELAY = "x-delay";
 
 	static final String DEFAULT_CONTENT_TYPE = CONTENT_TYPE_BYTES;
 
@@ -70,6 +74,8 @@ public class MessageProperties implements Serializable {
 	private volatile String type;
 
 	private volatile byte[] correlationId;
+
+	private volatile String correlationIdString;
 
 	private volatile String replyTo;
 
@@ -104,6 +110,8 @@ public class MessageProperties implements Serializable {
 	private volatile String consumerTag;
 
 	private volatile String consumerQueue;
+
+	private volatile Integer receivedDelay;
 
 	public void setHeader(String key, Object value) {
 		this.headers.put(key, value);
@@ -173,12 +181,20 @@ public class MessageProperties implements Serializable {
 		return this.type;
 	}
 
-	public void setCorrelationId(byte[] correlationId) {
+	public void setCorrelationId(byte[] correlationId) {//NOSONAR
 		this.correlationId = correlationId;//NOSONAR
 	}
 
 	public byte[] getCorrelationId() {
 		return this.correlationId;//NOSONAR
+	}
+
+	public String getCorrelationIdString() {
+		return correlationIdString;
+	}
+
+	public void setCorrelationIdString(String correlationIdString) {
+		this.correlationIdString = correlationIdString;
 	}
 
 	public void setReplyTo(String replyTo) {
@@ -269,6 +285,27 @@ public class MessageProperties implements Serializable {
 		return this.receivedRoutingKey;
 	}
 
+	/**
+	 * When a delayed message exchange is used the x-delay header on a
+	 * received message contains the delay.
+	 * @return the received delay.
+	 * @since 1.6
+	 * @see #getDelay()
+	 */
+	public Integer getReceivedDelay() {
+		return this.receivedDelay;
+	}
+
+	/**
+	 * When a delayed message exchange is used the x-delay header on a
+	 * received message contains the delay.
+	 * @param receivedDelay the received delay.
+	 * @since 1.6
+	 */
+	public void setReceivedDelay(Integer receivedDelay) {
+		this.receivedDelay = receivedDelay;
+	}
+
 	public void setRedelivered(Boolean redelivered) {
 		this.redelivered = redelivered;
 	}
@@ -319,6 +356,36 @@ public class MessageProperties implements Serializable {
 
 	public void setConsumerQueue(String consumerQueue) {
 		this.consumerQueue = consumerQueue;
+	}
+
+	/**
+	 * The x-delay header (outbound).
+	 * @return the delay.
+	 * @since 1.6
+	 * @see #getReceivedDelay()
+	 */
+	public Integer getDelay() {
+		Object delay = this.headers.get(X_DELAY);
+		if (delay instanceof Integer) {
+			return (Integer) delay;
+		}
+		else {
+			return null;
+		}
+	}
+
+	/**
+	 * Set the x-delay header.
+	 * @param delay the delay.
+	 * @since 1.6
+	 */
+	public void setDelay(Integer delay) {
+		if (delay == null || delay < 0) {
+			this.headers.remove(X_DELAY);
+		}
+		else {
+			this.headers.put(X_DELAY, delay);
+		}
 	}
 
 	@Override

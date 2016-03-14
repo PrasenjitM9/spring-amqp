@@ -1,15 +1,19 @@
 /*
- * Copyright 2002-2014 the original author or authors.
+ * Copyright 2002-2016 the original author or authors.
  *
- * Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except in compliance with
- * the License. You may obtain a copy of the License at
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
  *
- * http://www.apache.org/licenses/LICENSE-2.0
+ *      http://www.apache.org/licenses/LICENSE-2.0
  *
- * Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on
- * an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the
- * specific language governing permissions and limitations under the License.
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
+
 package org.springframework.amqp.rabbit.connection;
 
 import static org.junit.Assert.assertEquals;
@@ -18,6 +22,10 @@ import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
+import static org.mockito.Matchers.anyString;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.spy;
+import static org.mockito.Mockito.verify;
 
 import java.net.ServerSocket;
 import java.net.Socket;
@@ -53,6 +61,7 @@ import org.springframework.amqp.rabbit.core.RabbitTemplate;
 import org.springframework.amqp.rabbit.test.BrokerRunning;
 import org.springframework.amqp.rabbit.test.BrokerTestUtils;
 import org.springframework.amqp.utils.test.TestUtils;
+import org.springframework.beans.DirectFieldAccessor;
 
 import com.rabbitmq.client.Channel;
 import com.rabbitmq.client.DefaultConsumer;
@@ -68,12 +77,14 @@ import com.rabbitmq.client.ShutdownSignalException;
  */
 public class CachingConnectionFactoryIntegrationTests {
 
+	private static final String CF_INTEGRATION_TEST_QUEUE = "cfIntegrationTest";
+
 	private static Log logger = LogFactory.getLog(CachingConnectionFactoryIntegrationTests.class);
 
 	private CachingConnectionFactory connectionFactory;
 
 	@Rule
-	public BrokerRunning brokerIsRunning = BrokerRunning.isRunning();
+	public BrokerRunning brokerIsRunning = BrokerRunning.isRunningWithEmptyQueues(CF_INTEGRATION_TEST_QUEUE);
 
 	@Rule
 	public ExpectedException exception = ExpectedException.none();
@@ -87,6 +98,9 @@ public class CachingConnectionFactoryIntegrationTests {
 
 	@After
 	public void close() {
+		if (!this.connectionFactory.getVirtualHost().equals("non-existent")) {
+			new RabbitAdmin(this.connectionFactory).deleteQueue(CF_INTEGRATION_TEST_QUEUE);
+		}
 		connectionFactory.destroy();
 	}
 
@@ -300,7 +314,7 @@ public class CachingConnectionFactoryIntegrationTests {
 
 		RabbitTemplate template = new RabbitTemplate(connectionFactory);
 		RabbitAdmin admin = new RabbitAdmin(connectionFactory);
-		Queue queue = new Queue("foo");
+		Queue queue = new Queue(CF_INTEGRATION_TEST_QUEUE);
 		admin.declareQueue(queue);
 		final String route = queue.getName();
 
@@ -335,6 +349,16 @@ public class CachingConnectionFactoryIntegrationTests {
 		assertEquals("message", result);
 		result = (String) template.receiveAndConvert(route);
 		assertEquals(null, result);
+	}
+
+	@Test
+	public void testConnectionCloseLog() {
+		Log logger = spy(TestUtils.getPropertyValue(this.connectionFactory, "logger", Log.class));
+		new DirectFieldAccessor(this.connectionFactory).setPropertyValue("logger", logger);
+		Connection conn = this.connectionFactory.createConnection();
+		conn.createChannel(false);
+		this.connectionFactory.destroy();
+		verify(logger, never()).error(anyString());
 	}
 
 	@Test

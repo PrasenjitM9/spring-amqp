@@ -1,15 +1,19 @@
 /*
- * Copyright 2002-2014 the original author or authors.
+ * Copyright 2002-2016 the original author or authors.
  *
- * Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except in compliance with
- * the License. You may obtain a copy of the License at
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
  *
- * http://www.apache.org/licenses/LICENSE-2.0
+ *      http://www.apache.org/licenses/LICENSE-2.0
  *
- * Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on
- * an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the
- * specific language governing permissions and limitations under the License.
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
+
 package org.springframework.amqp.rabbit.connection;
 
 import static org.junit.Assert.assertEquals;
@@ -24,6 +28,7 @@ import static org.mockito.Matchers.anyInt;
 import static org.mockito.Matchers.isNull;
 import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
@@ -32,6 +37,7 @@ import static org.mockito.Mockito.verifyNoMoreInteractions;
 import static org.mockito.Mockito.when;
 
 import java.io.IOException;
+import java.net.URI;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
@@ -43,10 +49,12 @@ import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 
 import org.junit.Test;
+import org.mockito.InOrder;
 import org.mockito.invocation.InvocationOnMock;
 import org.mockito.stubbing.Answer;
 
@@ -65,6 +73,7 @@ import com.rabbitmq.client.GetResponse;
  * @author Dave Syer
  * @author Gary Russell
  * @author Artem Bilan
+ * @author Steve Powell
  */
 public class CachingConnectionFactoryTests extends AbstractConnectionFactoryTests {
 
@@ -74,7 +83,7 @@ public class CachingConnectionFactoryTests extends AbstractConnectionFactoryTest
 	}
 
 	@Test
-	public void testWithConnectionFactoryDefaults() throws IOException {
+	public void testWithConnectionFactoryDefaults() throws Exception {
 		com.rabbitmq.client.ConnectionFactory mockConnectionFactory = mock(com.rabbitmq.client.ConnectionFactory.class);
 		com.rabbitmq.client.Connection mockConnection = mock(com.rabbitmq.client.Connection.class);
 		Channel mockChannel = mock(Channel.class);
@@ -106,15 +115,16 @@ public class CachingConnectionFactoryTests extends AbstractConnectionFactoryTest
 
 	}
 	@Test
-	public void testWithConnectionFactoryCacheSize() throws IOException {
+	public void testWithConnectionFactoryCacheSize() throws Exception {
 		com.rabbitmq.client.ConnectionFactory mockConnectionFactory = mock(com.rabbitmq.client.ConnectionFactory.class);
 		com.rabbitmq.client.Connection mockConnection = mock(com.rabbitmq.client.Connection.class);
 		Channel mockChannel1 = mock(Channel.class);
 		Channel mockChannel2 = mock(Channel.class);
+		Channel mockTxChannel = mock(Channel.class);
 
 		when(mockConnectionFactory.newConnection((ExecutorService) null)).thenReturn(mockConnection);
 		when(mockConnection.isOpen()).thenReturn(true);
-		when(mockConnection.createChannel()).thenReturn(mockChannel1).thenReturn(mockChannel2);
+		when(mockConnection.createChannel()).thenReturn(mockChannel1, mockChannel2, mockTxChannel);
 
 		when(mockChannel1.basicGet("foo", false)).thenReturn(new GetResponse(null, null, null, 1));
 		when(mockChannel2.basicGet("bar", false)).thenReturn(new GetResponse(null, null, null, 1));
@@ -128,6 +138,11 @@ public class CachingConnectionFactoryTests extends AbstractConnectionFactoryTest
 
 		Channel channel1 = con.createChannel(false);
 		Channel channel2 = con.createChannel(false);
+
+		ChannelProxy txChannel = (ChannelProxy) con.createChannel(true);
+		assertTrue(txChannel.isTransactional());
+		verify(mockTxChannel).txSelect();
+		txChannel.close();
 
 		channel1.basicGet("foo", true);
 		channel2.basicGet("bar", true);
@@ -147,7 +162,7 @@ public class CachingConnectionFactoryTests extends AbstractConnectionFactoryTest
 		ch1.close();
 		ch2.close();
 
-		verify(mockConnection, times(2)).createChannel();
+		verify(mockConnection, times(3)).createChannel();
 
 		con.close(); // should be ignored
 
@@ -158,7 +173,7 @@ public class CachingConnectionFactoryTests extends AbstractConnectionFactoryTest
 	}
 
 	@Test
-	public void testCacheSizeExceeded() throws IOException {
+	public void testCacheSizeExceeded() throws Exception {
 		com.rabbitmq.client.ConnectionFactory mockConnectionFactory = mock(com.rabbitmq.client.ConnectionFactory.class);
 		com.rabbitmq.client.Connection mockConnection = mock(com.rabbitmq.client.Connection.class);
 		Channel mockChannel1 = mock(Channel.class);
@@ -214,7 +229,7 @@ public class CachingConnectionFactoryTests extends AbstractConnectionFactoryTest
 	}
 
 	@Test
-	public void testCheckoutLimit() throws IOException {
+	public void testCheckoutLimit() throws Exception {
 		com.rabbitmq.client.ConnectionFactory mockConnectionFactory = mock(com.rabbitmq.client.ConnectionFactory.class);
 		com.rabbitmq.client.Connection mockConnection = mock(com.rabbitmq.client.Connection.class);
 		Channel mockChannel1 = mock(Channel.class);
@@ -298,6 +313,8 @@ public class CachingConnectionFactoryTests extends AbstractConnectionFactoryTest
 				}
 				catch (IOException e) {
 				}
+				catch (TimeoutException e) {
+				}
 			}
 
 		}).start();
@@ -315,7 +332,7 @@ public class CachingConnectionFactoryTests extends AbstractConnectionFactoryTest
 	}
 
 	@Test
-	public void testCacheSizeExceededAfterClose() throws IOException {
+	public void testCacheSizeExceededAfterClose() throws Exception {
 		com.rabbitmq.client.ConnectionFactory mockConnectionFactory = mock(com.rabbitmq.client.ConnectionFactory.class);
 		com.rabbitmq.client.Connection mockConnection = mock(com.rabbitmq.client.Connection.class);
 		Channel mockChannel1 = mock(Channel.class);
@@ -362,7 +379,7 @@ public class CachingConnectionFactoryTests extends AbstractConnectionFactoryTest
 	}
 
 	@Test
-	public void testTransactionalAndNonTransactionalChannelsSegregated() throws IOException {
+	public void testTransactionalAndNonTransactionalChannelsSegregated() throws Exception {
 		com.rabbitmq.client.ConnectionFactory mockConnectionFactory = mock(com.rabbitmq.client.ConnectionFactory.class);
 		com.rabbitmq.client.Connection mockConnection = mock(com.rabbitmq.client.Connection.class);
 		Channel mockChannel1 = mock(Channel.class);
@@ -419,7 +436,7 @@ public class CachingConnectionFactoryTests extends AbstractConnectionFactoryTest
 	}
 
 	@Test
-	public void testWithConnectionFactoryDestroy() throws IOException {
+	public void testWithConnectionFactoryDestroy() throws Exception {
 		com.rabbitmq.client.ConnectionFactory mockConnectionFactory = mock(com.rabbitmq.client.ConnectionFactory.class);
 		com.rabbitmq.client.Connection mockConnection = mock(com.rabbitmq.client.Connection.class);
 
@@ -489,7 +506,7 @@ public class CachingConnectionFactoryTests extends AbstractConnectionFactoryTest
 	}
 
 	@Test
-	public void testWithChannelListener() throws IOException {
+	public void testWithChannelListener() throws Exception {
 
 		com.rabbitmq.client.ConnectionFactory mockConnectionFactory = mock(com.rabbitmq.client.ConnectionFactory.class);
 		com.rabbitmq.client.Connection mockConnection = mock(com.rabbitmq.client.Connection.class);
@@ -530,7 +547,7 @@ public class CachingConnectionFactoryTests extends AbstractConnectionFactoryTest
 	}
 
 	@Test
-	public void testWithConnectionListener() throws IOException {
+	public void testWithConnectionListener() throws Exception {
 
 		com.rabbitmq.client.ConnectionFactory mockConnectionFactory = mock(com.rabbitmq.client.ConnectionFactory.class);
 		com.rabbitmq.client.Connection mockConnection1 = mock(com.rabbitmq.client.Connection.class);
@@ -1080,7 +1097,7 @@ public class CachingConnectionFactoryTests extends AbstractConnectionFactoryTest
 	}
 
 	@Test
-	public void setAddressesEmpty() throws IOException {
+	public void setAddressesEmpty() throws Exception {
 		ConnectionFactory mock = mock(com.rabbitmq.client.ConnectionFactory.class);
 		CachingConnectionFactory ccf = new CachingConnectionFactory(mock);
 		ccf.setHost("abc");
@@ -1092,7 +1109,7 @@ public class CachingConnectionFactoryTests extends AbstractConnectionFactoryTest
 	}
 
 	@Test
-	public void setAddressesOneHost() throws IOException {
+	public void setAddressesOneHost() throws Exception {
 		ConnectionFactory mock = mock(com.rabbitmq.client.ConnectionFactory.class);
 		CachingConnectionFactory ccf = new CachingConnectionFactory(mock);
 		ccf.setAddresses("mq1");
@@ -1102,7 +1119,7 @@ public class CachingConnectionFactoryTests extends AbstractConnectionFactoryTest
 	}
 
 	@Test
-	public void setAddressesTwoHosts() throws IOException {
+	public void setAddressesTwoHosts() throws Exception {
 		ConnectionFactory mock = mock(com.rabbitmq.client.ConnectionFactory.class);
 		CachingConnectionFactory ccf = new CachingConnectionFactory(mock);
 		ccf.setAddresses("mq1,mq2");
@@ -1111,4 +1128,44 @@ public class CachingConnectionFactoryTests extends AbstractConnectionFactoryTest
 				aryEq(new Address[] { new Address("mq1"), new Address("mq2") }));
 		verifyNoMoreInteractions(mock);
 	}
+
+	@Test
+	public void setUri() throws Exception {
+		URI uri = new URI("amqp://localhost:1234/%2f");
+
+		ConnectionFactory mock = mock(com.rabbitmq.client.ConnectionFactory.class);
+		CachingConnectionFactory ccf = new CachingConnectionFactory(mock);
+
+		ccf.setUri(uri);
+		ccf.createConnection();
+
+		InOrder order = inOrder(mock);
+		order.verify(mock).setUri(uri);
+		order.verify(mock).newConnection((ExecutorService)null);
+		verifyNoMoreInteractions(mock);
+	}
+
+	@Test
+	public void testChannelCloseIdempotency() throws Exception {
+		com.rabbitmq.client.ConnectionFactory mockConnectionFactory = mock(com.rabbitmq.client.ConnectionFactory.class);
+		com.rabbitmq.client.Connection mockConnection = mock(com.rabbitmq.client.Connection.class);
+		Channel mockChannel = mock(Channel.class);
+
+		when(mockConnectionFactory.newConnection((ExecutorService) null)).thenReturn(mockConnection);
+		when(mockConnection.isOpen()).thenReturn(true);
+		when(mockConnection.createChannel()).thenReturn(mockChannel);
+		when(mockChannel.isOpen()).thenReturn(true).thenReturn(false);
+
+		CachingConnectionFactory ccf = new CachingConnectionFactory(mockConnectionFactory);
+		Connection con = ccf.createConnection();
+
+		Channel channel = con.createChannel(false);
+//		RabbitUtils.setPhysicalCloseRequired(true);
+		channel.close(); // should be ignored, and placed into channel cache.
+		channel.close(); // physically closed, so remove from the cache.
+		channel.close(); // physically closed and removed from the cache  before, so void "close".
+		Channel channel2 = con.createChannel(false);
+		assertNotSame(channel, channel2);
+	}
+
 }

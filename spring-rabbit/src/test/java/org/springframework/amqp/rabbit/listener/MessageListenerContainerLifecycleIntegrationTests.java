@@ -1,14 +1,17 @@
 /*
- * Copyright 2010-2014 the original author or authors.
+ * Copyright 2002-2016 the original author or authors.
  *
- * Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except in compliance with
- * the License. You may obtain a copy of the License at
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
  *
- * http://www.apache.org/licenses/LICENSE-2.0
+ *      http://www.apache.org/licenses/LICENSE-2.0
  *
- * Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on
- * an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the
- * specific language governing permissions and limitations under the License.
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
 
 package org.springframework.amqp.rabbit.listener;
@@ -32,6 +35,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.apache.log4j.Level;
+import org.junit.After;
 import org.junit.Rule;
 import org.junit.Test;
 import org.mockito.Mockito;
@@ -55,6 +59,10 @@ import org.springframework.amqp.rabbit.test.LongRunningIntegrationTest;
 import org.springframework.amqp.utils.test.TestUtils;
 import org.springframework.beans.DirectFieldAccessor;
 import org.springframework.beans.factory.DisposableBean;
+import org.springframework.context.ConfigurableApplicationContext;
+import org.springframework.context.annotation.AnnotationConfigApplicationContext;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
 
 /**
  * @author Dave Syer
@@ -136,6 +144,11 @@ public class MessageListenerContainerLifecycleIntegrationTests {
 		return template;
 	}
 
+	@After
+	public void tearDown() {
+		this.brokerIsRunning.removeTestQueues();
+	}
+
 	@Test
 	public void testTransactionalLowLevel() throws Exception {
 		doTest(MessageCount.MEDIUM, Concurrency.LOW, TransactionMode.ON);
@@ -192,6 +205,7 @@ public class MessageListenerContainerLifecycleIntegrationTests {
 		catch (Throwable t) {
 			fail("expected FatalListenerStartupException:" + t.getClass() + ":" + t.getMessage());
 		}
+		((DisposableBean) template.getConnectionFactory()).destroy();
 	}
 
 	private void doTest(MessageCount level, Concurrency concurrency, TransactionMode transactionMode) throws Exception {
@@ -406,6 +420,7 @@ public class MessageListenerContainerLifecycleIntegrationTests {
 		assertTrue("awaitConsumeSecond.count=" + awaitConsumeSecond.getCount(),
 				awaitConsumeSecond.await(10, TimeUnit.SECONDS));
 		container.stop();
+		((DisposableBean) template.getConnectionFactory()).destroy();
 	}
 
 	@Test
@@ -445,7 +460,77 @@ public class MessageListenerContainerLifecycleIntegrationTests {
 		}
 		finally {
 			container.stop();
+			connectionFactory.destroy();
 		}
+	}
+
+	// AMQP-496
+	@Test
+	public void testLongLivingConsumerStoppedProperlyAfterContextClose() throws Exception {
+		ConfigurableApplicationContext applicationContext =
+				new AnnotationConfigApplicationContext(LongLiveConsumerConfig.class);
+
+		RabbitTemplate template = createTemplate(1);
+		template.convertAndSend(queue.getName(), "foo");
+
+		CountDownLatch consumerLatch = applicationContext.getBean("consumerLatch", CountDownLatch.class);
+		SimpleMessageListenerContainer container = applicationContext.getBean(SimpleMessageListenerContainer.class);
+
+		assertTrue(consumerLatch.await(10, TimeUnit.SECONDS));
+
+		applicationContext.close();
+
+		@SuppressWarnings("rawtypes")
+		ActiveObjectCounter counter = TestUtils.getPropertyValue(container, "cancellationLock", ActiveObjectCounter.class);
+		assertTrue(counter.getCount() > 0);
+
+		int n = 0;
+		while (counter.getCount() > 0 && n++ < 10) {
+			Thread.sleep(500);
+		}
+		assertTrue(n < 10);
+		((DisposableBean) template.getConnectionFactory()).destroy();
+	}
+
+
+	@Configuration
+	static class LongLiveConsumerConfig {
+
+		@Bean
+		public CountDownLatch consumerLatch() {
+			return new CountDownLatch(1);
+		}
+
+		@Bean
+		public ConnectionFactory connectionFactory() {
+			CachingConnectionFactory connectionFactory = new CachingConnectionFactory();
+			connectionFactory.setHost("localhost");
+			connectionFactory.setPort(BrokerTestUtils.getPort());
+			return connectionFactory;
+		}
+
+		@Bean
+		public SimpleMessageListenerContainer container() {
+			SimpleMessageListenerContainer container = new SimpleMessageListenerContainer(connectionFactory());
+			container.setQueues(queue);
+			container.setMessageListener(new MessageListener() {
+
+				@Override
+				public void onMessage(Message message) {
+					try {
+						consumerLatch().countDown();
+						Thread.sleep(500);
+					}
+					catch (InterruptedException e) {
+						Thread.currentThread().interrupt();
+					}
+				}
+
+			});
+			container.setShutdownTimeout(1);
+			return container;
+		}
+
 	}
 
 	public static class PojoListener {

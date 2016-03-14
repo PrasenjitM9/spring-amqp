@@ -1,14 +1,17 @@
 /*
- * Copyright 2002-2014 the original author or authors.
+ * Copyright 2002-2016 the original author or authors.
  *
- * Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except in compliance with
- * the License. You may obtain a copy of the License at
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
  *
- * http://www.apache.org/licenses/LICENSE-2.0
+ *      http://www.apache.org/licenses/LICENSE-2.0
  *
- * Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on
- * an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the
- * specific language governing permissions and limitations under the License.
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
 
 package org.springframework.amqp.rabbit.listener;
@@ -108,6 +111,7 @@ public class MessageListenerRecoveryCachingConnectionIntegrationTests {
 		if (container != null) {
 			container.shutdown();
 		}
+		this.brokerIsRunning.removeTestQueues();
 	}
 
 	@Test
@@ -138,6 +142,7 @@ public class MessageListenerRecoveryCachingConnectionIntegrationTests {
 		assertEquals("bar", new String(bytes));
 		assertEquals(null, template.receiveAndConvert(queue.getName()));
 
+		this.container.stop();
 		((DisposableBean) connectionFactory).destroy();
 
 	}
@@ -196,6 +201,7 @@ public class MessageListenerRecoveryCachingConnectionIntegrationTests {
 
 		assertNull(template.receiveAndConvert(queue.getName()));
 
+		this.container.stop();
 		((DisposableBean) connectionFactory1).destroy();
 		((DisposableBean) connectionFactory2).destroy();
 	}
@@ -220,6 +226,7 @@ public class MessageListenerRecoveryCachingConnectionIntegrationTests {
 
 		assertNull(template.receiveAndConvert(queue.getName()));
 
+		this.container.stop();
 		((DisposableBean) connectionFactory1).destroy();
 		((DisposableBean) connectionFactory2).destroy();
 	}
@@ -281,6 +288,7 @@ public class MessageListenerRecoveryCachingConnectionIntegrationTests {
 
 		assertNull(template.receiveAndConvert(queue.getName()));
 
+		this.container.stop();
 		((DisposableBean) connectionFactory1).destroy();
 		((DisposableBean) connectionFactory2).destroy();
 
@@ -309,6 +317,7 @@ public class MessageListenerRecoveryCachingConnectionIntegrationTests {
 
 		assertNull(template.receiveAndConvert(queue.getName()));
 
+		this.container.stop();
 		((DisposableBean) connectionFactory).destroy();
 
 	}

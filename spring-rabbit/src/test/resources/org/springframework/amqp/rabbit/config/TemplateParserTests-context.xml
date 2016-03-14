@@ -10,6 +10,8 @@
 					 correlation-key="foo"
 					 encoding="UTF-8" exchange="foo" queue="bar" routing-key="spam" message-converter="converter"
 					 reply-timeout="1000"
+					 use-temporary-reply-queues="true"
+					 receive-timeout="123"
 					 retry-template="retrier"
 					 recovery-callback="recoverer"/>
 
@@ -18,6 +20,7 @@
 	<bean id="converter" class="org.springframework.amqp.support.converter.SerializerMessageConverter"/>
 
 	<rabbit:template id="withReplyQ" connection-factory="connectionFactory" reply-queue="replyQId"
+					 reply-address="reply.queue"
 					 correlation-key="correlationId">
 		<rabbit:reply-listener/>
 	</rabbit:template>

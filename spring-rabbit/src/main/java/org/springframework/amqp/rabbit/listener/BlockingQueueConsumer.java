@@ -1,14 +1,17 @@
 /*
- * Copyright 2002-2015 the original author or authors.
+ * Copyright 2002-2016 the original author or authors.
  *
- * Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except in compliance with
- * the License. You may obtain a copy of the License at
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
  *
- * http://www.apache.org/licenses/LICENSE-2.0
+ *      http://www.apache.org/licenses/LICENSE-2.0
  *
- * Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on
- * an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the
- * specific language governing permissions and limitations under the License.
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
 
 package org.springframework.amqp.rabbit.listener;
@@ -28,6 +31,7 @@ import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 import org.apache.commons.logging.Log;
@@ -40,14 +44,17 @@ import org.springframework.amqp.AmqpRejectAndDontRequeueException;
 import org.springframework.amqp.core.AcknowledgeMode;
 import org.springframework.amqp.core.Message;
 import org.springframework.amqp.core.MessageProperties;
+import org.springframework.amqp.rabbit.connection.ChannelProxy;
 import org.springframework.amqp.rabbit.connection.ConnectionFactory;
 import org.springframework.amqp.rabbit.connection.ConnectionFactoryUtils;
 import org.springframework.amqp.rabbit.connection.RabbitResourceHolder;
 import org.springframework.amqp.rabbit.connection.RabbitUtils;
-import org.springframework.amqp.rabbit.listener.exception.ConsumerCancelledException;
 import org.springframework.amqp.rabbit.listener.exception.FatalListenerStartupException;
+import org.springframework.amqp.rabbit.support.ConsumerCancelledException;
 import org.springframework.amqp.rabbit.support.MessagePropertiesConverter;
 import org.springframework.amqp.rabbit.support.RabbitExceptionTranslator;
+import org.springframework.amqp.support.ConsumerTagStrategy;
+import org.springframework.util.backoff.BackOffExecution;
 
 import com.rabbitmq.client.AMQP;
 import com.rabbitmq.client.AMQP.BasicProperties;
@@ -121,6 +128,10 @@ public class BlockingQueueConsumer {
 	private int declarationRetries = 3;
 
 	private long lastRetryDeclaration;
+
+	private ConsumerTagStrategy tagStrategy;
+
+	private BackOffExecution backOffExecution;
 
 	/**
 	 * Create a consumer. The consumer must not attempt to use
@@ -268,6 +279,28 @@ public class BlockingQueueConsumer {
 		this.retryDeclarationInterval = retryDeclarationInterval;
 	}
 
+	/**
+	 * Set the {@link ConsumerTagStrategy} to use when generating consumer tags.
+	 * @param tagStrategy the tagStrategy to set
+	 * @since 1.4.5
+	 */
+	public void setTagStrategy(ConsumerTagStrategy tagStrategy) {
+		this.tagStrategy = tagStrategy;
+	}
+
+	/**
+	 * Set the {@link BackOffExecution} to use for the recovery in the {@code SimpleMessageListenerContainer}.
+	 * @param backOffExecution the backOffExecution.
+	 * @since 1.5
+	 */
+	public void setBackOffExecution(BackOffExecution backOffExecution) {
+		this.backOffExecution = backOffExecution;
+	}
+
+	public BackOffExecution getBackOffExecution() {
+		return backOffExecution;
+	}
+
 	protected void basicCancel() {
 		for (String consumerTag : this.consumerTags.keySet()) {
 			try {
@@ -398,6 +431,9 @@ public class BlockingQueueConsumer {
 							catch (IOException e) {
 								//Ignore it
 							}
+							catch (TimeoutException e) {
+								//Ignore it
+							}
 						}
 					}
 					if (available) {
@@ -495,7 +531,8 @@ public class BlockingQueueConsumer {
 	}
 
 	private void consumeFromQueue(String queue) throws IOException {
-		String consumerTag = this.channel.basicConsume(queue, this.acknowledgeMode.isAutoAck(), "", false, this.exclusive,
+		String consumerTag = this.channel.basicConsume(queue, this.acknowledgeMode.isAutoAck(),
+				(this.tagStrategy != null ? this.tagStrategy.createConsumerTag(queue) : ""), false, this.exclusive,
 				this.consumerArgs, this.consumer);
 		if (consumerTag != null) {
 			this.consumerTags.put(consumerTag, queue);
@@ -512,7 +549,19 @@ public class BlockingQueueConsumer {
 		DeclarationException failures = null;
 		for (String queueName : this.queues) {
 			try {
-				this.channel.queueDeclarePassive(queueName);
+				try {
+					this.channel.queueDeclarePassive(queueName);
+				}
+				catch (IllegalArgumentException e) {
+					try {
+						if (this.channel instanceof ChannelProxy) {
+							((ChannelProxy) this.channel).getTargetChannel().close();
+						}
+					}
+					catch (TimeoutException e1) {
+					}
+					throw new FatalListenerStartupException("Illegal Argument on Queue Declaration", e);
+				}
 			}
 			catch (IOException e) {
 				if (logger.isWarnEnabled()) {
@@ -557,7 +606,7 @@ public class BlockingQueueConsumer {
 
 	private class InternalConsumer extends DefaultConsumer {
 
-		public InternalConsumer(Channel channel) {
+		private InternalConsumer(Channel channel) {
 			super(channel);
 		}
 
@@ -660,21 +709,21 @@ public class BlockingQueueConsumer {
 	@SuppressWarnings("serial")
 	private static class DeclarationException extends AmqpException {
 
-		public DeclarationException() {
+		private DeclarationException() {
 			super("Failed to declare queue(s):");
 		}
 
-		public DeclarationException(Throwable t) {
+		private DeclarationException(Throwable t) {
 			super("Failed to declare queue(s):", t);
 		}
 
 		private final List<String> failedQueues = new ArrayList<String>();
 
-		void addFailedQueue(String queue) {
+		private void addFailedQueue(String queue) {
 			this.failedQueues.add(queue);
 		}
 
-		public List<String> getFailedQueues() {
+		private List<String> getFailedQueues() {
 			return this.failedQueues;
 		}
 
@@ -774,7 +823,8 @@ public class BlockingQueueConsumer {
 				RabbitUtils.commitIfNecessary(channel);
 			}
 
-		} finally {
+		}
+		finally {
 			deliveryTags.clear();
 		}
 

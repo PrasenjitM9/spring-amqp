@@ -1,37 +1,38 @@
 /*
- * Copyright (c) 2011-2014 by the original author(s).
+ * Copyright 2011-2016 the original author or authors.
  *
- * Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except in compliance with
- * the License. You may obtain a copy of the License at
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
  *
- * http://www.apache.org/licenses/LICENSE-2.0
+ *      http://www.apache.org/licenses/LICENSE-2.0
  *
- * Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on
- * an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the
- * specific language governing permissions and limitations under the License.
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
 
 package org.springframework.amqp.rabbit.log4j;
 
+import static org.hamcrest.Matchers.equalTo;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
+import static org.junit.Assert.assertThat;
 import static org.junit.Assert.assertTrue;
-import static org.junit.Assert.fail;
 
 import java.io.ByteArrayInputStream;
-import java.util.HashMap;
+import java.util.Collection;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicInteger;
 
 import javax.xml.parsers.DocumentBuilderFactory;
 
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
-import org.apache.log4j.Level;
 import org.apache.log4j.Logger;
 import org.apache.log4j.MDC;
-import org.apache.log4j.spi.LoggingEvent;
 import org.junit.After;
 import org.junit.AfterClass;
 import org.junit.Before;
@@ -44,15 +45,15 @@ import org.springframework.amqp.core.MessageDeliveryMode;
 import org.springframework.amqp.core.MessageProperties;
 import org.springframework.amqp.rabbit.listener.SimpleMessageListenerContainer;
 import org.springframework.amqp.rabbit.test.BrokerRunning;
+import org.springframework.amqp.utils.test.TestUtils;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.context.ApplicationContext;
 import org.springframework.test.annotation.DirtiesContext;
 import org.springframework.test.context.ContextConfiguration;
 import org.springframework.test.context.junit4.SpringJUnit4ClassRunner;
-import org.springframework.util.Log4jConfigurer;
 
 /**
- * @author Jon Brisbin <jbrisbin@vmware.com>
+ * @author Jon Brisbin
  * @author Gary Russell
  * @author Gunnar Hillert
  * @author Artem Bilan
@@ -72,9 +73,10 @@ public class AmqpAppenderIntegrationTests {
 
 	private SimpleMessageListenerContainer listenerContainer;
 
+	@SuppressWarnings("deprecation") // SF 4.2.1
 	@Before
 	public void setUp() throws Exception {
-		Log4jConfigurer.initLogging("classpath:log4j-amqp.properties");
+		org.springframework.util.Log4jConfigurer.initLogging("classpath:log4j-amqp.properties");
 		log = Logger.getLogger(getClass());
 		listenerContainer = applicationContext.getBean(SimpleMessageListenerContainer.class);
 	}
@@ -84,9 +86,10 @@ public class AmqpAppenderIntegrationTests {
 		listenerContainer.shutdown();
 	}
 
+	@SuppressWarnings("deprecation")  // SF 4.2.1
 	@AfterClass
 	public static void reset() throws Exception {
-		Log4jConfigurer.initLogging("classpath:log4j.properties");
+		org.springframework.util.Log4jConfigurer.initLogging("classpath:log4j.properties");
 	}
 
 	@Test
@@ -108,6 +111,9 @@ public class AmqpAppenderIntegrationTests {
 
 		assertTrue(testListener.getLatch().await(5, TimeUnit.SECONDS));
 		assertNotNull(testListener.getId());
+
+		assertThat(TestUtils.getPropertyValue(appender, "connectionFactory.connectionListener.delegates",
+						Collection.class).size(), equalTo(1));
 	}
 
 	@Test
@@ -174,12 +180,13 @@ public class AmqpAppenderIntegrationTests {
 	/*
 	 * When running as main(); should shutdown cleanly.
 	 */
+	@SuppressWarnings("deprecation") // SF 4.2.1
 	public static void main(String[] args) throws Exception {
-		Log4jConfigurer.initLogging("classpath:log4j-amqp.properties");
+		org.springframework.util.Log4jConfigurer.initLogging("classpath:log4j-amqp.properties");
 		Log logger = LogFactory.getLog(AmqpAppenderIntegrationTests.class);
 		logger.info("foo");
 		Thread.sleep(1000);
-		Log4jConfigurer.shutdownLogging();
+		org.springframework.util.Log4jConfigurer.shutdownLogging();
 	}
 
 	public static class EnhancedAppender extends AmqpAppender {

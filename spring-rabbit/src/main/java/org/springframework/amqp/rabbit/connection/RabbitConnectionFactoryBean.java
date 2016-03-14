@@ -1,11 +1,11 @@
 /*
- * Copyright 2014 the original author or authors.
+ * Copyright 2002-2016 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- * http://www.apache.org/licenses/LICENSE-2.0
+ *      http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -31,22 +31,30 @@ import javax.net.ssl.KeyManagerFactory;
 import javax.net.ssl.SSLContext;
 import javax.net.ssl.TrustManagerFactory;
 
-import com.rabbitmq.client.ConnectionFactory;
-import com.rabbitmq.client.ExceptionHandler;
-import com.rabbitmq.client.SaslConfig;
-import com.rabbitmq.client.SocketConfigurator;
-
 import org.springframework.beans.factory.config.AbstractFactoryBean;
 import org.springframework.core.io.Resource;
 import org.springframework.core.io.support.PathMatchingResourcePatternResolver;
 import org.springframework.util.Assert;
 import org.springframework.util.StringUtils;
 
+import com.rabbitmq.client.ConnectionFactory;
+import com.rabbitmq.client.ExceptionHandler;
+import com.rabbitmq.client.SaslConfig;
+import com.rabbitmq.client.SocketConfigurator;
+
 
 /**
  * Factory bean to create a RabbitMQ ConnectionFactory, delegating most
  * setter methods and optionally enabling SSL, with or without
- * certificate validation.
+ * certificate validation. When {@link #setSslPropertiesLocation(Resource) sslPropertiesLocation}
+ * is not null, the default implementation loads a {@code PKCS12} keystore and a
+ * {@code JKS} truststore using the supplied properties and intializes {@code SunX509} key
+ * and trust manager factories. These are then used to initialize an {@link SSLContext}
+ * using the {@link #setSslAlgorithm(String) sslAlgorithm} (default TLSv1.1).
+ * <p>
+ * Override {@link #createSSLContext()} to create and/or perform further modification of the context.
+ * <p>
+ * Override {@link #setUpSSL()} to take complete control over setting up SSL.
  *
  * @author Gary Russell
  *
@@ -54,11 +62,35 @@ import org.springframework.util.StringUtils;
  */
 public class RabbitConnectionFactoryBean extends AbstractFactoryBean<ConnectionFactory> {
 
-	private final ConnectionFactory connectionFactory = new ConnectionFactory();
+	private static final String KEY_STORE = "keyStore";
+
+	private static final String TRUST_STORE = "trustStore";
+
+	private static final String KEY_STORE_PASS_PHRASE = "keyStore.passPhrase";
+
+	private static final String TRUST_STORE_PASS_PHRASE = "trustStore.passPhrase";
+
+	private static final String TLS_V1_1 = "TLSv1.1";
+
+	protected final ConnectionFactory connectionFactory = new ConnectionFactory();
+
+	private final Properties sslProperties = new Properties();
 
 	private boolean useSSL;
 
 	private Resource sslPropertiesLocation;
+
+	private volatile String keyStore;
+
+	private volatile String trustStore;
+
+	private volatile String keyStorePassphrase;
+
+	private volatile String trustStorePassphrase;
+
+	private volatile String sslAlgorithm = TLS_V1_1;
+
+	private volatile boolean sslAlgorithmSet;
 
 	/**
 	 * Whether or not the factory should be configured to use SSL.
@@ -66,6 +98,31 @@ public class RabbitConnectionFactoryBean extends AbstractFactoryBean<ConnectionF
 	 */
 	public void setUseSSL(boolean useSSL) {
 		this.useSSL = useSSL;
+	}
+
+	/**
+	 * @return true to use ssl.
+	 * @since 1.4.4.
+	 */
+	protected boolean isUseSSL() {
+		return useSSL;
+	}
+
+	/**
+	 * Set the algorithm to use; default TLSv1.1.
+	 * @param sslAlgorithm the algorithm.
+	 */
+	public void setSslAlgorithm(String sslAlgorithm) {
+		this.sslAlgorithm = sslAlgorithm;
+		this.sslAlgorithmSet = true;
+	}
+
+	/**
+	 * @return the ssl algorithm.
+	 * @since 1.4.4
+	 */
+	protected String getSslAlgorithm() {
+		return sslAlgorithm;
 	}
 
 	/**
@@ -77,10 +134,95 @@ public class RabbitConnectionFactoryBean extends AbstractFactoryBean<ConnectionF
 	 * <li>keyStore.passPhrase=secret</li>
 	 * <li>trustStore.passPhrase=secret</li>
 	 * </ul>
+	 * <p>
+	 * If this is provided, its properties (if present) will override the explicitly
+	 * set property in this bean.
 	 * @param sslPropertiesLocation the Resource to the ssl properties
 	 */
 	public void setSslPropertiesLocation(Resource sslPropertiesLocation) {
 		this.sslPropertiesLocation = sslPropertiesLocation;
+	}
+
+	/**
+	 * @return the properties location.
+	 * @since 1.4.4
+	 */
+	protected Resource getSslPropertiesLocation() {
+		return sslPropertiesLocation;
+	}
+
+	/**
+	 * @return the key store resource.
+	 * @since 1.5
+	 */
+	protected String getKeyStore() {
+		return this.keyStore == null ? this.sslProperties.getProperty(KEY_STORE) : this.keyStore;
+	}
+
+	/**
+	 * Set the key store resource (e.g. file:/foo/keystore) - overrides
+	 * the property in {@link #setSslPropertiesLocation(Resource)}.
+	 * @param keyStore the keystore resource.
+	 * @since 1.5
+	 */
+	public void setKeyStore(String keyStore) {
+		this.keyStore = keyStore;
+	}
+
+	/**
+	 * @return the trust store resource.
+	 * @since 1.5
+	 */
+	protected String getTrustStore() {
+		return this.trustStore == null ? this.sslProperties.getProperty(TRUST_STORE) : this.trustStore;
+	}
+
+	/**
+	 * Set the key store resource (e.g. file:/foo/truststore) - overrides
+	 * the property in {@link #setSslPropertiesLocation(Resource)}.
+	 * @param trustStore the keystore resource.
+	 * @since 1.5
+	 */
+	public void setTrustStore(String trustStore) {
+		this.trustStore = trustStore;
+	}
+
+	/**
+	 * @return the key store pass phrase.
+	 * @since 1.5
+	 */
+	protected String getKeyStorePassphrase() {
+		return this.keyStorePassphrase == null ? this.sslProperties.getProperty(KEY_STORE_PASS_PHRASE)
+				: this.keyStorePassphrase;
+	}
+
+	/**
+	 * Set the key store pass phrase - overrides
+	 * the property in {@link #setSslPropertiesLocation(Resource)}.
+	 * @param keyStorePassphrase the key store pass phrase.
+	 * @since 1.5
+	 */
+	public void setKeyStorePassphrase(String keyStorePassphrase) {
+		this.keyStorePassphrase = keyStorePassphrase;
+	}
+
+	/**
+	 * @return the trust store pass phrase.
+	 * @since 1.5
+	 */
+	protected String getTrustStorePassphrase() {
+		return this.trustStorePassphrase == null ? this.sslProperties.getProperty(TRUST_STORE_PASS_PHRASE)
+				: this.trustStorePassphrase;
+	}
+
+	/**
+	 * Set the trust store pass phrase - overrides
+	 * the property in {@link #setSslPropertiesLocation(Resource)}.
+	 * @param trustStorePassphrase the trust store pass phrase.
+	 * @since 1.5
+	 */
+	public void setTrustStorePassphrase(String trustStorePassphrase) {
+		this.trustStorePassphrase = trustStorePassphrase;
 	}
 
 	/**
@@ -246,22 +388,34 @@ public class RabbitConnectionFactoryBean extends AbstractFactoryBean<ConnectionF
 		return this.connectionFactory;
 	}
 
-	private void setUpSSL() throws Exception {
-		if (this.sslPropertiesLocation == null) {
-			this.connectionFactory.useSslProtocol();
+	/**
+	 * Override this method to take complete control over the SSL setup.
+	 * @throws Exception an Exception.
+	 * @since 1.4.4
+	 */
+	protected void setUpSSL() throws Exception {
+		if (this.sslPropertiesLocation == null && this.keyStore == null && this.trustStore == null
+				&& this.keyStorePassphrase == null && this.trustStorePassphrase == null) {
+			if (this.sslAlgorithmSet) {
+				this.connectionFactory.useSslProtocol(this.sslAlgorithm);
+			}
+			else {
+				this.connectionFactory.useSslProtocol();
+			}
 		}
 		else {
-			Properties sslProperties = new Properties();
-			sslProperties.load(this.sslPropertiesLocation.getInputStream());
+			if (this.sslPropertiesLocation != null) {
+				this.sslProperties.load(this.sslPropertiesLocation.getInputStream());
+			}
 			PathMatchingResourcePatternResolver resolver = new PathMatchingResourcePatternResolver();
-			String keyStoreName = sslProperties.getProperty("keyStore");
-			Assert.state(StringUtils.hasText(keyStoreName), "keyStore property required");
-			String trustStoreName = sslProperties.getProperty("trustStore");
-			Assert.state(StringUtils.hasText(trustStoreName), "trustStore property required");
-			String keyStorePassword = sslProperties.getProperty("keyStore.passPhrase");
-			Assert.state(StringUtils.hasText(keyStorePassword), "keyStore.passPhrase property required");
-			String trustStorePassword = sslProperties.getProperty("trustStore.passPhrase");
-			Assert.state(StringUtils.hasText(trustStorePassword), "trustStore.passPhrase property required");
+			String keyStoreName = getKeyStore();
+			Assert.state(StringUtils.hasText(keyStoreName), KEY_STORE + " property required");
+			String trustStoreName = getTrustStore();
+			Assert.state(StringUtils.hasText(trustStoreName), TRUST_STORE + " property required");
+			String keyStorePassword = getKeyStorePassphrase();
+			Assert.state(StringUtils.hasText(keyStorePassword), KEY_STORE_PASS_PHRASE + " property required");
+			String trustStorePassword = getTrustStorePassphrase();
+			Assert.state(StringUtils.hasText(trustStorePassword), TRUST_STORE_PASS_PHRASE + " property required");
 			Resource keyStore = resolver.getResource(keyStoreName);
 			Resource trustStore = resolver.getResource(trustStoreName);
 			char[] keyPassphrase = keyStorePassword.toCharArray();
@@ -279,10 +433,21 @@ public class RabbitConnectionFactoryBean extends AbstractFactoryBean<ConnectionF
 			TrustManagerFactory tmf = TrustManagerFactory.getInstance("SunX509");
 			tmf.init(tks);
 
-			SSLContext context = SSLContext.getInstance("SSLv3");
+			SSLContext context = createSSLContext();
 			context.init(kmf.getKeyManagers(), tmf.getTrustManagers(), null);
 			this.connectionFactory.useSslProtocol(context);
 		}
+	}
+
+	/**
+	 * Override this method to create and/or configure the {@link SSLContext} used
+	 * by the {@link ConnectionFactory}.
+	 * @return The {@link SSLContext}.
+	 * @throws NoSuchAlgorithmException if the algorithm is not available.
+	 * @since 1.4.4
+	 */
+	protected SSLContext createSSLContext() throws NoSuchAlgorithmException {
+		return SSLContext.getInstance(this.sslAlgorithm);
 	}
 
 }

@@ -1,15 +1,19 @@
 /*
- * Copyright 2002-2014 the original author or authors.
+ * Copyright 2002-2016 the original author or authors.
  *
- * Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except in compliance with
- * the License. You may obtain a copy of the License at
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
  *
- * http://www.apache.org/licenses/LICENSE-2.0
+ *      http://www.apache.org/licenses/LICENSE-2.0
  *
- * Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on
- * an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the
- * specific language governing permissions and limitations under the License.
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
+
 package org.springframework.amqp.rabbit.listener;
 
 import static org.junit.Assert.assertNotNull;
@@ -168,6 +172,7 @@ public class SimpleMessageListenerContainerIntegrationTests {
 			container.shutdown();
 		}
 		((DisposableBean) template.getConnectionFactory()).destroy();
+		this.brokerIsRunning.removeTestQueues();
 	}
 
 	@Test
@@ -211,7 +216,7 @@ public class SimpleMessageListenerContainerIntegrationTests {
 		for (int i = 0; i < messageCount; i++) {
 			template.convertAndSend(queue.getName(), i + "foo");
 		}
-		boolean waited = latch.await(Math.max(2, messageCount / 20), TimeUnit.SECONDS);
+		boolean waited = latch.await(Math.max(10, messageCount / 20), TimeUnit.SECONDS);
 		assertTrue("Timed out waiting for message", waited);
 		assertNull(template.receiveAndConvert(queue.getName()));
 	}
@@ -223,15 +228,17 @@ public class SimpleMessageListenerContainerIntegrationTests {
 			for (int i = 0; i < concurrentConsumers; i++) {
 				template.convertAndSend(queue.getName(), i + "foo");
 			}
-		} else {
+		}
+		else {
 			for (int i = 0; i < messageCount; i++) {
 				template.convertAndSend(queue.getName(), i + "foo");
 			}
 		}
 		try {
-			boolean waited = latch.await(5 + Math.max(1, messageCount / 10), TimeUnit.SECONDS);
+			boolean waited = latch.await(10 + Math.max(1, messageCount / 10), TimeUnit.SECONDS);
 			assertTrue("Timed out waiting for message", waited);
-		} finally {
+		}
+		finally {
 			// Wait for broker communication to finish before trying to stop
 			// container
 			Thread.sleep(300L);
@@ -254,6 +261,7 @@ public class SimpleMessageListenerContainerIntegrationTests {
 		container.setConcurrentConsumers(concurrentConsumers);
 		container.setChannelTransacted(transactional);
 		container.setAcknowledgeMode(acknowledgeMode);
+		container.setBeanName("integrationTestContainer");
 		// requires RabbitMQ 3.2.x
 //		container.setConsumerArguments(Collections. <String, Object> singletonMap("x-priority", Integer.valueOf(10)));
 		if (externalTransaction) {

@@ -1,14 +1,17 @@
 /*
- * Copyright 2002-2015 the original author or authors.
+ * Copyright 2002-2016 the original author or authors.
  *
- * Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except in compliance with
- * the License. You may obtain a copy of the License at
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
  *
- * http://www.apache.org/licenses/LICENSE-2.0
+ *      http://www.apache.org/licenses/LICENSE-2.0
  *
- * Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on
- * an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the
- * specific language governing permissions and limitations under the License.
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
 
 package org.springframework.amqp.core;
@@ -35,16 +38,21 @@ import org.springframework.util.StringUtils;
  * @author Mark Fisher
  * @author Dave Syer
  * @author Artem Bilan
+ * @author Gary Russell
  */
 public class Address {
+
+	/**
+	 * Use this value in {@code RabbitTemplate#setReplyAddress(String)} to explicitly
+	 * indicate that direct reply-to is to be used.
+	 */
+	public static final String AMQ_RABBITMQ_REPLY_TO = "amq.rabbitmq.reply-to";
 
 	private static final Pattern pattern = Pattern.compile("^(?:.*://)?([^/]*)/?(.*)$");
 
 	private final String exchangeName;
 
 	private final String routingKey;
-
-	public static final String AMQ_RABBITMQ_REPLY_TO = "amq.rabbitmq.reply-to";
 
 	/**
 	 * Create an Address instance from a structured String in the form
@@ -117,6 +125,32 @@ public class Address {
 
 	public String getRoutingKey() {
 		return this.routingKey;
+	}
+
+	@Override
+	public boolean equals(Object o) {
+		if (this == o) {
+			return true;
+		}
+		if (o == null || getClass() != o.getClass()) {
+			return false;
+		}
+
+		Address address = (Address) o;
+
+		return !(this.exchangeName != null
+				? !this.exchangeName.equals(address.exchangeName)
+				: address.exchangeName != null)
+				&& !(this.routingKey != null
+				? !this.routingKey.equals(address.routingKey)
+				: address.routingKey != null);
+	}
+
+	@Override
+	public int hashCode() {
+		int result = exchangeName != null ? exchangeName.hashCode() : 0;
+		result = 31 * result + (routingKey != null ? routingKey.hashCode() : 0);
+		return result;
 	}
 
 	@Override

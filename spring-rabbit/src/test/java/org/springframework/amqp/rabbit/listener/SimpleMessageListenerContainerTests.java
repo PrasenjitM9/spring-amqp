@@ -1,20 +1,25 @@
 /*
- * Copyright 2002-2014 the original author or authors.
+ * Copyright 2002-2016 the original author or authors.
  *
- * Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except in compliance with
- * the License. You may obtain a copy of the License at
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
  *
- * http://www.apache.org/licenses/LICENSE-2.0
+ *      http://www.apache.org/licenses/LICENSE-2.0
  *
- * Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on
- * an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the
- * specific language governing permissions and limitations under the License.
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
 
 package org.springframework.amqp.rabbit.listener;
 
+import static org.hamcrest.Matchers.lessThanOrEqualTo;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertThat;
 import static org.junit.Assert.assertTrue;
 import static org.mockito.Matchers.any;
 import static org.mockito.Matchers.anyBoolean;
@@ -23,6 +28,8 @@ import static org.mockito.Matchers.anyMap;
 import static org.mockito.Matchers.anyString;
 import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.doReturn;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.times;
@@ -69,6 +76,7 @@ import org.springframework.transaction.TransactionDefinition;
 import org.springframework.transaction.TransactionException;
 import org.springframework.transaction.support.AbstractPlatformTransactionManager;
 import org.springframework.transaction.support.DefaultTransactionStatus;
+import org.springframework.util.backoff.FixedBackOff;
 
 import com.rabbitmq.client.AMQP.BasicProperties;
 import com.rabbitmq.client.Channel;
@@ -546,7 +554,7 @@ public class SimpleMessageListenerContainerTests {
 		container.start();
 		verify(channel).basicConsume(anyString(), anyBoolean(), anyString(), anyBoolean(), anyBoolean(), anyMap(), any(Consumer.class));
 		Log logger = spy(TestUtils.getPropertyValue(container, "logger", Log.class));
-		when(logger.isDebugEnabled()).thenReturn(false);
+		doReturn(false).when(logger).isDebugEnabled();
 		final CountDownLatch latch = new CountDownLatch(1);
 		doAnswer(new Answer<Object>() {
 
@@ -562,6 +570,34 @@ public class SimpleMessageListenerContainerTests {
 		consumer.get().handleCancel("foo");
 		assertTrue(latch.await(10, TimeUnit.SECONDS));
 		container.stop();
+	}
+
+	@Test
+	public void testContainerNotRecoveredAfterExhaustingRecoveryBackOff() throws Exception {
+		SimpleMessageListenerContainer container =
+				spy(new SimpleMessageListenerContainer(mock(ConnectionFactory.class)));
+		container.setQueueNames("foo");
+		container.setRecoveryBackOff(new FixedBackOff(100, 3));
+		container.setConcurrentConsumers(3);
+		doAnswer(new Answer<BlockingQueueConsumer>() {
+
+			@Override
+			public BlockingQueueConsumer answer(InvocationOnMock invocation) throws Throwable {
+				BlockingQueueConsumer consumer = spy((BlockingQueueConsumer) invocation.callRealMethod());
+				doThrow(RuntimeException.class).when(consumer).start();
+				return consumer;
+			}
+		}).when(container).createBlockingQueueConsumer();
+		container.afterPropertiesSet();
+		container.start();
+
+		// Since backOff exhausting makes listenerContainer as invalid (calls stop()),
+		// it is enough to check the listenerContainer activity
+		int n = 0;
+		while (container.isActive() && n++ < 10) {
+			Thread.sleep(100);
+		}
+		assertThat(n, lessThanOrEqualTo(10));
 	}
 
 	private Answer<Object> messageToConsumer(final Channel mockChannel, final SimpleMessageListenerContainer container,

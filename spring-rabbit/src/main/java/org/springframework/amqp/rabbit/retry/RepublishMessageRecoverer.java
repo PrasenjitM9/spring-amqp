@@ -1,11 +1,11 @@
 /*
- * Copyright 2014 the original author or authors.
+ * Copyright 2014-2016 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *	  http://www.apache.org/licenses/LICENSE-2.0
+ *      http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -13,6 +13,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
 package org.springframework.amqp.rabbit.retry;
 
 import java.io.PrintWriter;
@@ -42,7 +43,15 @@ import org.springframework.util.Assert;
  */
 public class RepublishMessageRecoverer implements MessageRecoverer {
 
-	private static final Log logger = LogFactory.getLog(RepublishMessageRecoverer.class);
+	public static final String X_EXCEPTION_STACKTRACE = "x-exception-stacktrace";
+
+	public static final String X_EXCEPTION_MESSAGE = "x-exception-message";
+
+	public static final String X_ORIGINAL_EXCHANGE = "x-original-exchange";
+
+	public static final String X_ORIGINAL_ROUTING_KEY = "x-original-routingKey";
+
+	private final Log logger = LogFactory.getLog(getClass());
 
 	private final AmqpTemplate errorTemplate;
 
@@ -91,10 +100,14 @@ public class RepublishMessageRecoverer implements MessageRecoverer {
 	@Override
 	public void recover(Message message, Throwable cause) {
 		Map<String, Object> headers = message.getMessageProperties().getHeaders();
-		headers.put("x-exception-stacktrace", getStackTraceAsString(cause));
-		headers.put("x-exception-message", cause.getCause() != null ? cause.getCause().getMessage() : cause.getMessage());
-		headers.put("x-original-exchange", message.getMessageProperties().getReceivedExchange());
-		headers.put("x-original-routingKey", message.getMessageProperties().getReceivedRoutingKey());
+		headers.put(X_EXCEPTION_STACKTRACE, getStackTraceAsString(cause));
+		headers.put(X_EXCEPTION_MESSAGE, cause.getCause() != null ? cause.getCause().getMessage() : cause.getMessage());
+		headers.put(X_ORIGINAL_EXCHANGE, message.getMessageProperties().getReceivedExchange());
+		headers.put(X_ORIGINAL_ROUTING_KEY, message.getMessageProperties().getReceivedRoutingKey());
+		Map<? extends String, ? extends Object> additionalHeaders = additionalHeaders(message, cause);
+		if (additionalHeaders != null) {
+			headers.putAll(additionalHeaders);
+		}
 
 		if (null != errorExchangeName) {
 			String routingKey = errorRoutingKey != null ? errorRoutingKey : this.prefixedOriginalRoutingKey(message);
@@ -110,6 +123,16 @@ public class RepublishMessageRecoverer implements MessageRecoverer {
 				logger.warn("Republishing failed message to the template's default exchange with routing key " + routingKey);
 			}
 		}
+	}
+
+	/**
+	 * Subclasses can override this method to add more headers to the republished message.
+	 * @param message The failed message.
+	 * @param cause The cause.
+	 * @return A {@link Map} of additional headers to add.
+	 */
+	protected Map<? extends String, ? extends Object> additionalHeaders(Message message, Throwable cause) {
+		return null;
 	}
 
 	private String prefixedOriginalRoutingKey(Message message) {

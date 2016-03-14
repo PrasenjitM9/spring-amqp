@@ -1,22 +1,28 @@
 /*
- * Copyright 2002-2014 the original author or authors.
+ * Copyright 2002-2016 the original author or authors.
  *
- * Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except in compliance with
- * the License. You may obtain a copy of the License at
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
  *
- * http://www.apache.org/licenses/LICENSE-2.0
+ *      http://www.apache.org/licenses/LICENSE-2.0
  *
- * Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on
- * an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the
- * specific language governing permissions and limitations under the License.
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
+
 package org.springframework.amqp.rabbit.connection;
 
 import java.io.IOException;
 
 import org.springframework.amqp.rabbit.support.RabbitExceptionTranslator;
+import org.springframework.util.ObjectUtils;
 
 import com.rabbitmq.client.Channel;
+import com.rabbitmq.client.impl.AMQConnection;
 
 /**
  * Simply a Connection.
@@ -37,6 +43,7 @@ public class SimpleConnection implements Connection {
 		this.closeTimeout = closeTimeout;
 	}
 
+	@Override
 	public Channel createChannel(boolean transactional) {
 		try {
 			Channel channel = delegate.createChannel();
@@ -50,6 +57,7 @@ public class SimpleConnection implements Connection {
 		}
 	}
 
+	@Override
 	public void close() {
 		try {
 			// let the physical close time out if necessary
@@ -59,9 +67,26 @@ public class SimpleConnection implements Connection {
 		}
 	}
 
+	@Override
 	public boolean isOpen() {
 		return delegate != null
 				&& (delegate.isOpen() || this.delegate.getClass().getSimpleName().contains("AutorecoveringConnection"));
+	}
+
+
+	@Override
+	public int getLocalPort() {
+		if (this.delegate instanceof AMQConnection) {
+			return ((AMQConnection) this.delegate).getLocalPort();
+		}
+		return 0;
+	}
+
+	@Override
+	public String toString() {
+		return "SimpleConnection@"
+				+ ObjectUtils.getIdentityHexString(this)
+				+ " [delegate=" + delegate + ", localPort= " + getLocalPort() + "]";
 	}
 
 }

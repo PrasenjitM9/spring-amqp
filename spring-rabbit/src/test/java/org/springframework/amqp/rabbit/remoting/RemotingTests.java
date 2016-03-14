@@ -1,5 +1,5 @@
 /*
- * Copyright 2002-2013 the original author or authors.
+ * Copyright 2002-2016 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -13,22 +13,30 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
 package org.springframework.amqp.rabbit.remoting;
 
+import static org.hamcrest.Matchers.containsString;
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertThat;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
 
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 
-import org.junit.Rule;
+import org.junit.AfterClass;
+import org.junit.BeforeClass;
+import org.junit.ClassRule;
 import org.junit.Test;
 import org.junit.runner.RunWith;
-import org.springframework.amqp.rabbit.core.RabbitTemplate;
+
+import org.springframework.amqp.rabbit.connection.CachingConnectionFactory;
+import org.springframework.amqp.rabbit.core.RabbitAdmin;
 import org.springframework.amqp.rabbit.test.BrokerRunning;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.remoting.RemoteProxyFailureException;
+import org.springframework.test.annotation.DirtiesContext;
 import org.springframework.test.context.ContextConfiguration;
 import org.springframework.test.context.junit4.SpringJUnit4ClassRunner;
 
@@ -39,20 +47,28 @@ import org.springframework.test.context.junit4.SpringJUnit4ClassRunner;
  */
 @ContextConfiguration
 @RunWith(SpringJUnit4ClassRunner.class)
+@DirtiesContext
 public class RemotingTests {
 
-	@Rule
-	public BrokerRunning brokerRunning = BrokerRunning.isRunning();
+	@ClassRule
+	public static BrokerRunning brokerRunning = BrokerRunning.isRunning();
 
 	@Autowired
 	private ServiceInterface client;
 
-	@Autowired
-	private RabbitTemplate template;
-
 	private static CountDownLatch latch;
 
 	private static String receivedMessage;
+
+	@BeforeClass
+	@AfterClass
+	public static void setupAndCleanUp() {
+		CachingConnectionFactory cf = new CachingConnectionFactory("localhost");
+		RabbitAdmin admin = new RabbitAdmin(cf);
+		admin.deleteExchange("remoting.test.exchange");
+		admin.deleteQueue("remoting.test.queue");
+		cf.destroy();
+	}
 
 	@Test
 	public void testEcho() throws Exception {
@@ -75,7 +91,7 @@ public class RemotingTests {
 			fail("Exception expected");
 		}
 		catch (RemoteProxyFailureException e) {
-			assertTrue("No reply received - perhaps a timeout in the template?".equals(e.getMessage()));
+			assertThat(e.getMessage(), containsString(" - perhaps a timeout in the template?"));
 		}
 	}
 

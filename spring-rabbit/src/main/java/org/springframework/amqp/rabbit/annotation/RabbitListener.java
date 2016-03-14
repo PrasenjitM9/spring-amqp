@@ -1,5 +1,5 @@
 /*
- * Copyright 2014 the original author or authors.
+ * Copyright 2014-2016 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -18,15 +18,19 @@ package org.springframework.amqp.rabbit.annotation;
 
 import java.lang.annotation.Documented;
 import java.lang.annotation.ElementType;
+import java.lang.annotation.Repeatable;
 import java.lang.annotation.Retention;
 import java.lang.annotation.RetentionPolicy;
 import java.lang.annotation.Target;
 
+import org.springframework.amqp.core.MessageListener;
+import org.springframework.amqp.rabbit.listener.adapter.MessagingMessageListenerAdapter;
 import org.springframework.messaging.handler.annotation.MessageMapping;
 
 /**
  * Annotation that marks a method to be the target of a Rabbit message
- * listener on the specified {@link #queues()}. The {@link #containerFactory()}
+ * listener on the specified {@link #queues()} (or {@link #bindings()}).
+ * The {@link #containerFactory()}
  * identifies the {@link org.springframework.amqp.rabbit.listener.RabbitListenerContainerFactory
  * RabbitListenerContainerFactory} to use to build the rabbit listener container. If not
  * set, a <em>default</em> container factory is assumed to be available with a bean
@@ -60,22 +64,39 @@ import org.springframework.messaging.handler.annotation.MessageMapping;
  * for convenient access to all method arguments.</li>
  * </ul>
  *
- * <p>Annotated method may have a non {@code void} return type. When they do, the result of the
+ * <p>Annotated methods may have a non {@code void} return type. When they do, the result of the
  * method invocation is sent as a reply to the queue defined by the
  * {@link org.springframework.amqp.core.MessageProperties#getReplyTo() ReplyTo}  header of the
  * incoming message. When this value is not set, a default queue can be provided by
  * adding @{@link org.springframework.messaging.handler.annotation.SendTo SendTo} to the method
  * declaration.
  *
+ * <p>When {@link #bindings()} are provided, and the application context contains a
+ * {@link org.springframework.amqp.rabbit.core.RabbitAdmin},
+ * the queue, exchange and binding will be automatically declared.
+ *
+ * <p>When defined at the method level, a listener container is created for each method. The
+ * {@link MessageListener} is a {@link MessagingMessageListenerAdapter}, configured with a
+ * {@link org.springframework.amqp.rabbit.listener.MethodRabbitListenerEndpoint}.
+ *
+ * <p>When defined at the class level, a single message listener container is used to service
+ * all methods annotated with {@code @RabbitHandler}. Method signatures of such annotated
+ * methods must not cause any ambiguity such that a single method can be resolved for a
+ * particular inbound message. The {@link MessagingMessageListenerAdapter} is configured with
+ * a {@link org.springframework.amqp.rabbit.listener.MultiMethodRabbitListenerEndpoint}.
+ *
  * @author Stephane Nicoll
+ * @author Gary Russell
  * @since 1.4
  * @see EnableRabbit
  * @see RabbitListenerAnnotationBeanPostProcessor
+ * @see RabbitListeners
  */
-@Target({ElementType.METHOD, ElementType.ANNOTATION_TYPE})
+@Target({ ElementType.TYPE, ElementType.METHOD, ElementType.ANNOTATION_TYPE })
 @Retention(RetentionPolicy.RUNTIME)
 @MessageMapping
 @Documented
+@Repeatable(RabbitListeners.class)
 public @interface RabbitListener {
 
 	/**
@@ -99,10 +120,11 @@ public @interface RabbitListener {
 	 * The queues for this listener.
 	 * The entries can be 'queue name', 'property-placeholder keys' or 'expressions'.
 	 * Expression must be resolved to the queue name or {@code Queue} object.
+	 * Mutually exclusive with {@link #bindings()}
 	 * @return the queue names or expressions (SpEL) to listen to from target
 	 * {@link org.springframework.amqp.rabbit.listener.MessageListenerContainer}.
 	 */
-	String[] queues();
+	String[] queues() default {};
 
 	/**
 	 * When {@code true}, a single consumer in the container will have exclusive use of the
@@ -129,5 +151,23 @@ public @interface RabbitListener {
 	  @return the {@link org.springframework.amqp.rabbit.core.RabbitAdmin} bean name.
 	 */
 	String admin() default "";
+
+	/**
+	 * Array of {@link QueueBinding}s providing the listener's queue names, together
+	 * with the exchange and optional binding information.
+	 * @return the bindings.
+	 * @since 1.5
+	 */
+	QueueBinding[] bindings() default {};
+
+	/**
+	 * If provided, the listener container for this listener will be added to a bean
+	 * with this value as its name, of type {@code Collection<MessageListenerContainer>}.
+	 * This allows, for example, iteration over the collection to start/stop a subset
+	 * of containers.
+	 * @return the bean name for the group.
+	 * @since 1.5
+	 */
+	String group() default "";
 
 }

@@ -6,17 +6,20 @@ apply plugin: 'idea'
 
 buildscript {
 	repositories {
-		maven { url 'http://repo.springsource.org/plugins-release' }
+		maven { url 'https://repo.spring.io/plugins-release' }
 	}
 	dependencies {
-		classpath 'org.springframework.build.gradle:docbook-reference-plugin:0.2.8'
+		classpath 'io.spring.gradle:docbook-reference-plugin:0.3.1'
+		classpath 'org.asciidoctor:asciidoctor-gradle-plugin:1.5.0'
 		classpath 'me.champeau.gradle:gradle-javadoc-hotfix-plugin:0.1'
-		classpath 'org.springframework.build.gradle:spring-io-plugin:0.0.3.RELEASE'
+		classpath 'io.spring.gradle:spring-io-plugin:0.0.4.RELEASE'
 	}
 }
 
+def docsDir = 'src/reference/asciidoc' // Will be default with newer asciidoctor plugin
+
 ext {
-	linkHomepage = 'http://www.spring.io/spring-amqp'
+	linkHomepage = 'https://projects.spring.io/spring-amqp'
 	linkCi       = 'https://build.spring.io/browse/AMQP'
 	linkIssue    = 'https://jira.spring.io/browse/AMQP'
 	linkScmUrl           = 'https://github.com/spring-projects/spring-amqp'
@@ -29,9 +32,9 @@ allprojects {
 
 	repositories {
 		if (version.endsWith('BUILD-SNAPSHOT')) {
-			maven { url 'http://repo.spring.io/libs-snapshot' }
+			maven { url 'https://repo.spring.io/libs-snapshot' }
 		}
-		maven { url 'http://repo.spring.io/libs-release' }
+		maven { url 'https://repo.spring.io/libs-release' }
 	}
 	apply plugin: 'javadocHotfix'
 }
@@ -41,7 +44,7 @@ ext {
 	javadocLinks = [
 		"http://docs.oracle.com/javase/6/docs/api/",
 		"http://docs.oracle.com/javaee/6/api/",
-		"http://docs.spring.io/spring/docs/4.1.x/javadoc-api/"
+		"http://docs.spring.io/spring/docs/current/javadoc-api/"
 	] as String[]
 }
 
@@ -52,16 +55,24 @@ subprojects { subproject ->
 	apply plugin: 'eclipse'
 	apply plugin: 'idea'
 	apply plugin: 'project-report'
+	apply plugin: 'jacoco'
+	apply plugin: 'checkstyle'
+
+	apply from:   "${rootDir}/src/checkstyle/fixHeaders.gradle"
 
 	if (project.hasProperty('platformVersion')) {
 		apply plugin: 'spring-io'
 
 		repositories {
-			maven { url 'http://repo.spring.io/libs-snapshot' }
+			maven { url 'https://repo.spring.io/libs-snapshot' }
 		}
 
-		dependencies {
-			springIoVersions "io.spring.platform:platform-versions:$platformVersion@properties"
+		dependencyManagement {
+			springIoTestRuntime {
+				imports {
+					mavenBom "io.spring.platform:platform-bom:$platformVersion"
+				}
+			}
 		}
 	}
 
@@ -71,18 +82,20 @@ subprojects { subproject ->
 
 	ext {
 		cglibVersion = '3.1'
+		commonsCliVersion = '1.2'
 		commonsIoVersion = '2.4'
-		erlangOtpVersion = '1.5.6'
 		hamcrestVersion = '1.3'
 		jacksonVersion = '1.9.13'
 		jackson2Version = '2.3.2'
 		junitVersion = '4.11'
 		log4jVersion = '1.2.17'
+		log4j2Version = '2.4.1'
 		logbackVersion = '1.1.2'
 		mockitoVersion = '1.9.5'
-		rabbitmqVersion = project.hasProperty('rabbitmqVersion') ? project.rabbitmqVersion : '3.4.2'
+		rabbitmqVersion = project.hasProperty('rabbitmqVersion') ? project.rabbitmqVersion : '3.6.0'
+		rabbitmqHttpClientVersion = '1.0.0.RELEASE'
 
-		springVersion = project.hasProperty('springVersion') ? project.springVersion : '4.1.3.RELEASE'
+		springVersion = project.hasProperty('springVersion') ? project.springVersion : '4.2.4.RELEASE'
 
 		springRetryVersion = '1.1.2.RELEASE'
 	}
@@ -93,26 +106,22 @@ subprojects { subproject ->
 		}
 	}
 
-	// See http://www.gradle.org/docs/current/userguide/dependency_management.html#sub:configurations
-	// and http://www.gradle.org/docs/current/dsl/org.gradle.api.artifacts.ConfigurationContainer.html
-	configurations {
-		jacoco //Configuration Group used by Sonar to provide Code Coverage using JaCoCo
+	jacoco {
+		toolVersion = "0.7.2.201409121644"
 	}
 
 	// dependencies that are common across all java projects
 	dependencies {
 		testCompile "cglib:cglib-nodep:$cglibVersion"
 		testCompile ("junit:junit:$junitVersion") {
-			exclude group: 'org.hamcrest'
+			exclude group: 'org.hamcrest', module: 'hamcrest-core'
 		}
 		testCompile "log4j:log4j:$log4jVersion"
 		testCompile "org.hamcrest:hamcrest-all:$hamcrestVersion"
 		testCompile ("org.mockito:mockito-core:$mockitoVersion") {
-			exclude group: 'org.hamcrest'
+			exclude group: 'org.hamcrest', module: 'hamcrest-core'
 		}
 		testCompile "org.springframework:spring-test:$springVersion"
-
-		jacoco group: "org.jacoco", name: "org.jacoco.agent", version: "0.7.2.201409121644", classifier: "runtime"
 	}
 
 	// enable all compiler warnings; individual projects may customize further
@@ -138,7 +147,10 @@ subprojects { subproject ->
 	}
 
 	test {
-		jvmArgs "-javaagent:${configurations.jacoco.asPath}=destfile=${buildDir}/jacoco.exec,includes=org.springframework.*"
+		jacoco {
+			append = false
+			destinationFile = file("$buildDir/jacoco.exec")
+		}
 	}
 
 	task testAll(type: Test)
@@ -163,10 +175,16 @@ subprojects { subproject ->
 		from javadoc
 	}
 
+	checkstyle {
+		configFile = new File(rootDir, "src/checkstyle/checkstyle.xml")
+	}
+
 	artifacts {
 		archives sourcesJar
 		archives javadocJar
 	}
+
+	build.dependsOn jacocoTestReport, check
 
 }
 
@@ -186,37 +204,24 @@ project('spring-amqp') {
 
 }
 
-project('spring-erlang') {
-	description = 'Spring Erlang Support'
-	dependencies {
-
-		compile "org.springframework:spring-beans:$springVersion"
-		compile "commons-io:commons-io:$commonsIoVersion"
-
-		compile ("javax.annotation:jsr250-api:1.0", optional)
-		compile "org.erlang.otp:jinterface:$erlangOtpVersion"
-
-	}
-
-}
-
 project('spring-rabbit') {
 	description = 'Spring RabbitMQ Support'
 	dependencies {
 
 		compile project(":spring-amqp")
-		testCompile project(":spring-erlang")
 
 		compile "com.rabbitmq:amqp-client:$rabbitmqVersion"
+		compile ("com.rabbitmq:http-client:$rabbitmqHttpClientVersion") {
+			exclude group: 'org.springframework', module: 'spring-web'
+		}
 
 		compile ("org.springframework:spring-aop:$springVersion", optional)
 		compile "org.springframework:spring-context:$springVersion"
 		compile "org.springframework:spring-messaging:$springVersion"
 		compile "org.springframework:spring-tx:$springVersion"
+		compile "org.springframework:spring-web:$springVersion"
 
 		compile "org.springframework.retry:spring-retry:$springRetryVersion"
-
-		testCompile "commons-cli:commons-cli:1.2"
 
 		compile ("log4j:log4j:$log4jVersion") { dep ->
 			optional dep
@@ -226,18 +231,95 @@ project('spring-rabbit') {
 		}
 
 		compile ("ch.qos.logback:logback-classic:$logbackVersion", optional)
+
+		compile ("org.apache.logging.log4j:log4j-core:$log4j2Version", optional)
+
+		testCompile "commons-cli:commons-cli:$commonsCliVersion"
+
 	}
 
-	// suppress deprecation warnings (@SuppressWarnings("deprecation") is not enough for javac)
-	compileJava.options.compilerArgs = ["${xLintArg},-deprecation"]
+}
+
+project('spring-rabbit-test') {
+	description = 'Spring Rabbit Test Support'
+
+	dependencies {
+
+		compile project(":spring-rabbit")
+		compile ("junit:junit:$junitVersion") {
+			exclude group: 'org.hamcrest', module: 'hamcrest-core'
+		}
+		compile "org.hamcrest:hamcrest-all:$hamcrestVersion"
+		compile ("org.mockito:mockito-core:$mockitoVersion") {
+			exclude group: 'org.hamcrest', module: 'hamcrest-core'
+		}
+		testCompile project(":spring-rabbit").sourceSets.test.output
+
+	}
+
+	project.tasks.withType(Test).all { t ->
+		if (System.getProperty('java.version').startsWith('1.7')) {
+
+			// exclude just the java 8 tests when building with java 7
+
+			exclude	'org/springframework/amqp/rabbit/repeatable/**',
+					'org/springframework/amqp/rabbit/test/mockito/**'
+		}
+		else if (t.name.equals('springIoJdk7Test')) {
+
+			// exclude everything here because the classes were compiled with JDK 8
+
+			exclude '**'
+		}
+	}
+
+	compileTestJava {
+		if (!System.getProperty('java.version').startsWith('1.7')) {
+			sourceCompatibility = 1.8
+			targetCompatibility = 1.8
+		}
+		else {
+			exclude	'org/springframework/amqp/rabbit/repeatable/**',
+					'org/springframework/amqp/rabbit/test/mockito/**'
+		}
+	}
 
 }
 
-apply plugin: 'docbook-reference'
+
+apply plugin: org.asciidoctor.gradle.AsciidoctorPlugin
+
+asciidoctor {
+	sourceDir file("$docsDir")
+	sourceDocumentNames = files("$docsDir/index.adoc") // Change in >= 1.5.1
+	outputDir file("$buildDir/html")
+	backends = ['html5', 'docbook']
+	logDocuments = true
+	options = [
+		doctype: 'book',
+		attributes: [
+			docinfo: '',
+			toc2: '',
+			'compat-mode': '',
+			imagesdir: '',
+			stylesdir: "stylesheets/",
+			stylesheet: 'golo.css',
+			'spring-amqp-version': "$version",
+			'source-highlighter': 'highlightjs'
+		]
+	]
+}
+
+apply plugin: DocbookReferencePlugin
 
 reference {
-	sourceDir = file('src/reference/docbook')
+	sourceFileName = 'index.xml'
+	sourceDir = asciidoctor.outputDir
+	pdfFilename = 'spring-amqp-reference.pdf'
+	expandPlaceholders = ''
 }
+
+reference.dependsOn asciidoctor
 
 apply plugin: 'sonar-runner'
 
@@ -288,12 +370,12 @@ task schemaZip(type: Zip) {
 		}
 
 		subproject.sourceSets.main.resources.find {
-			it.path.endsWith('META-INF/spring.schemas')
+			it.path.endsWith("META-INF${File.separator}spring.schemas")
 		}?.withInputStream { schemas.load(it) }
 
 		for (def key : schemas.keySet()) {
 			File xsdFile = subproject.sourceSets.main.resources.find {
-				it.path.endsWith(schemas.get(key))
+				it.path.replaceAll('\\\\', '/').endsWith(schemas.get(key))
 			}
 			assert xsdFile != null
 			into ("${shortName}") {
@@ -401,6 +483,6 @@ task dist(dependsOn: assemble) {
 
 task wrapper(type: Wrapper) {
 	description = 'Generates gradlew[.bat] scripts'
-	gradleVersion = '2.3'
+	gradleVersion = '2.5'
 	distributionUrl = "http://services.gradle.org/distributions/gradle-${gradleVersion}-all.zip"
 }

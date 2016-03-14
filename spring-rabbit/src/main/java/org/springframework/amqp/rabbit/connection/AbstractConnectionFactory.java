@@ -1,28 +1,38 @@
 /*
- * Copyright 2002-2014 the original author or authors.
+ * Copyright 2002-2016 the original author or authors.
  *
- * Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except in compliance with
- * the License. You may obtain a copy of the License at
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
  *
- * http://www.apache.org/licenses/LICENSE-2.0
+ *      http://www.apache.org/licenses/LICENSE-2.0
  *
- * Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on
- * an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the
- * specific language governing permissions and limitations under the License.
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
+
 package org.springframework.amqp.rabbit.connection;
 
 import java.io.IOException;
 import java.net.InetAddress;
+import java.net.URI;
+import java.net.URISyntaxException;
 import java.net.UnknownHostException;
+import java.security.GeneralSecurityException;
 import java.util.List;
 import java.util.concurrent.Executor;
 import java.util.concurrent.ExecutorService;
+import java.util.concurrent.ThreadFactory;
+import java.util.concurrent.TimeoutException;
 
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 
 import org.springframework.amqp.rabbit.support.RabbitExceptionTranslator;
+import org.springframework.beans.factory.BeanNameAware;
 import org.springframework.beans.factory.DisposableBean;
 import org.springframework.scheduling.concurrent.ThreadPoolTaskExecutor;
 import org.springframework.util.Assert;
@@ -33,9 +43,12 @@ import com.rabbitmq.client.Address;
 /**
  * @author Dave Syer
  * @author Gary Russell
+ * @author Steve Powell
  *
  */
-public abstract class AbstractConnectionFactory implements ConnectionFactory, DisposableBean {
+public abstract class AbstractConnectionFactory implements ConnectionFactory, DisposableBean, BeanNameAware {
+
+	private static final String BAD_URI = "setUri() was passed an invalid URI; it is ignored";
 
 	protected final Log logger = LogFactory.getLog(getClass());
 
@@ -53,8 +66,10 @@ public abstract class AbstractConnectionFactory implements ConnectionFactory, Di
 
 	private volatile int closeTimeout = DEFAULT_CLOSE_TIMEOUT;
 
+	private volatile String beanName;
+
 	/**
-	 * Create a new SingleConnectionFactory for the given target ConnectionFactory.
+	 * Create a new AbstractConnectionFactory for the given target ConnectionFactory.
 	 * @param rabbitConnectionFactory the target ConnectionFactory
 	 */
 	public AbstractConnectionFactory(com.rabbitmq.client.ConnectionFactory rabbitConnectionFactory) {
@@ -74,6 +89,53 @@ public abstract class AbstractConnectionFactory implements ConnectionFactory, Di
 		this.rabbitConnectionFactory.setHost(host);
 	}
 
+	/**
+	 * Set the {@link ThreadFactory} on the underlying rabbit connection factory.
+	 * Not exposed using XML configuration; define a bean for the Rabbit CF and
+	 * provide it to the Spring CF using the {@code connection-factory} attribute.
+	 * TODO: remove this comment when AMQP-554 is resolved.
+	 * @param threadFactory the thread factory.
+	 * @since 1.5.3
+	 */
+	public void setConnectionThreadFactory(ThreadFactory threadFactory) {
+		this.rabbitConnectionFactory.setThreadFactory(threadFactory);
+	}
+
+	/**
+	 * @param uri the URI
+	 * @see com.rabbitmq.client.ConnectionFactory#setUri(URI)
+	 * @since 1.5
+	 */
+	public void setUri(URI uri) {
+		try {
+			this.rabbitConnectionFactory.setUri(uri);
+		}
+		catch (URISyntaxException use) {
+			logger.info(BAD_URI, use);
+		}
+		catch (GeneralSecurityException gse) {
+			logger.info(BAD_URI, gse);
+		}
+	}
+
+	/**
+	 * @param uri the URI
+	 * @see com.rabbitmq.client.ConnectionFactory#setUri(String)
+	 * @since 1.5
+	 */
+	public void setUri(String uri) {
+		try {
+			this.rabbitConnectionFactory.setUri(uri);
+		}
+		catch (URISyntaxException use) {
+			logger.info(BAD_URI, use);
+		}
+		catch (GeneralSecurityException gse) {
+			logger.info(BAD_URI, gse);
+		}
+	}
+
+	@Override
 	public String getHost() {
 		return this.rabbitConnectionFactory.getHost();
 	}
@@ -82,6 +144,7 @@ public abstract class AbstractConnectionFactory implements ConnectionFactory, Di
 		this.rabbitConnectionFactory.setVirtualHost(virtualHost);
 	}
 
+	@Override
 	public String getVirtualHost() {
 		return rabbitConnectionFactory.getVirtualHost();
 	}
@@ -98,6 +161,7 @@ public abstract class AbstractConnectionFactory implements ConnectionFactory, Di
 		this.rabbitConnectionFactory.setConnectionTimeout(connectionTimeout);
 	}
 
+	@Override
 	public int getPort() {
 		return this.rabbitConnectionFactory.getPort();
 	}
@@ -141,6 +205,7 @@ public abstract class AbstractConnectionFactory implements ConnectionFactory, Di
 		this.connectionListener.setDelegates(listeners);
 	}
 
+	@Override
 	public void addConnectionListener(ConnectionListener listener) {
 		this.connectionListener.addDelegate(listener);
 	}
@@ -200,17 +265,31 @@ public abstract class AbstractConnectionFactory implements ConnectionFactory, Di
 		return closeTimeout;
 	}
 
+	@Override
+	public void setBeanName(String name) {
+		this.beanName = name;
+	}
+
 	protected final Connection createBareConnection() {
 		try {
+			Connection connection = null;
 			if (this.addresses != null) {
-				return new SimpleConnection(this.rabbitConnectionFactory.newConnection(this.executorService, this.addresses),
+				connection = new SimpleConnection(this.rabbitConnectionFactory.newConnection(this.executorService, this.addresses),
 									this.closeTimeout);
 			}
 			else {
-				return new SimpleConnection(this.rabbitConnectionFactory.newConnection(this.executorService),
+				connection = new SimpleConnection(this.rabbitConnectionFactory.newConnection(this.executorService),
 									this.closeTimeout);
 			}
-		} catch (IOException e) {
+			if (logger.isInfoEnabled()) {
+				logger.info("Created new connection: " + connection);
+			}
+			return connection;
+		}
+		catch (IOException e) {
+			throw RabbitExceptionTranslator.convertRabbitAccessException(e);
+		}
+		catch (TimeoutException e) {
 			throw RabbitExceptionTranslator.convertRabbitAccessException(e);
 		}
 	}
@@ -228,6 +307,18 @@ public abstract class AbstractConnectionFactory implements ConnectionFactory, Di
 		return temp;
 	}
 
+	@Override
 	public void destroy() {
 	}
+
+	@Override
+	public String toString() {
+		if (this.beanName != null) {
+			return this.beanName;
+		}
+		else {
+			return super.toString();
+		}
+	}
+
 }

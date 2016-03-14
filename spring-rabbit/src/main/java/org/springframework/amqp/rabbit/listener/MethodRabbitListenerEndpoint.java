@@ -20,6 +20,7 @@ import java.lang.reflect.Method;
 import java.util.Arrays;
 
 import org.springframework.amqp.core.Address;
+import org.springframework.amqp.rabbit.listener.adapter.HandlerAdapter;
 import org.springframework.amqp.rabbit.listener.adapter.MessagingMessageListenerAdapter;
 import org.springframework.amqp.support.converter.MessageConverter;
 import org.springframework.core.annotation.AnnotationUtils;
@@ -79,15 +80,19 @@ public class MethodRabbitListenerEndpoint extends AbstractRabbitListenerEndpoint
 		this.messageHandlerMethodFactory = messageHandlerMethodFactory;
 	}
 
+	/**
+	 * @return the messageHandlerMethodFactory
+	 */
+	protected MessageHandlerMethodFactory getMessageHandlerMethodFactory() {
+		return messageHandlerMethodFactory;
+	}
 
 	@Override
 	protected MessagingMessageListenerAdapter createMessageListener(MessageListenerContainer container) {
 		Assert.state(this.messageHandlerMethodFactory != null,
 				"Could not create message listener - MessageHandlerMethodFactory not set");
 		MessagingMessageListenerAdapter messageListener = createMessageListenerInstance();
-		InvocableHandlerMethod invocableHandlerMethod =
-				this.messageHandlerMethodFactory.createInvocableHandlerMethod(getBean(), getMethod());
-		messageListener.setHandlerMethod(invocableHandlerMethod);
+		messageListener.setHandlerMethod(configureListenerAdapter(messageListener));
 		Address replyToAddress = getDefaultReplyToAddress();
 		if (replyToAddress != null) {
 			messageListener.setResponseExchange(replyToAddress.getExchangeName());
@@ -101,6 +106,17 @@ public class MethodRabbitListenerEndpoint extends AbstractRabbitListenerEndpoint
 	}
 
 	/**
+	 * Create a {@link HandlerAdapter} for this listener adapter.
+	 * @param messageListener the listener adapter.
+	 * @return the handler adapter.
+	 */
+	protected HandlerAdapter configureListenerAdapter(MessagingMessageListenerAdapter messageListener) {
+		InvocableHandlerMethod invocableHandlerMethod =
+				this.messageHandlerMethodFactory.createInvocableHandlerMethod(getBean(), getMethod());
+		return new HandlerAdapter(invocableHandlerMethod);
+	}
+
+	/**
 	 * Create an empty {@link MessagingMessageListenerAdapter} instance.
 	 * @return the {@link MessagingMessageListenerAdapter} instance.
 	 */
@@ -109,16 +125,30 @@ public class MethodRabbitListenerEndpoint extends AbstractRabbitListenerEndpoint
 	}
 
 	private Address getDefaultReplyToAddress() {
-		SendTo ann = AnnotationUtils.getAnnotation(getMethod(), SendTo.class);
-		if (ann != null) {
-			String[] destinations = ann.value();
-			if (destinations.length > 1) {
-				throw new IllegalStateException("Invalid @" + SendTo.class.getSimpleName() + " annotation on '"
-						+ getMethod() + "' one destination must be set (got " + Arrays.toString(destinations) + ")");
+		Method method = getMethod();
+		if (method != null) {
+			SendTo ann = AnnotationUtils.getAnnotation(method, SendTo.class);
+			if (ann != null) {
+				String[] destinations = ann.value();
+				if (destinations.length > 1) {
+					throw new IllegalStateException("Invalid @" + SendTo.class.getSimpleName() + " annotation on '"
+							+ method + "' one destination must be set (got " + Arrays.toString(destinations) + ")");
+				}
+				return destinations.length == 1 ? new Address(resolve(destinations[0])) : new Address(null);
 			}
-			return destinations.length == 1 ? new Address(destinations[0]) : new Address(null);
 		}
 		return null;
+	}
+
+	private String resolve(String value) {
+		if (this.getResolver() != null) {
+			Object newValue = this.getResolver().evaluate(value, getBeanExpressionContext());
+			Assert.isInstanceOf(String.class, newValue, "Invalid @SendTo expression");
+			return (String) newValue;
+		}
+		else {
+			return value;
+		}
 	}
 
 	@Override

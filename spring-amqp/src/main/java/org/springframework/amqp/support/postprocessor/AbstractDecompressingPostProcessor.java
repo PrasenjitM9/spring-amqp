@@ -1,5 +1,5 @@
 /*
- * Copyright 2014 the original author or authors.
+ * Copyright 2014-2016 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -13,6 +13,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
 package org.springframework.amqp.support.postprocessor;
 
 import java.io.ByteArrayInputStream;
@@ -89,7 +90,7 @@ public abstract class AbstractDecompressingPostProcessor implements MessagePostP
 				FileCopyUtils.copy(unzipper, out);
 				MessageProperties messageProperties = message.getMessageProperties();
 				String encoding = messageProperties.getContentEncoding();
-				int colonAt = encoding.indexOf(":");
+				int colonAt = encoding.indexOf(':');
 				if (colonAt > 0) {
 					encoding = encoding.substring(0, colonAt);
 				}

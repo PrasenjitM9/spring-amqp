@@ -1,23 +1,34 @@
 /*
- * Copyright 2002-2015 the original author or authors.
+ * Copyright 2002-2016 the original author or authors.
  *
- * Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except in compliance with
- * the License. You may obtain a copy of the License at
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
  *
- * http://www.apache.org/licenses/LICENSE-2.0
+ *      http://www.apache.org/licenses/LICENSE-2.0
  *
- * Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on
- * an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the
- * specific language governing permissions and limitations under the License.
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
+
 package org.springframework.amqp.rabbit.listener;
 
+import static org.hamcrest.Matchers.contains;
 import static org.hamcrest.Matchers.containsString;
+import static org.hamcrest.Matchers.instanceOf;
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertThat;
 import static org.junit.Assert.assertTrue;
+import static org.mockito.Matchers.any;
 import static org.mockito.Matchers.anyBoolean;
+import static org.mockito.Mockito.atLeastOnce;
+import static org.mockito.Mockito.doReturn;
+import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -29,6 +40,7 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
@@ -40,7 +52,10 @@ import org.mockito.ArgumentCaptor;
 import org.mockito.invocation.InvocationOnMock;
 import org.mockito.stubbing.Answer;
 
+import org.springframework.amqp.AmqpIOException;
 import org.springframework.amqp.core.AnonymousQueue;
+import org.springframework.amqp.core.Message;
+import org.springframework.amqp.core.MessageListener;
 import org.springframework.amqp.core.Queue;
 import org.springframework.amqp.rabbit.connection.CachingConnectionFactory;
 import org.springframework.amqp.rabbit.connection.Connection;
@@ -49,6 +64,7 @@ import org.springframework.amqp.rabbit.connection.SingleConnectionFactory;
 import org.springframework.amqp.rabbit.core.RabbitAdmin;
 import org.springframework.amqp.rabbit.core.RabbitTemplate;
 import org.springframework.amqp.rabbit.listener.adapter.MessageListenerAdapter;
+import org.springframework.amqp.rabbit.support.ConsumerCancelledException;
 import org.springframework.amqp.rabbit.support.PublisherCallbackChannelImpl;
 import org.springframework.amqp.rabbit.test.BrokerRunning;
 import org.springframework.amqp.rabbit.test.BrokerTestUtils;
@@ -56,6 +72,7 @@ import org.springframework.amqp.rabbit.test.LongRunningIntegrationTest;
 import org.springframework.amqp.utils.test.TestUtils;
 import org.springframework.beans.DirectFieldAccessor;
 import org.springframework.beans.factory.DisposableBean;
+import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.context.support.GenericApplicationContext;
 
 import com.rabbitmq.client.AMQP.Queue.DeclareOk;
@@ -82,7 +99,7 @@ public class SimpleMessageListenerContainerIntegration2Tests {
 	private RabbitAdmin admin;
 
 	@Rule
-	public BrokerRunning brokerIsRunning = BrokerRunning.isRunning();
+	public BrokerRunning brokerIsRunning = BrokerRunning.isRunningWithEmptyQueues(queue, queue1);
 
 	@Rule
 	public LongRunningIntegrationTest longRunningIntegrationTest = new LongRunningIntegrationTest();
@@ -111,6 +128,7 @@ public class SimpleMessageListenerContainerIntegration2Tests {
 			container.shutdown();
 		}
 		((DisposableBean) template.getConnectionFactory()).destroy();
+		this.brokerIsRunning.removeTestQueues();
 	}
 
 	@Test
@@ -136,6 +154,8 @@ public class SimpleMessageListenerContainerIntegration2Tests {
 	public void testDeleteOneQueue() throws Exception {
 		CountDownLatch latch = new CountDownLatch(20);
 		container = createContainer(new MessageListenerAdapter(new PojoListener(latch)), queue.getName(), queue1.getName());
+		ApplicationEventPublisher publisher = mock(ApplicationEventPublisher.class);
+		container.setApplicationEventPublisher(publisher);
 		for (int i = 0; i < 10; i++) {
 			template.convertAndSend(queue.getName(), i + "foo");
 			template.convertAndSend(queue1.getName(), i + "foo");
@@ -167,6 +187,12 @@ public class SimpleMessageListenerContainerIntegration2Tests {
 			Thread.sleep(200);
 		}
 		assertTrue("Failed to detect missing queue", n < 100);
+		ArgumentCaptor<ListenerContainerConsumerFailedEvent> captor = ArgumentCaptor
+				.forClass(ListenerContainerConsumerFailedEvent.class);
+		verify(publisher).publishEvent(captor.capture());
+		ListenerContainerConsumerFailedEvent event = captor.getValue();
+		assertThat(event.getThrowable(), instanceOf(ConsumerCancelledException.class));
+		assertFalse(event.isFatal());
 		DirectFieldAccessor dfa = new DirectFieldAccessor(newConsumer);
 		dfa.setPropertyValue("lastRetryDeclaration", 0);
 		dfa.setPropertyValue("retryDeclarationInterval", 100);
@@ -199,6 +225,9 @@ public class SimpleMessageListenerContainerIntegration2Tests {
 		context.getBeanFactory().registerSingleton("foo", queue);
 		context.refresh();
 		container.setApplicationContext(context);
+		RabbitAdmin admin = new RabbitAdmin(this.template.getConnectionFactory());
+		admin.setApplicationContext(context);
+		container.setRabbitAdmin(admin);
 		container.afterPropertiesSet();
 		container.start();
 		for (int i = 0; i < 10; i++) {
@@ -218,6 +247,9 @@ public class SimpleMessageListenerContainerIntegration2Tests {
 
 	@Test
 	public void testExclusive() throws Exception {
+		Log logger = spy(TestUtils.getPropertyValue(this.template.getConnectionFactory(), "logger", Log.class));
+		doReturn(true).when(logger).isInfoEnabled();
+		new DirectFieldAccessor(this.template.getConnectionFactory()).setPropertyValue("logger", logger);
 		CountDownLatch latch1 = new CountDownLatch(1000);
 		SimpleMessageListenerContainer container1 = new SimpleMessageListenerContainer(template.getConnectionFactory());
 		container1.setMessageListener(new MessageListenerAdapter(new PojoListener(latch1)));
@@ -239,9 +271,14 @@ public class SimpleMessageListenerContainerIntegration2Tests {
 		container2.setMessageListener(new MessageListenerAdapter(new PojoListener(latch2)));
 		container2.setQueueNames(queue.getName());
 		container2.setApplicationContext(context);
-		container2.setRecoveryInterval(500);
-		container2.setExclusive(true); // not really necessary, but likely people will make all consumers exlusive.
+		container2.setRecoveryInterval(1000);
+		container2.setExclusive(true); // not really necessary, but likely people will make all consumers exclusive.
+		ApplicationEventPublisher publisher = mock(ApplicationEventPublisher.class);
+		container2.setApplicationEventPublisher(publisher);
 		container2.afterPropertiesSet();
+		Log containerLogger = spy(TestUtils.getPropertyValue(container2, "logger", Log.class));
+		doReturn(true).when(containerLogger).isWarnEnabled();
+		new DirectFieldAccessor(container2).setPropertyValue("logger", containerLogger);
 		container2.start();
 		for (int i = 0; i < 1000; i++) {
 			template.convertAndSend(queue.getName(), i + "foo");
@@ -255,6 +292,17 @@ public class SimpleMessageListenerContainerIntegration2Tests {
 		}
 		assertTrue(latch2.await(10, TimeUnit.SECONDS));
 		container2.stop();
+		ArgumentCaptor<String> captor = ArgumentCaptor.forClass(String.class);
+		verify(logger, atLeastOnce()).info(captor.capture());
+		assertThat(captor.getAllValues(), contains(containsString("exclusive")));
+		ArgumentCaptor<ListenerContainerConsumerFailedEvent> eventCaptor = ArgumentCaptor
+				.forClass(ListenerContainerConsumerFailedEvent.class);
+		verify(publisher).publishEvent(eventCaptor.capture());
+		ListenerContainerConsumerFailedEvent event = eventCaptor.getValue();
+		assertEquals("Consumer raised exception, attempting restart", event.getReason());
+		assertFalse(event.isFatal());
+		assertThat(event.getThrowable(), instanceOf(AmqpIOException.class));
+		verify(containerLogger).warn(any());
 	}
 
 	@Test
@@ -321,6 +369,7 @@ public class SimpleMessageListenerContainerIntegration2Tests {
 		assertTrue(networkGlitch.get());
 
 		container.stop();
+		((DisposableBean) connectionFactory).destroy();
 	}
 
 	@Test
@@ -373,6 +422,7 @@ public class SimpleMessageListenerContainerIntegration2Tests {
 		assertTrue(networkGlitch.get());
 
 		container.stop();
+		((DisposableBean) connectionFactory).destroy();
 	}
 
 	@Test
@@ -407,6 +457,35 @@ public class SimpleMessageListenerContainerIntegration2Tests {
 		assertEquals(30000L, TestUtils.getPropertyValue(consumer, "retryDeclarationInterval"));
 
 		container.stop();
+		((DisposableBean) connectionFactory).destroy();
+	}
+
+	@Test
+	public void stopStartInListener() throws Exception {
+		final AtomicReference<SimpleMessageListenerContainer> container =
+				new AtomicReference<SimpleMessageListenerContainer>();
+		final CountDownLatch latch = new CountDownLatch(2);
+		class StopStartListener implements MessageListener {
+
+			boolean doneStopStart;
+
+			@Override
+			public void onMessage(Message message) {
+				if (!doneStopStart) {
+					container.get().stop();
+					container.get().start();
+					doneStopStart = true;
+				}
+				latch.countDown();
+			}
+
+		}
+		container.set(createContainer(new StopStartListener(), this.queue.getName()));
+		container.get().setShutdownTimeout(1000);
+		this.template.convertAndSend(this.queue.getName(), "foo");
+		this.template.convertAndSend(this.queue.getName(), "foo");
+		assertTrue(latch.await(10, TimeUnit.SECONDS));
+		container.get().stop();
 	}
 
 	private boolean containerStoppedForAbortWithBadListener() throws InterruptedException {

@@ -1,30 +1,40 @@
 /*
- * Copyright 2010-2015 the original author or authors.
+ * Copyright 2002-2016 the original author or authors.
  *
- * Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except in compliance with
- * the License. You may obtain a copy of the License at
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
  *
- * http://www.apache.org/licenses/LICENSE-2.0
+ *      http://www.apache.org/licenses/LICENSE-2.0
  *
- * Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on
- * an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the
- * specific language governing permissions and limitations under the License.
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
 
 package org.springframework.amqp.rabbit.core;
 
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.instanceOf;
+import static org.hamcrest.Matchers.not;
 import static org.hamcrest.Matchers.startsWith;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
+import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertThat;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
+import static org.mockito.Matchers.any;
+import static org.mockito.Matchers.anyBoolean;
+import static org.mockito.Matchers.anyString;
 import static org.mockito.Mockito.atLeast;
 import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.doReturn;
+import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.verify;
@@ -51,7 +61,9 @@ import org.junit.After;
 import org.junit.Before;
 import org.junit.Rule;
 import org.junit.Test;
+import org.junit.runner.RunWith;
 import org.mockito.ArgumentCaptor;
+import org.mockito.Matchers;
 import org.mockito.Mockito;
 import org.mockito.invocation.InvocationOnMock;
 import org.mockito.stubbing.Answer;
@@ -59,6 +71,7 @@ import org.mockito.stubbing.Answer;
 import org.springframework.amqp.AmqpException;
 import org.springframework.amqp.AmqpIOException;
 import org.springframework.amqp.core.Address;
+import org.springframework.amqp.core.AmqpMessageReturnedException;
 import org.springframework.amqp.core.Message;
 import org.springframework.amqp.core.MessagePostProcessor;
 import org.springframework.amqp.core.MessageProperties;
@@ -67,11 +80,17 @@ import org.springframework.amqp.core.ReceiveAndReplyCallback;
 import org.springframework.amqp.core.ReceiveAndReplyMessageCallback;
 import org.springframework.amqp.core.ReplyToAddressCallback;
 import org.springframework.amqp.rabbit.connection.CachingConnectionFactory;
+import org.springframework.amqp.rabbit.connection.Connection;
+import org.springframework.amqp.rabbit.connection.ConnectionFactory;
+import org.springframework.amqp.rabbit.connection.ConnectionFactoryUtils;
+import org.springframework.amqp.rabbit.connection.RabbitResourceHolder;
 import org.springframework.amqp.rabbit.connection.SingleConnectionFactory;
 import org.springframework.amqp.rabbit.listener.SimpleMessageListenerContainer;
 import org.springframework.amqp.rabbit.listener.adapter.MessageListenerAdapter;
+import org.springframework.amqp.rabbit.support.ConsumerCancelledException;
 import org.springframework.amqp.rabbit.support.DefaultMessagePropertiesConverter;
 import org.springframework.amqp.rabbit.support.MessagePropertiesConverter;
+import org.springframework.amqp.rabbit.support.PublisherCallbackChannelImpl;
 import org.springframework.amqp.rabbit.test.BrokerRunning;
 import org.springframework.amqp.rabbit.test.BrokerTestUtils;
 import org.springframework.amqp.support.converter.SimpleMessageConverter;
@@ -81,21 +100,37 @@ import org.springframework.amqp.utils.SerializationUtils;
 import org.springframework.amqp.utils.test.TestUtils;
 import org.springframework.beans.DirectFieldAccessor;
 import org.springframework.beans.factory.DisposableBean;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.context.annotation.Bean;
 import org.springframework.expression.common.LiteralExpression;
 import org.springframework.scheduling.concurrent.ThreadPoolTaskExecutor;
+import org.springframework.test.annotation.DirtiesContext;
+import org.springframework.test.context.ContextConfiguration;
+import org.springframework.test.context.junit4.SpringJUnit4ClassRunner;
+import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.TransactionDefinition;
 import org.springframework.transaction.TransactionException;
 import org.springframework.transaction.TransactionStatus;
+import org.springframework.transaction.interceptor.TransactionAttribute;
+import org.springframework.transaction.interceptor.TransactionInterceptor;
 import org.springframework.transaction.support.AbstractPlatformTransactionManager;
 import org.springframework.transaction.support.DefaultTransactionStatus;
+import org.springframework.transaction.support.SimpleTransactionStatus;
 import org.springframework.transaction.support.TransactionCallback;
 import org.springframework.transaction.support.TransactionCallbackWithoutResult;
+import org.springframework.transaction.support.TransactionSynchronization;
+import org.springframework.transaction.support.TransactionSynchronizationAdapter;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
+import org.springframework.transaction.support.TransactionSynchronizationUtils;
 import org.springframework.transaction.support.TransactionTemplate;
 import org.springframework.util.ReflectionUtils;
 import org.springframework.util.ReflectionUtils.FieldCallback;
 import org.springframework.util.ReflectionUtils.FieldFilter;
 
+import com.rabbitmq.client.AMQP.BasicProperties;
 import com.rabbitmq.client.Channel;
+import com.rabbitmq.client.Consumer;
+import com.rabbitmq.client.Envelope;
 import com.rabbitmq.client.GetResponse;
 import com.rabbitmq.client.ShutdownSignalException;
 
@@ -107,6 +142,9 @@ import com.rabbitmq.client.ShutdownSignalException;
  * @author Gunnar Hillert
  * @author Artem Bilan
  */
+@ContextConfiguration
+@RunWith(SpringJUnit4ClassRunner.class)
+@DirtiesContext
 public class RabbitTemplateIntegrationTests {
 
 	private static final Log logger = LogFactory.getLog(RabbitTemplateIntegrationTests.class);
@@ -117,11 +155,21 @@ public class RabbitTemplateIntegrationTests {
 
 	private RabbitTemplate template;
 
+	@Autowired
+	private RabbitTemplate routingTemplate;
+
+	@Autowired
+	private ConnectionFactory cf1;
+
+	@Autowired
+	private ConnectionFactory cf2;
+
 	@Before
 	public void create() {
 		final CachingConnectionFactory connectionFactory = new CachingConnectionFactory();
 		connectionFactory.setHost("localhost");
 		connectionFactory.setPort(BrokerTestUtils.getPort());
+		connectionFactory.setPublisherReturns(true);
 		template = new RabbitTemplate(connectionFactory);
 		template.setSendConnectionFactorySelectorExpression(new LiteralExpression("foo"));
 	}
@@ -129,10 +177,158 @@ public class RabbitTemplateIntegrationTests {
 	@After
 	public void cleanup() throws Exception {
 		((DisposableBean) template.getConnectionFactory()).destroy();
+		this.brokerIsRunning.removeTestQueues();
 	}
 
 	@Rule
 	public BrokerRunning brokerIsRunning = BrokerRunning.isRunningWithEmptyQueues(ROUTE, REPLY_QUEUE.getName());
+
+	@Test
+	public void testReceiveNonBlocking() throws Exception {
+		this.template.convertAndSend(ROUTE, "nonblock");
+		int n = 0;
+		String out = (String) this.template.receiveAndConvert(ROUTE);
+		while (n++ < 100 && out == null) {
+			Thread.sleep(100);
+		}
+		assertNotNull(out);
+		assertEquals("nonblock", out);
+		assertNull(this.template.receive(ROUTE));
+	}
+
+	@Test(expected = ConsumerCancelledException.class)
+	public void testReceiveConsumerCanceled() throws Exception {
+		ConnectionFactory connectionFactory = new SingleConnectionFactory("localhost", BrokerTestUtils.getPort());
+
+		class MockConsumer implements Consumer {
+
+			private final Consumer delegate;
+
+			MockConsumer(Consumer delegate) {
+				this.delegate = delegate;
+			}
+
+			@Override
+			public void handleConsumeOk(String consumerTag) {
+				this.delegate.handleConsumeOk(consumerTag);
+				try {
+					handleCancel(consumerTag);
+				}
+				catch (IOException e) {
+					throw new IllegalStateException(e);
+				}
+			}
+
+			@Override
+			public void handleCancelOk(String consumerTag) {
+				this.delegate.handleCancelOk(consumerTag);
+			}
+
+			@Override
+			public void handleCancel(String consumerTag) throws IOException {
+				this.delegate.handleCancel(consumerTag);
+			}
+
+			@Override
+			public void handleShutdownSignal(String consumerTag, ShutdownSignalException sig) {
+				this.delegate.handleShutdownSignal(consumerTag, sig);
+			}
+
+			@Override
+			public void handleRecoverOk(String consumerTag) {
+				this.delegate.handleRecoverOk(consumerTag);
+			}
+
+			@Override
+			public void handleDelivery(String consumerTag, Envelope envelope, BasicProperties properties, byte[] body)
+					throws IOException {
+				this.delegate.handleDelivery(consumerTag, envelope, properties, body);
+			}
+
+		}
+
+		class MockChannel extends PublisherCallbackChannelImpl {
+
+			public MockChannel(Channel delegate) {
+				super(delegate);
+			}
+
+			@Override
+			public String basicConsume(String queue, Consumer callback)
+					throws IOException {
+				return super.basicConsume(queue, new MockConsumer(callback));
+			}
+
+		}
+
+		Connection connection = spy(connectionFactory.createConnection());
+		when(connection.createChannel(anyBoolean())).then(new Answer<Channel>() {
+
+			@Override
+			public Channel answer(InvocationOnMock invocation) throws Throwable {
+				return new MockChannel((Channel) invocation.callRealMethod());
+			}
+
+		});
+
+		DirectFieldAccessor dfa = new DirectFieldAccessor(connectionFactory);
+		dfa.setPropertyValue("connection", connection);
+
+		this.template = new RabbitTemplate(connectionFactory);
+		this.template.setReceiveTimeout(10000);
+		this.template.receive(ROUTE);
+	}
+
+	@Test
+	public void testReceiveBlocking() throws Exception {
+		this.template.convertAndSend(ROUTE, "block");
+		String out = (String) this.template.receiveAndConvert(ROUTE, 10000);
+		assertNotNull(out);
+		assertEquals("block", out);
+		this.template.setReceiveTimeout(0);
+		assertNull(this.template.receive(ROUTE));
+	}
+
+	@Test
+	public void testReceiveBlockingNoTimeout() throws Exception {
+		this.template.convertAndSend(ROUTE, "blockNoTO");
+		String out = (String) this.template.receiveAndConvert(ROUTE, -1);
+		assertNotNull(out);
+		assertEquals("blockNoTO", out);
+		this.template.setReceiveTimeout(1); // test the no message after timeout path
+		assertNull(this.template.receive(ROUTE));
+	}
+
+	@Test
+	public void testReceiveBlockingTx() throws Exception {
+		this.template.convertAndSend(ROUTE, "blockTX");
+		this.template.setChannelTransacted(true);
+		this.template.setReceiveTimeout(10000);
+		String out = (String) this.template.receiveAndConvert(ROUTE);
+		assertNotNull(out);
+		assertEquals("blockTX", out);
+		this.template.setReceiveTimeout(0);
+		assertNull(this.template.receive(ROUTE));
+	}
+
+	@Test
+	public void testReceiveBlockingGlobalTx() throws Exception {
+		template.convertAndSend(ROUTE, "blockGTXNoTO");
+		RabbitResourceHolder resourceHolder = ConnectionFactoryUtils.getTransactionalResourceHolder(
+				this.template.getConnectionFactory(), true);
+		TransactionSynchronizationManager.setActualTransactionActive(true);
+		ConnectionFactoryUtils.bindResourceToTransaction(resourceHolder, this.template.getConnectionFactory(), true);
+		template.setReceiveTimeout(-1);
+		template.setChannelTransacted(true);
+		String out = (String) template.receiveAndConvert(ROUTE);
+		resourceHolder.commitAll();
+		resourceHolder.closeAll();
+		assertSame(resourceHolder, TransactionSynchronizationManager.unbindResource(template.getConnectionFactory()));
+		assertNotNull(out);
+		assertEquals("blockGTXNoTO", out);
+		this.template.setReceiveTimeout(0);
+		assertNull(this.template.receive(ROUTE));
+	}
 
 	@Test
 	public void testSendToNonExistentAndThenReceive() throws Exception {
@@ -141,7 +337,8 @@ public class RabbitTemplateIntegrationTests {
 		try {
 			template.convertAndSend("", "no.such.route", "message");
 			// fail("Expected AmqpException");
-		} catch (AmqpException e) {
+		}
+		catch (AmqpException e) {
 			// e.printStackTrace();
 		}
 		// Now send the real message, and all should be well...
@@ -154,7 +351,8 @@ public class RabbitTemplateIntegrationTests {
 
 	@Test
 	public void testSendAndReceiveWithPostProcessor() throws Exception {
-		template.convertAndSend(ROUTE, (Object)"message", new MessagePostProcessor() {
+		template.convertAndSend(ROUTE, (Object) "message", new MessagePostProcessor() {
+
 			@Override
 			public Message postProcessMessage(Message message) throws AmqpException {
 				message.getMessageProperties().setContentType("text/other");
@@ -175,6 +373,20 @@ public class RabbitTemplateIntegrationTests {
 		assertEquals("message", result);
 		result = (String) template.receiveAndConvert(ROUTE);
 		assertEquals(null, result);
+	}
+
+	@Test
+	public void testSendAndReceiveUndeliverable() throws Exception {
+		template.setMandatory(true);
+		try {
+			template.convertSendAndReceive(ROUTE + "xxxxxxxx", "undeliverable");
+			fail("expected exception");
+		}
+		catch (AmqpMessageReturnedException e) {
+			assertEquals("undeliverable", new String(e.getReturnedMessage().getBody()));
+			assertEquals("NO_ROUTE", e.getReplyText());
+		}
+		assertEquals(0, TestUtils.getPropertyValue(template, "replyHolder", Map.class).size());
 	}
 
 	@Test
@@ -208,6 +420,7 @@ public class RabbitTemplateIntegrationTests {
 		// closed...
 		try {
 			template.execute(new ChannelCallback<String>() {
+
 				@Override
 				public String doInRabbit(Channel channel) throws Exception {
 					// Switch off the auto-ack so the message is rolled back...
@@ -220,7 +433,8 @@ public class RabbitTemplateIntegrationTests {
 				}
 			});
 			fail("Expected PlannedException");
-		} catch (Exception e) {
+		}
+		catch (Exception e) {
 			assertTrue(e.getCause() instanceof PlannedException);
 		}
 		String result = (String) template.receiveAndConvert(ROUTE);
@@ -258,6 +472,7 @@ public class RabbitTemplateIntegrationTests {
 		template.setChannelTransacted(true);
 		String result = new TransactionTemplate(new TestTransactionManager())
 				.execute(new TransactionCallback<String>() {
+
 					@Override
 					public String doInTransaction(TransactionStatus status) {
 						return (String) template.receiveAndConvert(ROUTE);
@@ -275,6 +490,7 @@ public class RabbitTemplateIntegrationTests {
 		template.setChannelTransacted(true);
 		String result = new TransactionTemplate(new TestTransactionManager())
 				.execute(new TransactionCallback<String>() {
+
 					@Override
 					public String doInTransaction(TransactionStatus status) {
 						return (String) template.receiveAndConvert(ROUTE);
@@ -292,6 +508,7 @@ public class RabbitTemplateIntegrationTests {
 		template.convertAndSend(ROUTE, "message");
 		try {
 			new TransactionTemplate(new TestTransactionManager()).execute(new TransactionCallback<String>() {
+
 				@Override
 				public String doInTransaction(TransactionStatus status) {
 					template.receiveAndConvert(ROUTE);
@@ -299,7 +516,8 @@ public class RabbitTemplateIntegrationTests {
 				}
 			});
 			fail("Expected PlannedException");
-		} catch (PlannedException e) {
+		}
+		catch (PlannedException e) {
 			// Expected
 		}
 		String result = (String) template.receiveAndConvert(ROUTE);
@@ -315,6 +533,7 @@ public class RabbitTemplateIntegrationTests {
 		template.convertAndSend(ROUTE, "message");
 		try {
 			new TransactionTemplate(new TestTransactionManager()).execute(new TransactionCallback<String>() {
+
 				@Override
 				public String doInTransaction(TransactionStatus status) {
 					template.receiveAndConvert(ROUTE);
@@ -322,7 +541,8 @@ public class RabbitTemplateIntegrationTests {
 				}
 			});
 			fail("Expected PlannedException");
-		} catch (PlannedException e) {
+		}
+		catch (PlannedException e) {
 			// Expected
 		}
 		// No rollback
@@ -334,6 +554,7 @@ public class RabbitTemplateIntegrationTests {
 	public void testSendInExternalTransaction() throws Exception {
 		template.setChannelTransacted(true);
 		new TransactionTemplate(new TestTransactionManager()).execute(new TransactionCallback<Void>() {
+
 			@Override
 			public Void doInTransaction(TransactionStatus status) {
 				template.convertAndSend(ROUTE, "message");
@@ -351,6 +572,7 @@ public class RabbitTemplateIntegrationTests {
 		template.setChannelTransacted(true);
 		try {
 			new TransactionTemplate(new TestTransactionManager()).execute(new TransactionCallback<Void>() {
+
 				@Override
 				public Void doInTransaction(TransactionStatus status) {
 					template.convertAndSend(ROUTE, "message");
@@ -358,7 +580,8 @@ public class RabbitTemplateIntegrationTests {
 				}
 			});
 			fail("Expected PlannedException");
-		} catch (PlannedException e) {
+		}
+		catch (PlannedException e) {
 			// Expected
 		}
 		String result = (String) template.receiveAndConvert(ROUTE);
@@ -414,6 +637,7 @@ public class RabbitTemplateIntegrationTests {
 		connectionFactory.setExecutor(exec);
 		final Field[] fields = new Field[1];
 		ReflectionUtils.doWithFields(RabbitTemplate.class, new FieldCallback() {
+
 			@Override
 			public void doWith(Field field) throws IllegalArgumentException,
 					IllegalAccessException {
@@ -421,6 +645,7 @@ public class RabbitTemplateIntegrationTests {
 				fields[0] = field;
 			}
 		}, new FieldFilter() {
+
 			@Override
 			public boolean matches(Field field) {
 				return field.getName().equals("logger");
@@ -431,7 +656,8 @@ public class RabbitTemplateIntegrationTests {
 
 		final AtomicBoolean execConfiguredOk = new AtomicBoolean();
 
-		doAnswer(new Answer<Object>(){
+		doAnswer(new Answer<Object>() {
+
 			@Override
 			public Object answer(InvocationOnMock invocation) throws Throwable {
 				String log = (String) invocation.getArguments()[0];
@@ -675,6 +901,7 @@ public class RabbitTemplateIntegrationTests {
 
 		});
 		String result = (String) template.convertSendAndReceive((Object) "message", new MessagePostProcessor() {
+
 			@Override
 			public Message postProcessMessage(Message message) throws AmqpException {
 				try {
@@ -717,6 +944,7 @@ public class RabbitTemplateIntegrationTests {
 
 		});
 		String result = (String) template.convertSendAndReceive(ROUTE, (Object) "message", new MessagePostProcessor() {
+
 			@Override
 			public Message postProcessMessage(Message message) throws AmqpException {
 				try {
@@ -801,10 +1029,20 @@ public class RabbitTemplateIntegrationTests {
 	}
 
 	@Test
-	public void testReceiveAndReply() {
+	public void testReceiveAndReplyBlocking() {
+		testReceiveAndReply(10000);
+	}
+
+	@Test
+	public void testReceiveAndReplyNonBlocking() {
+		testReceiveAndReply(0);
+	}
+
+	private void testReceiveAndReply(long timeout) {
 		this.template.setQueue(ROUTE);
 		this.template.setRoutingKey(ROUTE);
 		this.template.convertAndSend(ROUTE, "test");
+		template.setReceiveTimeout(timeout);
 
 		boolean received = this.template.receiveAndReply(new ReceiveAndReplyMessageCallback() {
 
@@ -849,6 +1087,9 @@ public class RabbitTemplateIntegrationTests {
 		assertTrue(result instanceof Integer);
 		assertEquals(4, result);
 
+		if (timeout > 0) {
+			this.template.setReceiveTimeout(1);
+		}
 		received = this.template.receiveAndReply(new ReceiveAndReplyMessageCallback() {
 
 			@Override
@@ -859,6 +1100,7 @@ public class RabbitTemplateIntegrationTests {
 		assertFalse(received);
 
 		this.template.convertAndSend(ROUTE, "test");
+		this.template.setReceiveTimeout(timeout);
 		received = this.template.receiveAndReply(new ReceiveAndReplyMessageCallback() {
 
 			@Override
@@ -868,10 +1110,12 @@ public class RabbitTemplateIntegrationTests {
 		});
 		assertTrue(received);
 
+		this.template.setReceiveTimeout(0);
 		result = this.template.receive();
 		assertNull(result);
 
 		this.template.convertAndSend(ROUTE, "TEST");
+		this.template.setReceiveTimeout(timeout);
 		received = this.template.receiveAndReply(new ReceiveAndReplyMessageCallback() {
 
 			@Override
@@ -894,13 +1138,16 @@ public class RabbitTemplateIntegrationTests {
 		result = this.template.receiveAndConvert(ROUTE);
 		assertEquals("TEST", result);
 
-		assertEquals(null, template.receive(ROUTE));
+		this.template.setReceiveTimeout(0);
+		assertEquals(null, this.template.receive(ROUTE));
 
-		template.setChannelTransacted(true);
+		this.template.setChannelTransacted(true);
 
 		this.template.convertAndSend(ROUTE, "TEST");
+		this.template.setReceiveTimeout(timeout);
 		result = new TransactionTemplate(new TestTransactionManager())
 				.execute(new TransactionCallback<String>() {
+
 					@Override
 					public String doInTransaction(TransactionStatus status) {
 						final AtomicReference<String> payloadReference = new AtomicReference<String>();
@@ -917,9 +1164,11 @@ public class RabbitTemplateIntegrationTests {
 					}
 				});
 		assertEquals("TEST", result);
-		assertEquals(null, template.receive(ROUTE));
+		this.template.setReceiveTimeout(0);
+		assertEquals(null, this.template.receive(ROUTE));
 
 		this.template.convertAndSend(ROUTE, "TEST");
+		this.template.setReceiveTimeout(timeout);
 		try {
 			new TransactionTemplate(new TestTransactionManager())
 					.execute(new TransactionCallbackWithoutResult() {
@@ -928,17 +1177,17 @@ public class RabbitTemplateIntegrationTests {
 						public void doInTransactionWithoutResult(TransactionStatus status) {
 							template.receiveAndReply(new ReceiveAndReplyMessageCallback() {
 
-														 @Override
-														 public Message handle(Message message) {
-															 return message;
-														 }
-													 }, new ReplyToAddressCallback<Message>() {
+								@Override
+								public Message handle(Message message) {
+									return message;
+								}
+							}, new ReplyToAddressCallback<Message>() {
 
-														 @Override
-														 public Address getReplyToAddress(Message request, Message reply) {
-															 throw new PlannedException();
-														 }
-													 });
+								@Override
+								public Address getReplyToAddress(Message request, Message reply) {
+									throw new PlannedException();
+								}
+							});
 						}
 					});
 			fail("Expected PlannedException");
@@ -947,11 +1196,12 @@ public class RabbitTemplateIntegrationTests {
 			assertTrue(e.getCause() instanceof PlannedException);
 		}
 
-		assertEquals("TEST", template.receiveAndConvert(ROUTE));
-		assertEquals(null, template.receive(ROUTE));
+		assertEquals("TEST", this.template.receiveAndConvert(ROUTE));
+		this.template.setReceiveTimeout(0);
+		assertEquals(null, this.template.receive(ROUTE));
 
 		template.convertAndSend("test");
-
+		this.template.setReceiveTimeout(timeout);
 		try {
 			this.template.receiveAndReply(new ReceiveAndReplyCallback<Double, Void>() {
 
@@ -973,7 +1223,7 @@ public class RabbitTemplateIntegrationTests {
 	public void testSymmetricalReceiveAndReply() throws InterruptedException, UnsupportedEncodingException {
 		this.template.setQueue(ROUTE);
 		this.template.setRoutingKey(ROUTE);
-		this.template.setReplyQueue(REPLY_QUEUE);
+		this.template.setReplyAddress(REPLY_QUEUE.getName());
 		this.template.setReplyTimeout(10000);
 
 		SimpleMessageListenerContainer container = new SimpleMessageListenerContainer();
@@ -1031,7 +1281,8 @@ public class RabbitTemplateIntegrationTests {
 			if (System.currentTimeMillis() > start + 10000) {
 				fail("Something wrong with RabbitMQ");
 			}
-		} while (receiveCount.get() < count * 2);
+		}
+		while (receiveCount.get() < count * 2);
 
 
 		executor.shutdown();
@@ -1073,11 +1324,28 @@ public class RabbitTemplateIntegrationTests {
 
 	@Test
 	public void testSendAndReceiveFastExplicit() {
-		this.template.setReplyQueue(new Queue(Address.AMQ_RABBITMQ_REPLY_TO));
+		this.template.setReplyAddress(Address.AMQ_RABBITMQ_REPLY_TO);
+		sendAndReceiveFastGuts();
+	}
+
+	@Test
+	public void testSendAndReceiveNeverFast() {
+		this.template.setUseTemporaryReplyQueues(true);
+		sendAndReceiveFastGuts(true);
+	}
+
+	@Test
+	public void testSendAndReceiveNeverFastWitReplyQueue() {
+		this.template.setUseTemporaryReplyQueues(true);
+		this.template.setReplyAddress(Address.AMQ_RABBITMQ_REPLY_TO);
 		sendAndReceiveFastGuts();
 	}
 
 	private void sendAndReceiveFastGuts() {
+		sendAndReceiveFastGuts(false);
+	}
+
+	private void sendAndReceiveFastGuts(boolean tempQueue) {
 		try {
 			this.template.execute(new ChannelCallback<Void>() {
 
@@ -1108,7 +1376,12 @@ public class RabbitTemplateIntegrationTests {
 			Object result = this.template.convertSendAndReceive("foo");
 			container.stop();
 			assertEquals("FOO", result);
-			assertThat(replyToWas.get(), startsWith(Address.AMQ_RABBITMQ_REPLY_TO));
+			if (tempQueue) {
+				assertThat(replyToWas.get(), not(startsWith(Address.AMQ_RABBITMQ_REPLY_TO)));
+			}
+			else {
+				assertThat(replyToWas.get(), startsWith(Address.AMQ_RABBITMQ_REPLY_TO));
+			}
 		}
 		catch (Exception e) {
 			assertThat(e.getCause().getCause().getMessage(), containsString("404"));
@@ -1154,7 +1427,7 @@ public class RabbitTemplateIntegrationTests {
 	public void testDegugLogOnPassiveDeclaration() {
 		CachingConnectionFactory connectionFactory = new CachingConnectionFactory("localhost");
 		Log logger = spy(TestUtils.getPropertyValue(connectionFactory, "logger", Log.class));
-		when(logger.isDebugEnabled()).thenReturn(true);
+		doReturn(true).when(logger).isDebugEnabled();
 		new DirectFieldAccessor(connectionFactory).setPropertyValue("logger", logger);
 		RabbitTemplate template = new RabbitTemplate(connectionFactory);
 		final String queueName = UUID.randomUUID().toString();
@@ -1208,8 +1481,119 @@ public class RabbitTemplateIntegrationTests {
 		connectionFactory.destroy();
 	}
 
+	@Test
+	public void testRouting() throws Exception {
+		Connection connection1 = mock(Connection.class);
+		when(this.cf1.createConnection()).thenReturn(connection1);
+		Channel channel1 = mock(Channel.class);
+		when(connection1.createChannel(false)).thenReturn(channel1);
+		this.routingTemplate.convertAndSend("exchange", "routingKey", "xyz", new MessagePostProcessor() {
+
+			@Override
+			public Message postProcessMessage(Message message) throws AmqpException {
+				message.getMessageProperties().setHeader("cfKey", "foo");
+				return message;
+			}
+		});
+		verify(channel1).basicPublish(anyString(), anyString(), Matchers.anyBoolean(),
+				any(BasicProperties.class), any(byte[].class));
+
+		Connection connection2 = mock(Connection.class);
+		when(this.cf2.createConnection()).thenReturn(connection2);
+		Channel channel2 = mock(Channel.class);
+		when(connection2.createChannel(false)).thenReturn(channel2);
+		this.routingTemplate.convertAndSend("exchange", "routingKey", "xyz", new MessagePostProcessor() {
+
+			@Override
+			public Message postProcessMessage(Message message) throws AmqpException {
+				message.getMessageProperties().setHeader("cfKey", "bar");
+				return message;
+			}
+		});
+		verify(channel1).basicPublish(anyString(), anyString(), Matchers.anyBoolean(),
+				any(BasicProperties.class), any(byte[].class));
+	}
+
+	@Test
+	public void testSendInGlobalTransactionCommit() throws Exception {
+		testSendInGlobalTransactionGuts(false);
+
+		String result = (String) template.receiveAndConvert(ROUTE);
+		assertEquals("message", result);
+		assertNull(template.receive(ROUTE));
+	}
+
+	@Test
+	public void testSendInGlobalTransactionRollback() throws Exception {
+		testSendInGlobalTransactionGuts(true);
+
+		assertNull(template.receive(ROUTE));
+	}
+
+	@SuppressWarnings({"serial", "unchecked"})
+	private void testSendInGlobalTransactionGuts(final boolean rollback) throws Exception {
+		template.setChannelTransacted(true);
+		new TransactionTemplate(new TestTransactionManager()).execute(new TransactionCallback<Void>() {
+
+			@Override
+			public Void doInTransaction(final TransactionStatus status) {
+
+				// Emulate Global TX with the mock non-new TransactionStatus
+				new TransactionInterceptor() {
+
+					{
+						prepareTransactionInfo(null, null, null, null);
+					}
+
+					@Override
+					protected TransactionInfo prepareTransactionInfo(PlatformTransactionManager tm,
+					                                                 TransactionAttribute txAttr,
+					                                                 String joinpointIdentification,
+					                                                 TransactionStatus status) {
+						TransactionInfo txInfo = new TransactionInfo(tm, txAttr, joinpointIdentification);
+						txInfo.newTransactionStatus(new SimpleTransactionStatus(false));
+
+						final ThreadLocal<TransactionInfo> transactionInfoHolder =
+								(ThreadLocal<TransactionInfo>) TestUtils.getPropertyValue(this,
+										"transactionInfoHolder");
+						assertNotNull(transactionInfoHolder);
+						transactionInfoHolder.set(txInfo);
+						TransactionSynchronizationManager.registerSynchronization(
+								new TransactionSynchronizationAdapter() {
+
+									@Override
+									public void afterCompletion(int status) {
+										transactionInfoHolder.remove();
+									}
+								});
+						return txInfo;
+					}
+
+				};
+				template.convertAndSend(ROUTE, "message");
+
+				if (rollback) {
+					TransactionSynchronizationManager.registerSynchronization(
+							new TransactionSynchronizationAdapter() {
+
+								@Override
+								public void afterCommit() {
+									TransactionSynchronizationUtils.triggerAfterCompletion(
+											TransactionSynchronization.STATUS_ROLLED_BACK);
+								}
+
+							});
+				}
+
+				return null;
+			}
+
+		});
+	}
+
 	@SuppressWarnings("serial")
 	private class PlannedException extends RuntimeException {
+
 		public PlannedException() {
 			super("Planned");
 		}
@@ -1233,6 +1617,25 @@ public class RabbitTemplateIntegrationTests {
 
 		@Override
 		protected void doRollback(DefaultTransactionStatus status) throws TransactionException {
+		}
+
+	}
+
+	public static class RCFConfig {
+
+		@Bean
+		public ConnectionFactory cf1() {
+			return mock(ConnectionFactory.class);
+		}
+
+		@Bean
+		public ConnectionFactory cf2() {
+			return mock(ConnectionFactory.class);
+		}
+
+		@Bean
+		public ConnectionFactory defaultCF() {
+			return mock(ConnectionFactory.class);
 		}
 
 	}

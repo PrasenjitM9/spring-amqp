@@ -509,10 +509,32 @@
 	</xsd:element>
 
 	<xsd:complexType name="listenerContainerBaseType">
+<!--
+	REMOVED in 1.5 - originally, it was deprecated in 1.5 M1 but that resulted in confusion.
+	So, we decided to remove it completely so configuration will fail fast when migrating to 1.5.
+
+	Users need to move the id from the listener-container element to the child listener elements.
+
 		<xsd:attribute name="id" type="xsd:string">
 			<xsd:annotation>
 				<xsd:documentation><![CDATA[
-	Optional bean id for the container.
+	Deprecated - the top level container 'id' is no longer used when naming the child
+	'listener' beans - the 'id' there alone is now used instead. Also, the 'id'
+	attribute was ignored in a rabbit template 'reply-listener' where the bean name
+	is always 'templateId.replyListener'. This attribute will be removed in a future
+	release.
+				]]></xsd:documentation>
+			</xsd:annotation>
+		</xsd:attribute>
+-->
+		<xsd:attribute name="group" type="xsd:string">
+			<xsd:annotation>
+				<xsd:documentation><![CDATA[
+	When provided, the containers created by this element will be added to a bean of type
+	'Collection<MessageListenerContainer>` with this as the bean name. It allows,
+	for example, access to the containers to start/stop etc, by iterating over the collection.
+	If the same group is used multiple times, the collection will be the aggregate of all
+	containers so designated.
 				]]></xsd:documentation>
 			</xsd:annotation>
 		</xsd:attribute>
@@ -693,7 +715,23 @@
 				<xsd:documentation><![CDATA[
 	The time in milliseconds between attempts to start a consumer if it fails to start with a non-fatal error. Default 5000.
 	See also 'missing-queues-fatal'. Fatal errors include authentication problems.
+	Mutually exclusive with 'recovery-back-off'.
 				]]></xsd:documentation>
+			</xsd:annotation>
+		</xsd:attribute>
+		<xsd:attribute name="recovery-back-off" type="xsd:string">
+			<xsd:annotation>
+				<xsd:documentation><![CDATA[
+	The BackOff bean reference for recovery interval between attempts to start a consumer
+	if it fails to start with a non-fatal error. Default FixedBackOff with unlimited retries every 5 seconds.
+	See also 'missing-queues-fatal'. Fatal errors include authentication problems.
+	Mutually exclusive with 'recovery-interval'.
+				]]></xsd:documentation>
+				<xsd:appinfo>
+					<tool:annotation kind="ref">
+						<tool:expected-type type="org.springframework.util.backoff.BackOff" />
+					</tool:annotation>
+				</xsd:appinfo>
 			</xsd:annotation>
 		</xsd:attribute>
 		<xsd:attribute name="missing-queues-fatal" type="xsd:string">
@@ -745,13 +783,28 @@
 				<xsd:union memberTypes="xsd:boolean xsd:string" />
 			</xsd:simpleType>
 		</xsd:attribute>
+		<xsd:attribute name="consumer-tag-strategy" type="xsd:string">
+			<xsd:annotation>
+				<xsd:documentation><![CDATA[
+	A reference to an implementation of ConsumerTagStrategy - used to generate the consumer
+	tag for the container consumers - by default, the RabbitMQ server generates the consumer
+	tag.
+				]]></xsd:documentation>
+				<xsd:appinfo>
+					<tool:annotation kind="ref">
+						<tool:expected-type type="org.springframework.amqp.support.ConsumerTagStrategy" />
+					</tool:annotation>
+				</xsd:appinfo>
+			</xsd:annotation>
+		</xsd:attribute>
 	</xsd:complexType>
 
 	<xsd:complexType name="listenerType">
 		<xsd:attribute name="id" type="xsd:string">
 			<xsd:annotation>
 				<xsd:documentation><![CDATA[
-	The unique identifier for this listener.
+	The unique identifier for this listener. Normal bean name overrides will apply - a
+	listener that is parsed later with the same id will override this bean.
 				]]></xsd:documentation>
 			</xsd:annotation>
 		</xsd:attribute>
@@ -945,10 +998,18 @@
 					]]></xsd:documentation>
 				</xsd:annotation>
 			</xsd:attribute>
+			<xsd:attribute name="receive-timeout" type="xsd:string" use="optional">
+				<xsd:annotation>
+					<xsd:documentation><![CDATA[
+	Timeout for receive operations in milliseconds; '-1' to wait indefinitely.
+	Default is 0 (immediate timeout).
+					]]></xsd:documentation>
+				</xsd:annotation>
+			</xsd:attribute>
 			<xsd:attribute name="reply-timeout" type="xsd:string" use="optional">
 				<xsd:annotation>
 					<xsd:documentation><![CDATA[
-	Timeout for send and receive in milliseconds.  Default is 5000 (5 seconds).
+	Timeout for send and receive operations in milliseconds.  Default is 5000 (5 seconds).
 					]]></xsd:documentation>
 				</xsd:annotation>
 			</xsd:attribute>
@@ -994,7 +1055,27 @@
 				<xsd:annotation>
 					<xsd:documentation><![CDATA[
 	A reference to a <queue/> for replies; optional; if not supplied, methods expecting replies
-	will use a temporary, exclusive, auto-delete queue.
+	will use a temporary, exclusive, auto-delete queue or, if the RabbitMQ version is 3.4 or higher,
+	using the 'direct reply-to' mechanism. See also 'reply-address'.
+					]]></xsd:documentation>
+					<xsd:appinfo>
+						<tool:annotation kind="ref">
+							<tool:expected-type type="org.springframework.amqp.core.Queue" />
+						</tool:annotation>
+					</xsd:appinfo>
+				</xsd:annotation>
+			</xsd:attribute>
+			<xsd:attribute name="reply-address" type="xsd:string" use="optional">
+				<xsd:annotation>
+					<xsd:documentation><![CDATA[
+	Reply addressing information; by default, replies will be routed to the default exchange
+	using the 'reply-queue' name as the routing key; an address with the form
+	'exchange/routingKey' means that replies will be published to the specified exchange
+	and routed using the specified routing key.
+	The 'reply-address' value has precedence over 'reply-queue' value.
+	The '<reply-listener>' must be configured as a separate '<listener-container>' component, when only
+	'reply-address' is in use.
+	The 'reply-address' and 'reply-queue' must refer to the same queue logically for proper reply routing logic.
 					]]></xsd:documentation>
 					<xsd:appinfo>
 						<tool:annotation kind="ref">

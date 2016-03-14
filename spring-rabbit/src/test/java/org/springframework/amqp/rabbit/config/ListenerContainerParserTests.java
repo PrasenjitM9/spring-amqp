@@ -1,5 +1,5 @@
 /*
- * Copyright 2010-2013 the original author or authors.
+ * Copyright 2010-2016 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -19,15 +19,17 @@ package org.springframework.amqp.rabbit.config;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
+import static org.junit.Assert.assertThat;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
 
 import java.lang.reflect.Method;
 import java.util.Arrays;
+import java.util.Collection;
 import java.util.Map;
-import java.util.concurrent.atomic.AtomicInteger;
 
 import org.aopalliance.aop.Advice;
+import org.hamcrest.Matchers;
 import org.junit.Before;
 import org.junit.Test;
 
@@ -36,6 +38,7 @@ import org.springframework.amqp.core.Queue;
 import org.springframework.amqp.rabbit.connection.ConnectionFactory;
 import org.springframework.amqp.rabbit.listener.SimpleMessageListenerContainer;
 import org.springframework.amqp.rabbit.listener.adapter.MessageListenerAdapter;
+import org.springframework.amqp.support.ConsumerTagStrategy;
 import org.springframework.amqp.utils.test.TestUtils;
 import org.springframework.aop.MethodBeforeAdvice;
 import org.springframework.beans.DirectFieldAccessor;
@@ -50,6 +53,7 @@ import org.springframework.test.util.ReflectionTestUtils;
 /**
  * @author Mark Fisher
  * @author Gary Russell
+ * @author Artem Bilan
  */
 public class ListenerContainerParserTests {
 
@@ -57,9 +61,6 @@ public class ListenerContainerParserTests {
 
 	@Before
 	public void setUp() throws Exception {
-		ListenerContainerParser parser = new ListenerContainerParser();
-		AtomicInteger instance = (AtomicInteger) ReflectionTestUtils.getField(parser, "instance");
-		instance.set(0);
 		beanFactory = new DefaultListableBeanFactory();
 		XmlBeanDefinitionReader reader = new XmlBeanDefinitionReader(beanFactory);
 		reader.loadBeanDefinitions(new ClassPathResource(getClass().getSimpleName() + "-context.xml", getClass()));
@@ -89,13 +90,21 @@ public class ListenerContainerParserTests {
 		Object xPriority = consumerArgs.get("x-priority");
 		assertNotNull(xPriority);
 		assertEquals(10, xPriority);
-		assertEquals(Long.valueOf(5555), TestUtils.getPropertyValue(container, "recoveryInterval", Long.class));
+		assertEquals(Long.valueOf(5555), TestUtils.getPropertyValue(container, "recoveryBackOff.interval", Long.class));
 		assertFalse(TestUtils.getPropertyValue(container, "exclusive", Boolean.class));
 		assertFalse(TestUtils.getPropertyValue(container, "missingQueuesFatal", Boolean.class));
 		assertTrue(TestUtils.getPropertyValue(container, "autoDeclare", Boolean.class));
 		assertEquals(5, TestUtils.getPropertyValue(container, "declarationRetries"));
 		assertEquals(1000L, TestUtils.getPropertyValue(container, "failedDeclarationRetryInterval"));
 		assertEquals(30000L, TestUtils.getPropertyValue(container, "retryDeclarationInterval"));
+		assertEquals(beanFactory.getBean("tagger"), TestUtils.getPropertyValue(container, "consumerTagStrategy"));
+		Collection<?> group = beanFactory.getBean("containerGroup", Collection.class);
+		assertEquals(3, group.size());
+		assertThat(group, Matchers.contains(beanFactory.getBean("container1"), beanFactory.getBean("testListener1"),
+				beanFactory.getBean("testListener2")));
+		assertEquals(1235L, ReflectionTestUtils.getField(container, "idleEventInterval"));
+		assertEquals("container1", container.getListenerId());
+		assertTrue(TestUtils.getPropertyValue(container, "mismatchedQueuesFatal", Boolean.class));
 	}
 
 	@Test
@@ -140,26 +149,30 @@ public class ListenerContainerParserTests {
 
 	@Test
 	public void testNamedListeners() throws Exception {
-		beanFactory.getBean("containerWithNamedListeners$testListener1", SimpleMessageListenerContainer.class);
-		beanFactory.getBean("containerWithNamedListeners$testListener2", SimpleMessageListenerContainer.class);
+		beanFactory.getBean("testListener1", SimpleMessageListenerContainer.class);
+		beanFactory.getBean("testListener2", SimpleMessageListenerContainer.class);
 	}
 
 	@Test
 	public void testAnonListeners() throws Exception {
-		beanFactory.getBean("containerWithAnonListener", SimpleMessageListenerContainer.class);
-		beanFactory.getBean("containerWithAnonListeners.0", SimpleMessageListenerContainer.class);
-		beanFactory.getBean("containerWithAnonListeners$namedListener", SimpleMessageListenerContainer.class);
-		beanFactory.getBean("containerWithAnonListeners.2", SimpleMessageListenerContainer.class);
+		beanFactory.getBean("org.springframework.amqp.rabbit.listener.SimpleMessageListenerContainer#0",
+				SimpleMessageListenerContainer.class);
+		beanFactory.getBean("org.springframework.amqp.rabbit.listener.SimpleMessageListenerContainer#1",
+				SimpleMessageListenerContainer.class);
+		beanFactory.getBean("namedListener", SimpleMessageListenerContainer.class);
+		beanFactory.getBean("org.springframework.amqp.rabbit.listener.SimpleMessageListenerContainer#2",
+				SimpleMessageListenerContainer.class);
 	}
 
 	@Test
 	public void testAnonEverything() throws Exception {
 		SimpleMessageListenerContainer container = beanFactory.getBean(
-				"org.springframework.amqp.rabbit.listener.SimpleMessageListenerContainer#0.0",
+				"org.springframework.amqp.rabbit.listener.SimpleMessageListenerContainer#3",
 				SimpleMessageListenerContainer.class);
 		assertEquals("ex1", ReflectionTestUtils.getField(ReflectionTestUtils.getField(container, "messageListener"),
 				"responseExchange"));
-		container = beanFactory.getBean("org.springframework.amqp.rabbit.listener.SimpleMessageListenerContainer#0.1",
+		container = beanFactory.getBean(
+				"org.springframework.amqp.rabbit.listener.SimpleMessageListenerContainer#4",
 				SimpleMessageListenerContainer.class);
 		assertEquals("ex2", ReflectionTestUtils.getField(ReflectionTestUtils.getField(container, "messageListener"),
 				"responseExchange"));
@@ -167,21 +180,14 @@ public class ListenerContainerParserTests {
 
 	@Test
 	public void testAnonParent() throws Exception {
-		beanFactory.getBean(
-				"org.springframework.amqp.rabbit.listener.SimpleMessageListenerContainer#1$anonParentL1",
-				SimpleMessageListenerContainer.class);
-		beanFactory.getBean("org.springframework.amqp.rabbit.listener.SimpleMessageListenerContainer#1$anonParentL2",
-				SimpleMessageListenerContainer.class);
-		beanFactory.getBean("org.springframework.amqp.rabbit.listener.SimpleMessageListenerContainer#2$anonParentL1",
-				SimpleMessageListenerContainer.class);
-		beanFactory.getBean("org.springframework.amqp.rabbit.listener.SimpleMessageListenerContainer#2$anonParentL2",
-				SimpleMessageListenerContainer.class);
+		beanFactory.getBean("anonParentL1", SimpleMessageListenerContainer.class);
+		beanFactory.getBean("anonParentL2", SimpleMessageListenerContainer.class);
 	}
 
 	@Test
 	public void testIncompatibleTxAtts() {
 		try {
-			new ClassPathXmlApplicationContext(getClass().getSimpleName() + "-fail-context.xml", getClass());
+			new ClassPathXmlApplicationContext(getClass().getSimpleName() + "-fail-context.xml", getClass()).close();;
 			fail("Parse exception exptected");
 		}
 		catch (BeanDefinitionParsingException e) {
@@ -200,4 +206,14 @@ public class ListenerContainerParserTests {
 		public void before(Method method, Object[] args, Object target) throws Throwable {
 		}
 	}
+
+	public static class TestConsumerTagStrategy implements ConsumerTagStrategy {
+
+		@Override
+		public String createConsumerTag(String queue) {
+			return "foo";
+		}
+
+	}
+
 }

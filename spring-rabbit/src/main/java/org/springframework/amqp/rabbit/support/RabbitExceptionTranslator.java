@@ -1,5 +1,5 @@
 /*
- * Copyright 2002-2013 the original author or authors.
+ * Copyright 2002-2015 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -13,20 +13,24 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
 package org.springframework.amqp.rabbit.support;
 
 import java.io.IOException;
 import java.io.UnsupportedEncodingException;
 import java.net.ConnectException;
+import java.util.concurrent.TimeoutException;
 
 import org.springframework.amqp.AmqpAuthenticationException;
 import org.springframework.amqp.AmqpConnectException;
 import org.springframework.amqp.AmqpException;
 import org.springframework.amqp.AmqpIOException;
+import org.springframework.amqp.AmqpTimeoutException;
 import org.springframework.amqp.AmqpUnsupportedEncodingException;
 import org.springframework.amqp.UncategorizedAmqpException;
 import org.springframework.util.Assert;
 
+import com.rabbitmq.client.ConsumerCancelledException;
 import com.rabbitmq.client.PossibleAuthenticationFailureException;
 import com.rabbitmq.client.ShutdownSignalException;
 
@@ -61,6 +65,12 @@ public class RabbitExceptionTranslator {
 		}
 		if (ex instanceof IOException) {
 			return new AmqpIOException((IOException) ex);
+		}
+		if (ex instanceof TimeoutException) {
+			return new AmqpTimeoutException(ex);
+		}
+		if (ex instanceof ConsumerCancelledException) {
+			return new org.springframework.amqp.rabbit.support.ConsumerCancelledException(ex);
 		}
 		// fallback
 		return new UncategorizedAmqpException(ex);

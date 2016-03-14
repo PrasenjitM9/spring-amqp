@@ -1,14 +1,17 @@
 /*
- * Copyright 2010-2014 the original author or authors.
+ * Copyright 2002-2016 the original author or authors.
  *
- * Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except in compliance with
- * the License. You may obtain a copy of the License at
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
  *
- * http://www.apache.org/licenses/LICENSE-2.0
+ *      http://www.apache.org/licenses/LICENSE-2.0
  *
- * Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on
- * an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the
- * specific language governing permissions and limitations under the License.
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
 
 package org.springframework.amqp.rabbit.config;
@@ -23,6 +26,7 @@ import org.springframework.beans.factory.config.RuntimeBeanReference;
 import org.springframework.beans.factory.support.BeanDefinitionBuilder;
 import org.springframework.beans.factory.xml.AbstractSingleBeanDefinitionParser;
 import org.springframework.beans.factory.xml.ParserContext;
+import org.springframework.core.Conventions;
 import org.springframework.util.StringUtils;
 import org.springframework.util.xml.DomUtils;
 
@@ -41,6 +45,8 @@ class TemplateParser extends AbstractSingleBeanDefinitionParser {
 
 	private static final String ROUTING_KEY_ATTRIBUTE = "routing-key";
 
+	private static final String RECEIVE_TIMEOUT_ATTRIBUTE = "receive-timeout";
+
 	private static final String REPLY_TIMEOUT_ATTRIBUTE = "reply-timeout";
 
 	private static final String MESSAGE_CONVERTER_ATTRIBUTE = "message-converter";
@@ -50,6 +56,10 @@ class TemplateParser extends AbstractSingleBeanDefinitionParser {
 	private static final String CHANNEL_TRANSACTED_ATTRIBUTE = "channel-transacted";
 
 	private static final String REPLY_QUEUE_ATTRIBUTE = "reply-queue";
+
+	private static final String REPLY_ADDRESS_ATTRIBUTE = "reply-address";
+
+	private static final String USE_TEMPORARY_REPLY_QUEUES_ATTRIBUTE = "use-temporary-reply-queues";
 
 	private static final String LISTENER_ELEMENT = "reply-listener";
 
@@ -98,10 +108,17 @@ class TemplateParser extends AbstractSingleBeanDefinitionParser {
 		NamespaceUtils.setValueIfAttributeDefined(builder, element, QUEUE_ATTRIBUTE);
 		NamespaceUtils.setValueIfAttributeDefined(builder, element, EXCHANGE_ATTRIBUTE);
 		NamespaceUtils.setValueIfAttributeDefined(builder, element, ROUTING_KEY_ATTRIBUTE);
+		NamespaceUtils.setValueIfAttributeDefined(builder, element, RECEIVE_TIMEOUT_ATTRIBUTE);
 		NamespaceUtils.setValueIfAttributeDefined(builder, element, REPLY_TIMEOUT_ATTRIBUTE);
 		NamespaceUtils.setValueIfAttributeDefined(builder, element, ENCODING_ATTRIBUTE);
 		NamespaceUtils.setReferenceIfAttributeDefined(builder, element, MESSAGE_CONVERTER_ATTRIBUTE);
-		NamespaceUtils.setReferenceIfAttributeDefined(builder, element, REPLY_QUEUE_ATTRIBUTE);
+		String replyAddress = element.getAttribute(REPLY_ADDRESS_ATTRIBUTE);
+		if (!StringUtils.hasText(replyAddress)) {
+			NamespaceUtils.setReferenceIfAttributeDefined(builder, element, REPLY_QUEUE_ATTRIBUTE,
+					Conventions.attributeNameToPropertyName(REPLY_ADDRESS_ATTRIBUTE));
+		}
+		NamespaceUtils.setValueIfAttributeDefined(builder, element, USE_TEMPORARY_REPLY_QUEUES_ATTRIBUTE);
+		NamespaceUtils.setValueIfAttributeDefined(builder, element, REPLY_ADDRESS_ATTRIBUTE);
 		NamespaceUtils.setReferenceIfAttributeDefined(builder, element, RETURN_CALLBACK_ATTRIBUTE);
 		NamespaceUtils.setReferenceIfAttributeDefined(builder, element, CONFIRM_CALLBACK_ATTRIBUTE);
 		NamespaceUtils.setValueIfAttributeDefined(builder, element, CORRELATION_KEY);
@@ -170,7 +187,10 @@ class TemplateParser extends AbstractSingleBeanDefinitionParser {
 					"connectionFactory",
 					new RuntimeBeanReference(element.getAttribute(CONNECTION_FACTORY_ATTRIBUTE)));
 		}
-		replyContainer.getPropertyValues().add("queues", new RuntimeBeanReference(element.getAttribute(REPLY_QUEUE_ATTRIBUTE)));
+		if (element.hasAttribute(REPLY_QUEUE_ATTRIBUTE)) {
+			replyContainer.getPropertyValues().add("queues",
+					new RuntimeBeanReference(element.getAttribute(REPLY_QUEUE_ATTRIBUTE)));
+		}
 		return replyContainer;
 	}
 

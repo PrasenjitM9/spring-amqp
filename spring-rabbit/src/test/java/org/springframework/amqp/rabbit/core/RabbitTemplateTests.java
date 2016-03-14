@@ -25,6 +25,7 @@ import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
+import static org.mockito.Mockito.withSettings;
 
 import java.util.HashMap;
 import java.util.Map;
@@ -44,8 +45,10 @@ import org.springframework.amqp.core.MessageProperties;
 import org.springframework.amqp.core.ReceiveAndReplyCallback;
 import org.springframework.amqp.rabbit.connection.AbstractRoutingConnectionFactory;
 import org.springframework.amqp.rabbit.connection.CachingConnectionFactory;
+import org.springframework.amqp.rabbit.connection.PublisherCallbackChannelConnectionFactory;
 import org.springframework.amqp.rabbit.connection.SimpleRoutingConnectionFactory;
 import org.springframework.amqp.rabbit.connection.SingleConnectionFactory;
+import org.springframework.amqp.rabbit.support.PublisherCallbackChannel;
 import org.springframework.amqp.support.converter.SimpleMessageConverter;
 import org.springframework.amqp.utils.SerializationUtils;
 import org.springframework.expression.Expression;
@@ -189,7 +192,7 @@ public class RabbitTemplateTests {
 		RabbitTemplate template = new RabbitTemplate(new SingleConnectionFactory(mockConnectionFactory));
 		template.setReplyTimeout(1);
 		Message input = new Message("Hello, world!".getBytes(), new MessageProperties());
-		template.doSendAndReceiveWithTemporary("foo", "bar", input);
+		template.doSendAndReceiveWithTemporary("foo", "bar", input, null);
 		Envelope envelope = new Envelope(1, false, "foo", "bar");
 		// used to hang here because of the SynchronousQueue and doSendAndReceive() already exited
 		consumer.get().handleDelivery("foo", envelope, new AMQP.BasicProperties(), new byte[0]);
@@ -249,6 +252,24 @@ public class RabbitTemplateTests {
 		template.convertAndSend("foo", "bar", "baz");
 		assertEquals(3, count.get());
 		assertTrue(recoverInvoked.get());
+	}
+
+	@Test
+	public void testPublisherConfirmsReturnsSetup() {
+		org.springframework.amqp.rabbit.connection.ConnectionFactory cf =
+				mock(org.springframework.amqp.rabbit.connection.ConnectionFactory.class,
+						withSettings().extraInterfaces(PublisherCallbackChannelConnectionFactory.class));
+		PublisherCallbackChannelConnectionFactory pcccf = (PublisherCallbackChannelConnectionFactory) cf;
+		when(pcccf.isPublisherConfirms()).thenReturn(true);
+		when(pcccf.isPublisherReturns()).thenReturn(true);
+		org.springframework.amqp.rabbit.connection.Connection conn =
+				mock(org.springframework.amqp.rabbit.connection.Connection.class);
+		when(cf.createConnection()).thenReturn(conn);
+		PublisherCallbackChannel channel = mock(PublisherCallbackChannel.class);
+		when(conn.createChannel(false)).thenReturn(channel);
+		RabbitTemplate template = new RabbitTemplate(cf);
+		template.convertAndSend("foo");
+		verify(channel).addListener(template);
 	}
 
 	public final static AtomicInteger LOOKUP_KEY_COUNT = new AtomicInteger();
