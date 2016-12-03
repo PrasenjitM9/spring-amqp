@@ -1,5 +1,5 @@
 /*
- * Copyright 2002-2010 the original author or authors.
+ * Copyright 2002-2016 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,23 +16,40 @@
 
 package org.springframework.amqp.support.converter;
 
+import static org.hamcrest.Matchers.instanceOf;
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertSame;
+import static org.junit.Assert.assertTrue;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
 
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
+import java.io.InputStream;
 import java.io.ObjectInputStream;
 import java.io.ObjectOutputStream;
-import java.io.Serializable;
 
+import org.junit.Rule;
 import org.junit.Test;
+import org.junit.rules.ExpectedException;
+import org.mockito.Mockito;
+
 import org.springframework.amqp.core.Message;
 import org.springframework.amqp.core.MessageProperties;
-import org.springframework.util.Assert;
+import org.springframework.amqp.utils.test.TestUtils;
+import org.springframework.core.NestedIOException;
+import org.springframework.core.serializer.DefaultDeserializer;
+import org.springframework.core.serializer.Deserializer;
 
 /**
  * @author Mark Fisher
+ * @author Gary Russell
  */
-public class SerializerMessageConverterTests {
+public class SerializerMessageConverterTests extends WhiteListDeserializingMessageConverterTests {
+
+	@Rule
+	public ExpectedException exception = ExpectedException.none();
 
 	@Test
 	public void bytesAsDefaultMessageBodyType() throws Exception {
@@ -140,24 +157,36 @@ public class SerializerMessageConverterTests {
 		assertEquals(testBean, deserializedObject);
 	}
 
+	@SuppressWarnings("unchecked")
+	@Test
+	public void testDefaultDeserializerClassLoader() throws Exception {
+		SerializerMessageConverter converter = new SerializerMessageConverter();
+		ClassLoader loader = mock(ClassLoader.class);
+		Deserializer<Object> deserializer = new DefaultDeserializer(loader);
+		converter.setDeserializer(deserializer);
+		assertSame(loader, TestUtils.getPropertyValue(converter, "defaultDeserializerClassLoader"));
+		assertTrue(TestUtils.getPropertyValue(converter, "usingDefaultDeserializer", Boolean.class));
+		Deserializer<Object> mock = mock(Deserializer.class);
+		converter.setDeserializer(mock);
+		assertFalse(TestUtils.getPropertyValue(converter, "usingDefaultDeserializer", Boolean.class));
+		TestBean testBean = new TestBean("foo");
+		Message message = converter.toMessage(testBean, new MessageProperties());
+		converter.fromMessage(message);
+		verify(mock).deserialize(Mockito.any(InputStream.class));
+	}
 
-	@SuppressWarnings("serial")
-	private static class TestBean implements Serializable {
-
-		private final String text;
-
-		TestBean(String text) {
-			Assert.notNull(text, "text must not be null");
-			this.text = text;
-		}
-
-		public boolean equals(Object other) {
-			return (other instanceof TestBean && this.text.equals(((TestBean) other).text));
-		}
-
-		public int hashCode() {
-			return this.text.hashCode();
-		}
+	@Test
+	public void messageConversionExceptionForClassNotFound() throws Exception {
+		SerializerMessageConverter converter = new SerializerMessageConverter();
+		TestBean testBean = new TestBean("foo");
+		Message message = converter.toMessage(testBean, new MessageProperties());
+		String contentType = message.getMessageProperties().getContentType();
+		assertEquals("application/x-java-serialized-object", contentType);
+		byte[] body = message.getBody();
+		body[10] = 'z';
+		this.exception.expect(MessageConversionException.class);
+		this.exception.expectCause(instanceOf(NestedIOException.class));
+		converter.fromMessage(message);
 	}
 
 }

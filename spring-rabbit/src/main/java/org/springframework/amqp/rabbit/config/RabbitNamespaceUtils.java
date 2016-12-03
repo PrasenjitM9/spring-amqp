@@ -19,7 +19,6 @@ package org.springframework.amqp.rabbit.config;
 import org.w3c.dom.Element;
 
 import org.springframework.amqp.core.AcknowledgeMode;
-import org.springframework.amqp.rabbit.listener.SimpleMessageListenerContainer;
 import org.springframework.beans.factory.config.BeanDefinition;
 import org.springframework.beans.factory.config.RuntimeBeanReference;
 import org.springframework.beans.factory.config.TypedStringValue;
@@ -33,7 +32,7 @@ import org.springframework.util.StringUtils;
  * @since 1.0.1
  *
  */
-public class RabbitNamespaceUtils {
+public final class RabbitNamespaceUtils {
 
 	private static final String CONNECTION_FACTORY_ATTRIBUTE = "connection-factory";
 
@@ -99,8 +98,20 @@ public class RabbitNamespaceUtils {
 
 	private static final String IDLE_EVENT_INTERVAL = "idle-event-interval";
 
+	private static final String CONSUMERS_PER_QUEUE = "consumers-per-queue";
+
+	private static final String TASK_SCHEDULER = "task-scheduler";
+
+	private static final String MONITOR_INTERVAL = "monitor-interval";
+
+	private static final String TYPE = "type";
+
+	private RabbitNamespaceUtils() {
+		super();
+	}
+
 	public static BeanDefinition parseContainer(Element containerEle, ParserContext parserContext) {
-		RootBeanDefinition containerDef = new RootBeanDefinition(SimpleMessageListenerContainer.class);
+		RootBeanDefinition containerDef = new RootBeanDefinition(ListenerContainerFactoryBean.class);
 		containerDef.setSource(parserContext.extractSource(containerEle));
 
 		String connectionFactoryBeanName = "rabbitConnectionFactory";
@@ -115,6 +126,7 @@ public class RabbitNamespaceUtils {
 			containerDef.getPropertyValues().add("connectionFactory",
 					new RuntimeBeanReference(connectionFactoryBeanName));
 		}
+		containerDef.getPropertyValues().add("type", new TypedStringValue(containerEle.getAttribute(TYPE)));
 
 		String taskExecutorBeanName = containerEle.getAttribute(TASK_EXECUTOR_ATTRIBUTE);
 		if (StringUtils.hasText(taskExecutorBeanName)) {
@@ -267,6 +279,21 @@ public class RabbitNamespaceUtils {
 			containerDef.getPropertyValues().add("idleEventInterval", new TypedStringValue(idleEventInterval));
 		}
 
+		String consumersPerQueue = containerEle.getAttribute(CONSUMERS_PER_QUEUE);
+		if (StringUtils.hasText(consumersPerQueue)) {
+			containerDef.getPropertyValues().add("consumersPerQueue", new TypedStringValue(consumersPerQueue));
+		}
+
+		String taskScheduler = containerEle.getAttribute(TASK_SCHEDULER);
+		if (StringUtils.hasText(taskScheduler)) {
+			containerDef.getPropertyValues().add("taskScheduler", new RuntimeBeanReference(taskScheduler));
+		}
+
+		String monitorInterval = containerEle.getAttribute(MONITOR_INTERVAL);
+		if (StringUtils.hasText(monitorInterval)) {
+			containerDef.getPropertyValues().add("monitorInterval", new TypedStringValue(monitorInterval));
+		}
+
 		return containerDef;
 	}
 
@@ -276,17 +303,21 @@ public class RabbitNamespaceUtils {
 		if (StringUtils.hasText(acknowledge)) {
 			if (ACKNOWLEDGE_AUTO.equals(acknowledge)) {
 				acknowledgeMode = AcknowledgeMode.AUTO;
-			} else if (ACKNOWLEDGE_MANUAL.equals(acknowledge)) {
+			}
+			else if (ACKNOWLEDGE_MANUAL.equals(acknowledge)) {
 				acknowledgeMode = AcknowledgeMode.MANUAL;
-			} else if (ACKNOWLEDGE_NONE.equals(acknowledge)) {
+			}
+			else if (ACKNOWLEDGE_NONE.equals(acknowledge)) {
 				acknowledgeMode = AcknowledgeMode.NONE;
-			} else {
+			}
+			else {
 				parserContext.getReaderContext().error(
 						"Invalid listener container 'acknowledge' setting [" + acknowledge
 								+ "]: only \"auto\", \"manual\", and \"none\" supported.", ele);
 			}
 			return acknowledgeMode;
-		} else {
+		}
+		else {
 			return null;
 		}
 	}

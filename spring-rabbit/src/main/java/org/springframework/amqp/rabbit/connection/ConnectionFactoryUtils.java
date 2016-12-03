@@ -19,8 +19,6 @@ package org.springframework.amqp.rabbit.connection;
 import java.io.IOException;
 
 import org.springframework.amqp.AmqpIOException;
-import org.springframework.transaction.NoTransactionException;
-import org.springframework.transaction.interceptor.TransactionAspectSupport;
 import org.springframework.transaction.support.ResourceHolderSynchronization;
 import org.springframework.transaction.support.TransactionSynchronization;
 import org.springframework.transaction.support.TransactionSynchronizationManager;
@@ -41,7 +39,11 @@ import com.rabbitmq.client.Channel;
  * @author Gary Russell
  * @author Artem Bilan
  */
-public class ConnectionFactoryUtils {
+public final class ConnectionFactoryUtils {
+
+	private ConnectionFactoryUtils() {
+		super();
+	}
 
 	/**
 	 * Determine whether the given RabbitMQ Channel is transactional, that is, bound to the current thread by Spring's
@@ -74,13 +76,13 @@ public class ConnectionFactoryUtils {
 		return doGetTransactionalResourceHolder(connectionFactory, new ResourceFactory() {
 
 			@Override
-			public Channel getChannel(RabbitResourceHolder holder1) {
-				return holder1.getChannel();
+			public Channel getChannel(RabbitResourceHolder holder) {
+				return holder.getChannel();
 			}
 
 			@Override
-			public Connection getConnection(RabbitResourceHolder holder1) {
-				return holder1.getConnection();
+			public Connection getConnection(RabbitResourceHolder holder) {
+				return holder.getConnection();
 			}
 
 			@Override
@@ -126,7 +128,7 @@ public class ConnectionFactoryUtils {
 		if (resourceHolderToUse == null) {
 			resourceHolderToUse = new RabbitResourceHolder();
 		}
-		Connection connection = resourceFactory.getConnection(resourceHolderToUse);//NOSONAR
+		Connection connection = resourceFactory.getConnection(resourceHolderToUse); //NOSONAR
 		Channel channel = null;
 		try {
 			/*
@@ -152,7 +154,6 @@ public class ConnectionFactoryUtils {
 
 		}
 		catch (IOException ex) {
-			RabbitUtils.closeChannel(channel);//NOSONAR
 			RabbitUtils.closeConnection(connection);
 			throw new AmqpIOException(ex);
 		}
@@ -175,16 +176,8 @@ public class ConnectionFactoryUtils {
 		TransactionSynchronizationManager.bindResource(connectionFactory, resourceHolder);
 		resourceHolder.setSynchronizedWithTransaction(true);
 		if (TransactionSynchronizationManager.isSynchronizationActive()) {
-			boolean locallyTransacted = true;
-			try {
-				locallyTransacted = TransactionAspectSupport.currentTransactionStatus().isNewTransaction();
-			}
-			catch (NoTransactionException e) {
-				// Ignore in favor of 'synched' flag before.
-			}
-
 			TransactionSynchronizationManager.registerSynchronization(new RabbitResourceSynchronization(resourceHolder,
-					connectionFactory, locallyTransacted));
+					connectionFactory));
 		}
 	}
 
@@ -250,18 +243,14 @@ public class ConnectionFactoryUtils {
 	 * JtaTransactionManager transaction).
 	 * @see org.springframework.transaction.jta.JtaTransactionManager
 	 */
-	private static class RabbitResourceSynchronization extends
+	private static final class RabbitResourceSynchronization extends
 			ResourceHolderSynchronization<RabbitResourceHolder, Object> {
-
-		private final boolean locallyTransacted;
 
 		private final RabbitResourceHolder resourceHolder;
 
-		private RabbitResourceSynchronization(RabbitResourceHolder resourceHolder, Object resourceKey,
-		                                     boolean locallyTransacted) {
+		RabbitResourceSynchronization(RabbitResourceHolder resourceHolder, Object resourceKey) {
 			super(resourceHolder, resourceKey);
 			this.resourceHolder = resourceHolder;
-			this.locallyTransacted = locallyTransacted;
 		}
 
 		@Override
@@ -270,25 +259,14 @@ public class ConnectionFactoryUtils {
 		}
 
 		@Override
-		public void afterCommit() {
-			if (this.locallyTransacted) {
-				processResourceAfterCommit(this.resourceHolder);
-			}
-		}
-
-		@Override
-		protected void processResourceAfterCommit(RabbitResourceHolder resourceHolder) {
-			resourceHolder.commitAll();
-		}
-
-		@Override
 		public void afterCompletion(int status) {
-			if (status != TransactionSynchronization.STATUS_COMMITTED) {
-				this.resourceHolder.rollbackAll();
-			}
-			else if (!this.locallyTransacted) {
+			if (status == TransactionSynchronization.STATUS_COMMITTED) {
 				this.resourceHolder.commitAll();
 			}
+			else {
+				this.resourceHolder.rollbackAll();
+			}
+
 			if (this.resourceHolder.isReleaseAfterCompletion()) {
 				this.resourceHolder.setSynchronizedWithTransaction(false);
 			}

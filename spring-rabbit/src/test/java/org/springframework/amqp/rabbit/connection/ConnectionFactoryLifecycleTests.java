@@ -28,8 +28,8 @@ import org.junit.Test;
 import org.springframework.amqp.core.AnonymousQueue;
 import org.springframework.amqp.core.Queue;
 import org.springframework.amqp.rabbit.core.RabbitAdmin;
-import org.springframework.amqp.rabbit.test.BrokerRunning;
-import org.springframework.amqp.rabbit.test.BrokerTestUtils;
+import org.springframework.amqp.rabbit.junit.BrokerRunning;
+import org.springframework.amqp.rabbit.junit.BrokerTestUtils;
 import org.springframework.amqp.utils.test.TestUtils;
 import org.springframework.context.SmartLifecycle;
 import org.springframework.context.annotation.AnnotationConfigApplicationContext;
@@ -86,7 +86,7 @@ public class ConnectionFactoryLifecycleTests {
 
 		private volatile boolean running;
 
-		public MyLifecycle (ConnectionFactory cf) {
+		public MyLifecycle(ConnectionFactory cf) {
 			this.admin = new RabbitAdmin(cf);
 		}
 

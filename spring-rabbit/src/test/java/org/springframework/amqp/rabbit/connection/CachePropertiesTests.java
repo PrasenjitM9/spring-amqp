@@ -26,7 +26,7 @@ import org.junit.Test;
 import org.junit.runner.RunWith;
 
 import org.springframework.amqp.rabbit.connection.CachingConnectionFactory.CacheMode;
-import org.springframework.amqp.rabbit.test.BrokerRunning;
+import org.springframework.amqp.rabbit.junit.BrokerRunning;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
@@ -96,6 +96,7 @@ public class CachePropertiesTests {
 		ch4.close();
 		ch5.close();
 		ch6.close();
+		ch7.close();
 		props = this.channelCf.getCacheProperties();
 		assertEquals("2", props.getProperty("idleChannelsNotTx"));
 		assertEquals("4", props.getProperty("idleChannelsTx")); // not 5

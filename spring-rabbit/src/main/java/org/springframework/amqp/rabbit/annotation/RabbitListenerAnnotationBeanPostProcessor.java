@@ -20,6 +20,7 @@ import java.lang.reflect.Method;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
@@ -27,12 +28,18 @@ import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.atomic.AtomicInteger;
 
+import org.apache.commons.logging.Log;
+import org.apache.commons.logging.LogFactory;
+
+import org.springframework.amqp.core.AbstractDeclarable;
+import org.springframework.amqp.core.AbstractExchange;
 import org.springframework.amqp.core.Binding;
 import org.springframework.amqp.core.Binding.DestinationType;
 import org.springframework.amqp.core.DirectExchange;
 import org.springframework.amqp.core.Exchange;
 import org.springframework.amqp.core.ExchangeTypes;
 import org.springframework.amqp.core.FanoutExchange;
+import org.springframework.amqp.core.HeadersExchange;
 import org.springframework.amqp.core.Queue;
 import org.springframework.amqp.core.TopicExchange;
 import org.springframework.amqp.rabbit.config.RabbitListenerConfigUtils;
@@ -45,6 +52,7 @@ import org.springframework.amqp.rabbit.listener.RabbitListenerEndpointRegistry;
 import org.springframework.aop.framework.Advised;
 import org.springframework.aop.support.AopUtils;
 import org.springframework.beans.BeansException;
+import org.springframework.beans.factory.BeanClassLoaderAware;
 import org.springframework.beans.factory.BeanFactory;
 import org.springframework.beans.factory.BeanFactoryAware;
 import org.springframework.beans.factory.BeanInitializationException;
@@ -56,13 +64,18 @@ import org.springframework.beans.factory.config.BeanExpressionResolver;
 import org.springframework.beans.factory.config.BeanPostProcessor;
 import org.springframework.beans.factory.config.ConfigurableBeanFactory;
 import org.springframework.beans.factory.config.ConfigurableListableBeanFactory;
+import org.springframework.context.EnvironmentAware;
 import org.springframework.context.expression.StandardBeanExpressionResolver;
 import org.springframework.core.Ordered;
 import org.springframework.core.annotation.AnnotationUtils;
+import org.springframework.core.convert.ConversionService;
+import org.springframework.core.convert.support.DefaultConversionService;
+import org.springframework.core.env.Environment;
 import org.springframework.messaging.handler.annotation.support.DefaultMessageHandlerMethodFactory;
 import org.springframework.messaging.handler.annotation.support.MessageHandlerMethodFactory;
 import org.springframework.messaging.handler.invocation.InvocableHandlerMethod;
 import org.springframework.util.Assert;
+import org.springframework.util.ClassUtils;
 import org.springframework.util.ReflectionUtils;
 import org.springframework.util.StringUtils;
 
@@ -96,19 +109,29 @@ import org.springframework.util.StringUtils;
  * @see MethodRabbitListenerEndpoint
  */
 public class RabbitListenerAnnotationBeanPostProcessor
-		implements BeanPostProcessor, Ordered, BeanFactoryAware, SmartInitializingSingleton {
+		implements BeanPostProcessor, Ordered, BeanFactoryAware, BeanClassLoaderAware, EnvironmentAware,
+			SmartInitializingSingleton {
 
 	/**
 	 * The bean name of the default {@link org.springframework.amqp.rabbit.listener.RabbitListenerContainerFactory}.
 	 */
-	static final String DEFAULT_RABBIT_LISTENER_CONTAINER_FACTORY_BEAN_NAME = "rabbitListenerContainerFactory";
+	public static final String DEFAULT_RABBIT_LISTENER_CONTAINER_FACTORY_BEAN_NAME = "rabbitListenerContainerFactory";
 
+	public static final String RABBIT_EMPTY_STRING_ARGUMENTS_PROPERTY = "spring.rabbitmq.emptyStringArguments";
+
+	private static final ConversionService CONVERSION_SERVICE = new DefaultConversionService();
+
+	private final Log logger = LogFactory.getLog(this.getClass());
+
+	private final Set<String> emptyStringArguments = new HashSet<>();
 
 	private RabbitListenerEndpointRegistry endpointRegistry;
 
 	private String containerFactoryBeanName = DEFAULT_RABBIT_LISTENER_CONTAINER_FACTORY_BEAN_NAME;
 
 	private BeanFactory beanFactory;
+
+	private ClassLoader beanClassLoader;
 
 	private final RabbitHandlerMethodFactoryAdapter messageHandlerMethodFactory =
 			new RabbitHandlerMethodFactoryAdapter();
@@ -126,6 +149,10 @@ public class RabbitListenerAnnotationBeanPostProcessor
 	@Override
 	public int getOrder() {
 		return LOWEST_PRECEDENCE;
+	}
+
+	public RabbitListenerAnnotationBeanPostProcessor() {
+		this.emptyStringArguments.add("x-dead-letter-exchange");
 	}
 
 	/**
@@ -174,6 +201,18 @@ public class RabbitListenerAnnotationBeanPostProcessor
 		}
 	}
 
+	@Override
+	public void setBeanClassLoader(ClassLoader classLoader) {
+		this.beanClassLoader = classLoader;
+	}
+
+	@Override
+	public void setEnvironment(Environment environment) {
+		String property = environment.getProperty(RABBIT_EMPTY_STRING_ARGUMENTS_PROPERTY, String.class);
+		if (property != null) {
+			this.emptyStringArguments.addAll(StringUtils.commaDelimitedListToSet(property));
+		}
+	}
 
 	@Override
 	public void afterSingletonsInstantiated() {
@@ -224,21 +263,17 @@ public class RabbitListenerAnnotationBeanPostProcessor
 		Collection<RabbitListener> classLevelListeners = findListenerAnnotations(targetClass);
 		final boolean hasClassLevelListeners = classLevelListeners.size() > 0;
 		final List<Method> multiMethods = new ArrayList<Method>();
-		ReflectionUtils.doWithMethods(targetClass, new ReflectionUtils.MethodCallback() {
-
-			@Override
-			public void doWith(Method method) throws IllegalArgumentException, IllegalAccessException {
-				for (RabbitListener rabbitListener : findListenerAnnotations(method)) {
-					processAmqpListener(rabbitListener, method, bean, beanName);
-				}
-				if (hasClassLevelListeners) {
-					RabbitHandler rabbitHandler = AnnotationUtils.findAnnotation(method, RabbitHandler.class);
-					if (rabbitHandler != null) {
-						multiMethods.add(method);
-					}
+		ReflectionUtils.doWithMethods(targetClass, method -> {
+			for (RabbitListener rabbitListener : findListenerAnnotations(method)) {
+				processAmqpListener(rabbitListener, method, bean, beanName);
+			}
+			if (hasClassLevelListeners) {
+				RabbitHandler rabbitHandler = AnnotationUtils.findAnnotation(method, RabbitHandler.class);
+				if (rabbitHandler != null) {
+					multiMethods.add(method);
 				}
 			}
-		});
+		}, ReflectionUtils.USER_DECLARED_METHODS);
 		if (hasClassLevelListeners) {
 			processMultiMethodListeners(classLevelListeners, multiMethods, bean, beanName);
 		}
@@ -295,6 +330,11 @@ public class RabbitListenerAnnotationBeanPostProcessor
 		MethodRabbitListenerEndpoint endpoint = new MethodRabbitListenerEndpoint();
 		endpoint.setMethod(methodToUse);
 		endpoint.setBeanFactory(this.beanFactory);
+		endpoint.setReturnExceptions(resolveExpressionAsBoolean(rabbitListener.returnExceptions()));
+		String errorHandlerBeanName = resolveExpressionAsString(rabbitListener.errorHandler(), "errorHandler");
+		if (StringUtils.hasText(errorHandlerBeanName)) {
+			endpoint.setErrorHandler(this.beanFactory.getBean(errorHandlerBeanName, RabbitListenerErrorHandler.class));
+		}
 		processListener(endpoint, rabbitListener, bean, methodToUse, beanName);
 	}
 
@@ -391,24 +431,35 @@ public class RabbitListenerAnnotationBeanPostProcessor
 			return resolve(rabbitListener.id());
 		}
 		else {
-			return "org.springframework.amqp.rabbit.RabbitListenerEndpointContainer#" + counter.getAndIncrement();
+			return "org.springframework.amqp.rabbit.RabbitListenerEndpointContainer#" + this.counter.getAndIncrement();
 		}
 	}
 
 	private String[] resolveQueues(RabbitListener rabbitListener) {
 		String[] queues = rabbitListener.queues();
 		QueueBinding[] bindings = rabbitListener.bindings();
-		if (queues.length > 0 && bindings.length > 0) {
-			throw new BeanInitializationException("@RabbitListener can have 'queues' or 'bindings' but not both");
-		}
+		org.springframework.amqp.rabbit.annotation.Queue[] queuesToDeclare = rabbitListener.queuesToDeclare();
 		List<String> result = new ArrayList<String>();
 		if (queues.length > 0) {
 			for (int i = 0; i < queues.length; i++) {
-				Object resolvedValue = resolveExpression(queues[i]);
-				resolveAsString(resolvedValue, result);
+				resolveAsString(resolveExpression(queues[i]), result);
 			}
 		}
-		else {
+		if (queuesToDeclare.length > 0) {
+			if (queues.length > 0) {
+				throw new BeanInitializationException(
+						"@RabbitListener can have only one of 'queues', 'queuesToDeclare', or 'bindings'");
+			}
+			for (int i = 0; i < queuesToDeclare.length; i++) {
+				declareQueue(queuesToDeclare[i]);
+				resolveAsString(resolveExpression(queuesToDeclare[i].value()), result);
+			}
+		}
+		if (bindings.length > 0) {
+			if (queues.length > 0 || queuesToDeclare.length > 0) {
+				throw new BeanInitializationException(
+						"@RabbitListener can have only one of 'queues', 'queuesToDeclare', or 'bindings'");
+			}
 			return registerBeansForDeclaration(rabbitListener);
 		}
 		return result.toArray(new String[result.size()]);
@@ -438,6 +489,216 @@ public class RabbitListenerAnnotationBeanPostProcessor
 		}
 	}
 
+	private String[] registerBeansForDeclaration(RabbitListener rabbitListener) {
+		List<String> queues = new ArrayList<String>();
+		if (this.beanFactory instanceof ConfigurableBeanFactory) {
+			for (QueueBinding binding : rabbitListener.bindings()) {
+				String queueName = declareQueue(binding.value());
+				queues.add(queueName);
+				declareExchangeAndBinding(binding, queueName);
+			}
+		}
+		return queues.toArray(new String[queues.size()]);
+	}
+
+	private String declareQueue(org.springframework.amqp.rabbit.annotation.Queue bindingQueue) {
+		String queueName = (String) resolveExpression(bindingQueue.value());
+		boolean exclusive = false;
+		boolean autoDelete = false;
+		if (!StringUtils.hasText(queueName)) {
+			queueName = UUID.randomUUID().toString();
+			// default exclusive/autodelete to true when anonymous
+			if (!StringUtils.hasText(bindingQueue.exclusive())
+					|| resolveExpressionAsBoolean(bindingQueue.exclusive())) {
+				exclusive = true;
+			}
+			if (!StringUtils.hasText(bindingQueue.autoDelete())
+					|| resolveExpressionAsBoolean(bindingQueue.autoDelete())) {
+				autoDelete = true;
+			}
+		}
+		else {
+			exclusive = resolveExpressionAsBoolean(bindingQueue.exclusive());
+			autoDelete = resolveExpressionAsBoolean(bindingQueue.autoDelete());
+		}
+		Queue queue = new Queue(queueName,
+				resolveExpressionAsBoolean(bindingQueue.durable()),
+				exclusive,
+				autoDelete,
+				resolveArguments(bindingQueue.arguments()));
+		queue.setIgnoreDeclarationExceptions(resolveExpressionAsBoolean(bindingQueue.ignoreDeclarationExceptions()));
+		((ConfigurableBeanFactory) this.beanFactory).registerSingleton(queueName + ++this.increment, queue);
+		return queueName;
+	}
+
+	private void declareExchangeAndBinding(QueueBinding binding, String queueName) {
+		org.springframework.amqp.rabbit.annotation.Exchange bindingExchange = binding.exchange();
+		String exchangeName = resolveExpressionAsString(bindingExchange.value(), "@Exchange.exchange");
+		Assert.isTrue(StringUtils.hasText(exchangeName), "Exchange name required; binding queue " + queueName);
+		String exchangeType = resolveExpressionAsString(bindingExchange.type(), "@Exchange.type");
+		String routingKey = resolveExpressionAsString(binding.key(), "@QueueBinding.key");
+		Exchange exchange;
+		Binding actualBinding;
+		if (exchangeType.equals(ExchangeTypes.DIRECT)) {
+			exchange = directExchange(bindingExchange, exchangeName);
+			actualBinding = new Binding(queueName, DestinationType.QUEUE, exchangeName, routingKey,
+					resolveArguments(binding.arguments()));
+		}
+		else if (exchangeType.equals(ExchangeTypes.FANOUT)) {
+			exchange = fanoutExchange(bindingExchange, exchangeName);
+			actualBinding = new Binding(queueName, DestinationType.QUEUE, exchangeName, "",
+					resolveArguments(binding.arguments()));
+		}
+		else if (exchangeType.equals(ExchangeTypes.TOPIC)) {
+			exchange = topicExchange(bindingExchange, exchangeName);
+			actualBinding = new Binding(queueName, DestinationType.QUEUE, exchangeName, routingKey,
+					resolveArguments(binding.arguments()));
+		}
+		else if (exchangeType.equals(ExchangeTypes.HEADERS)) {
+			exchange = headersExchange(bindingExchange, exchangeName);
+			actualBinding = new Binding(queueName, DestinationType.QUEUE, exchangeName, routingKey,
+					resolveArguments(binding.arguments()));
+		}
+		else {
+			throw new BeanInitializationException("Unexpected exchange type: " + exchangeType);
+		}
+		AbstractExchange abstractExchange = (AbstractExchange) exchange;
+		abstractExchange.setInternal(resolveExpressionAsBoolean(bindingExchange.internal()));
+		abstractExchange.setDelayed(resolveExpressionAsBoolean(bindingExchange.delayed()));
+		abstractExchange.setIgnoreDeclarationExceptions(resolveExpressionAsBoolean(bindingExchange.ignoreDeclarationExceptions()));
+		((AbstractDeclarable) actualBinding)
+				.setIgnoreDeclarationExceptions(resolveExpressionAsBoolean(binding.ignoreDeclarationExceptions()));
+		((ConfigurableBeanFactory) this.beanFactory).registerSingleton(exchangeName + ++this.increment,
+				exchange);
+		((ConfigurableBeanFactory) this.beanFactory).registerSingleton(
+				exchangeName + "." + queueName + ++this.increment, actualBinding);
+	}
+
+	private Exchange directExchange(org.springframework.amqp.rabbit.annotation.Exchange bindingExchange,
+			String exchangeName) {
+		return new DirectExchange(exchangeName,
+				resolveExpressionAsBoolean(bindingExchange.durable()),
+				resolveExpressionAsBoolean(bindingExchange.autoDelete()),
+				resolveArguments(bindingExchange.arguments()));
+	}
+
+	private Exchange fanoutExchange(org.springframework.amqp.rabbit.annotation.Exchange bindingExchange,
+			String exchangeName) {
+		return new FanoutExchange(exchangeName,
+				resolveExpressionAsBoolean(bindingExchange.durable()),
+				resolveExpressionAsBoolean(bindingExchange.autoDelete()),
+				resolveArguments(bindingExchange.arguments()));
+	}
+
+	private Exchange topicExchange(org.springframework.amqp.rabbit.annotation.Exchange bindingExchange,
+			String exchangeName) {
+		return new TopicExchange(exchangeName,
+				resolveExpressionAsBoolean(bindingExchange.durable()),
+				resolveExpressionAsBoolean(bindingExchange.autoDelete()),
+				resolveArguments(bindingExchange.arguments()));
+	}
+
+	private Exchange headersExchange(org.springframework.amqp.rabbit.annotation.Exchange bindingExchange,
+			String exchangeName) {
+		return new HeadersExchange(exchangeName,
+				resolveExpressionAsBoolean(bindingExchange.durable()),
+				resolveExpressionAsBoolean(bindingExchange.autoDelete()),
+				resolveArguments(bindingExchange.arguments()));
+	}
+
+	private Map<String, Object> resolveArguments(Argument[] arguments) {
+		Map<String, Object> map = new HashMap<String, Object>();
+		for (Argument arg : arguments) {
+			String key = resolveExpressionAsString(arg.name(), "@Argument.name");
+			if (StringUtils.hasText(key)) {
+				Object value = resolveExpression(arg.value());
+				Object type = resolveExpression(arg.type());
+				Class<?> typeClass;
+				String typeName;
+				if (type instanceof Class) {
+					typeClass = (Class<?>) type;
+					typeName = typeClass.getName();
+				}
+				else {
+					Assert.isTrue(type instanceof String, "Type must resolve to a Class or String, but resolved to ["
+							+ type.getClass().getName() + "]");
+					typeName = (String) type;
+					try {
+						typeClass = ClassUtils.forName(typeName, this.beanClassLoader);
+					}
+					catch (Exception e) {
+						throw new IllegalStateException("Could not load class", e);
+					}
+				}
+				addToMap(map, key, value, typeClass, typeName);
+			}
+			else {
+				if (this.logger.isDebugEnabled()) {
+					this.logger.debug("@Argument ignored because the name resolved to an empty String");
+				}
+			}
+		}
+		return map.size() < 1 ? null : map;
+	}
+
+	private void addToMap(Map<String, Object> map, String key, Object value, Class<?> typeClass, String typeName) {
+		if (value.getClass().getName().equals(typeName)) {
+			if (typeClass.equals(String.class) && !StringUtils.hasText((String) value)) {
+				putEmpty(map, key);
+			}
+			else {
+				map.put(key, value);
+			}
+		}
+		else {
+			if (value instanceof String && !StringUtils.hasText((String) value)) {
+				putEmpty(map, key);
+			}
+			else {
+				if (CONVERSION_SERVICE.canConvert(value.getClass(), typeClass)) {
+					map.put(key, CONVERSION_SERVICE.convert(value, typeClass));
+				}
+				else {
+					throw new IllegalStateException("Cannot convert from " + value.getClass().getName()
+						+ " to " + typeName);
+				}
+			}
+		}
+	}
+
+	private void putEmpty(Map<String, Object> map, String key) {
+		if (this.emptyStringArguments.contains(key)) {
+			map.put(key, "");
+		}
+		else {
+			map.put(key, null);
+		}
+	}
+
+	private boolean resolveExpressionAsBoolean(String value) {
+		Object resolved = resolveExpression(value);
+		if (resolved instanceof Boolean) {
+			return (Boolean) resolved;
+		}
+		else if (resolved instanceof String) {
+			return Boolean.valueOf((String) resolved);
+		}
+		else {
+			return false;
+		}
+	}
+
+	private String resolveExpressionAsString(String value, String attribute) {
+		Object resolved = resolveExpression(value);
+		if (resolved instanceof String) {
+			return (String) resolved;
+		}
+		else {
+			throw new IllegalStateException("The [" + attribute + "] must resolve to a String. "
+					+ "Resolved to [" + resolved.getClass() + "] for [" + value + "]");
+		}
+	}
+
 	private Object resolveExpression(String value) {
 		String resolvedValue = resolve(value);
 
@@ -460,87 +721,6 @@ public class RabbitListenerAnnotationBeanPostProcessor
 		return value;
 	}
 
-	private String[] registerBeansForDeclaration(RabbitListener rabbitListener) {
-		List<String> queues = new ArrayList<String>();
-		if (this.beanFactory instanceof ConfigurableBeanFactory) {
-			for (QueueBinding binding : rabbitListener.bindings()) {
-				org.springframework.amqp.rabbit.annotation.Queue bindingQueue = binding.value();
-				String queueName = (String) resolveExpression(bindingQueue.value());
-				boolean exclusive = false;
-				boolean autoDelete = false;
-				if (!StringUtils.hasText(queueName)) {
-					queueName = UUID.randomUUID().toString();
-					// default exclusive/autodelete to true when anonymous
-					if (!StringUtils.hasText(bindingQueue.exclusive())
-							|| resolveExpressionAsBoolean(bindingQueue.exclusive())) {
-						exclusive = true;
-					}
-					if (!StringUtils.hasText(bindingQueue.autoDelete())
-							|| resolveExpressionAsBoolean(bindingQueue.autoDelete())) {
-						autoDelete = true;
-					}
-				}
-				else {
-					exclusive = resolveExpressionAsBoolean(bindingQueue.exclusive());
-					autoDelete = resolveExpressionAsBoolean(bindingQueue.autoDelete());
-				}
-				Queue queue = new Queue(queueName,
-						resolveExpressionAsBoolean(bindingQueue.durable()),
-						exclusive,
-						autoDelete);
-				((ConfigurableBeanFactory) this.beanFactory).registerSingleton(queueName + ++this.increment, queue);
-				queues.add(queueName);
-				Exchange exchange = null;
-				org.springframework.amqp.rabbit.annotation.Exchange bindingExchange = binding.exchange();
-				String exchangeName = (String) resolveExpression(bindingExchange.value());
-				String exchangeType = bindingExchange.type();
-				Binding actualBinding = null;
-				Object key = resolveExpression(binding.key());
-				if (!(key instanceof String)) {
-					throw new BeanInitializationException("key must resolved to a String, not: " + key.getClass().toString());
-				}
- 				String resolvedKey = (String) key;
-				if (exchangeType.equals(ExchangeTypes.DIRECT)) {
-					exchange = new DirectExchange(exchangeName,
-							resolveExpressionAsBoolean(bindingExchange.durable()),
-							resolveExpressionAsBoolean(bindingExchange.autoDelete()));
-					actualBinding = new Binding(queueName, DestinationType.QUEUE, exchangeName, resolvedKey, null);
-				}
-				else if (exchangeType.equals(ExchangeTypes.FANOUT)) {
-					exchange = new FanoutExchange(exchangeName,
-							resolveExpressionAsBoolean(bindingExchange.durable()),
-							resolveExpressionAsBoolean(bindingExchange.autoDelete()));
-					actualBinding = new Binding(queueName, DestinationType.QUEUE, exchangeName, "", null);
-				}
-				else if (exchangeType.equals(ExchangeTypes.TOPIC)) {
-					exchange = new TopicExchange(exchangeName,
-							resolveExpressionAsBoolean(bindingExchange.durable()),
-							resolveExpressionAsBoolean(bindingExchange.autoDelete()));
-					actualBinding = new Binding(queueName, DestinationType.QUEUE, exchangeName, resolvedKey, null);
-				}
-				else {
-					throw new BeanInitializationException("Unexpected exchange type: " + exchangeType);
-				}
-				((ConfigurableBeanFactory) this.beanFactory).registerSingleton(exchangeName + ++this.increment, exchange);
-				((ConfigurableBeanFactory) this.beanFactory).registerSingleton(exchangeName + ++this.increment, actualBinding);
-			}
-		}
-		return queues.toArray(new String[queues.size()]);
-	}
-
-	private boolean resolveExpressionAsBoolean(String value) {
-		Object resolved = resolveExpression(value);
-		if (resolved instanceof Boolean) {
-			return (Boolean) resolved;
-		}
-		else if (resolved instanceof String) {
-			return Boolean.valueOf((String) resolved);
-		}
-		else {
-			return false;
-		}
-	}
-
 	/**
 	 * An {@link MessageHandlerMethodFactory} adapter that offers a configurable underlying
 	 * instance to use. Useful if the factory to use is determined once the endpoints
@@ -550,6 +730,10 @@ public class RabbitListenerAnnotationBeanPostProcessor
 	private class RabbitHandlerMethodFactoryAdapter implements MessageHandlerMethodFactory {
 
 		private MessageHandlerMethodFactory messageHandlerMethodFactory;
+
+		RabbitHandlerMethodFactoryAdapter() {
+			super();
+		}
 
 		public void setMessageHandlerMethodFactory(MessageHandlerMethodFactory rabbitHandlerMethodFactory1) {
 			this.messageHandlerMethodFactory = rabbitHandlerMethodFactory1;
@@ -569,7 +753,7 @@ public class RabbitListenerAnnotationBeanPostProcessor
 
 		private MessageHandlerMethodFactory createDefaultMessageHandlerMethodFactory() {
 			DefaultMessageHandlerMethodFactory defaultFactory = new DefaultMessageHandlerMethodFactory();
-			defaultFactory.setBeanFactory(beanFactory);
+			defaultFactory.setBeanFactory(RabbitListenerAnnotationBeanPostProcessor.this.beanFactory);
 			defaultFactory.afterPropertiesSet();
 			return defaultFactory;
 		}

@@ -16,10 +16,11 @@
 
 package org.springframework.amqp.rabbit.annotation;
 
-import static java.lang.annotation.RetentionPolicy.RUNTIME;
-
 import java.lang.annotation.Retention;
+import java.lang.annotation.RetentionPolicy;
 import java.lang.annotation.Target;
+
+import org.springframework.core.annotation.AliasFor;
 
 /**
  * A queue definition used within the bindings attribute of a {@code QueueBinding}.
@@ -29,13 +30,21 @@ import java.lang.annotation.Target;
  *
  */
 @Target({})
-@Retention(RUNTIME)
+@Retention(RetentionPolicy.RUNTIME)
 public @interface Queue {
 
 	/**
 	 * @return the queue name or "" for a generated queue name (default).
 	 */
+	@AliasFor("name")
 	String value() default "";
+
+	/**
+	 * @return the queue name or "" for a generated queue name (default).
+	 * @since 2.0
+	 */
+	@AliasFor("value")
+	String name() default "";
 
 	/**
 	 * @return true if the queue is to be declared as durable.
@@ -51,5 +60,17 @@ public @interface Queue {
 	 * @return true if the queue is to be declared as auto-delete.
 	 */
 	String autoDelete() default "";
+
+	/**
+	 * @return true if the declaration exceptions should be ignored.
+	 * @since 1.6
+	 */
+	String ignoreDeclarationExceptions() default "false";
+
+	/**
+	 * @return the arguments to apply when declaring this queue.
+	 * @since 1.6
+	 */
+	Argument[] arguments() default {};
 
 }

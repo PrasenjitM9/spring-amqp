@@ -44,6 +44,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Properties;
+import java.util.UUID;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.TimeoutException;
 
@@ -66,9 +67,10 @@ import org.springframework.amqp.core.Queue;
 import org.springframework.amqp.rabbit.connection.CachingConnectionFactory;
 import org.springframework.amqp.rabbit.connection.ConnectionFactory;
 import org.springframework.amqp.rabbit.connection.SingleConnectionFactory;
-import org.springframework.amqp.rabbit.test.BrokerRunning;
+import org.springframework.amqp.rabbit.junit.BrokerRunning;
 import org.springframework.amqp.utils.test.TestUtils;
 import org.springframework.beans.DirectFieldAccessor;
+import org.springframework.beans.factory.config.ConfigurableBeanFactory;
 import org.springframework.context.ApplicationContext;
 import org.springframework.context.ApplicationEvent;
 import org.springframework.context.ApplicationEventPublisher;
@@ -76,6 +78,7 @@ import org.springframework.context.ConfigurableApplicationContext;
 import org.springframework.context.annotation.AnnotationConfigApplicationContext;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.context.annotation.Scope;
 import org.springframework.context.support.GenericApplicationContext;
 
 import com.rabbitmq.client.Channel;
@@ -116,7 +119,7 @@ public class RabbitAdminTests {
 
 	@Test
 	public void testFailOnFirstUseWithMissingBroker() throws Exception {
-		SingleConnectionFactory connectionFactory = new SingleConnectionFactory("foo");
+		SingleConnectionFactory connectionFactory = new SingleConnectionFactory("localhost");
 		connectionFactory.setPort(434343);
 		GenericApplicationContext applicationContext = new GenericApplicationContext();
 		applicationContext.getBeanFactory().registerSingleton("foo", new Queue("queue"));
@@ -166,7 +169,7 @@ public class RabbitAdminTests {
 		Properties props = rabbitAdmin.getQueueProperties(queueName);
 		assertNotNull(props);
 		assertNotNull(props.get(RabbitAdmin.QUEUE_MESSAGE_COUNT));
-		return Integer.valueOf((Integer) props.get(RabbitAdmin.QUEUE_MESSAGE_COUNT));
+		return (Integer) props.get(RabbitAdmin.QUEUE_MESSAGE_COUNT);
 	}
 
 	@Test
@@ -243,6 +246,7 @@ public class RabbitAdminTests {
 		admin.deleteExchange("e2");
 		admin.deleteExchange("e3");
 		admin.deleteExchange("e4");
+		assertNull(admin.getQueueProperties(ctx.getBean(Config.class).protypeQueueName));
 		ctx.close();
 	}
 
@@ -270,7 +274,7 @@ public class RabbitAdminTests {
 		com.rabbitmq.client.ConnectionFactory rabbitConnectionFactory = mock(
 				com.rabbitmq.client.ConnectionFactory.class);
 		TimeoutException toBeThrown = new TimeoutException("test");
-		doThrow(toBeThrown).when(rabbitConnectionFactory).newConnection(any(ExecutorService.class));
+		doThrow(toBeThrown).when(rabbitConnectionFactory).newConnection(any(ExecutorService.class), anyString());
 		CachingConnectionFactory ccf = new CachingConnectionFactory(rabbitConnectionFactory);
 		RabbitAdmin admin = new RabbitAdmin(ccf);
 		List<DeclarationExceptionEvent> events = new ArrayList<DeclarationExceptionEvent>();
@@ -281,7 +285,7 @@ public class RabbitAdminTests {
 		admin.declareExchange(new DirectExchange("foo"));
 		admin.declareBinding(new Binding("foo", DestinationType.QUEUE, "bar", "baz", null));
 		assertThat(events.size(), equalTo(4));
-		assertThat((RabbitAdmin) events.get(0).getSource(), sameInstance(admin));
+		assertThat(events.get(0).getSource(), sameInstance(admin));
 		assertThat(events.get(0).getDeclarable(), instanceOf(AnonymousQueue.class));
 		assertSame(toBeThrown, events.get(0).getThrowable().getCause());
 		assertNull(events.get(1).getDeclarable());
@@ -296,6 +300,8 @@ public class RabbitAdminTests {
 
 	@Configuration
 	public static class Config {
+
+		public String protypeQueueName = UUID.randomUUID().toString();
 
 		@Bean
 		public ConnectionFactory cf() {
@@ -344,6 +350,14 @@ public class RabbitAdminTests {
 		}
 
 		@Bean
+		@Scope(ConfigurableBeanFactory.SCOPE_PROTOTYPE)
+		public List<Queue> prototypes() {
+			return Arrays.asList(
+					new Queue(this.protypeQueueName, false, false, true)
+			);
+		}
+
+		@Bean
 		public List<Binding> bs() {
 			return Arrays.asList(
 					new Binding("q2", DestinationType.QUEUE, "e2", "k2", null),
@@ -366,7 +380,7 @@ public class RabbitAdminTests {
 
 		private final List<DeclarationExceptionEvent> events;
 
-		public EventPublisher(List<DeclarationExceptionEvent> events) {
+		EventPublisher(List<DeclarationExceptionEvent> events) {
 			this.events = events;
 		}
 

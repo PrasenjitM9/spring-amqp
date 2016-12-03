@@ -1,5 +1,5 @@
 /*
- * Copyright 2002-2010 the original author or authors.
+ * Copyright 2002-2016 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,6 +16,7 @@
 
 package org.springframework.amqp.support.converter;
 
+import static org.hamcrest.Matchers.instanceOf;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
@@ -24,17 +25,22 @@ import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.ObjectInputStream;
 import java.io.ObjectOutputStream;
-import java.io.Serializable;
 
+import org.junit.Rule;
 import org.junit.Test;
+import org.junit.rules.ExpectedException;
+
 import org.springframework.amqp.core.Message;
 import org.springframework.amqp.core.MessageProperties;
-import org.springframework.util.Assert;
 
 /**
  * @author Mark Fisher
+ * @author Gary Russell
  */
-public class SimpleMessageConverterTests {
+public class SimpleMessageConverterTests extends WhiteListDeserializingMessageConverterTests {
+
+	@Rule
+	public ExpectedException exception = ExpectedException.none();
 
 	@Test
 	public void bytesAsDefaultMessageBodyType() throws Exception {
@@ -139,24 +145,18 @@ public class SimpleMessageConverterTests {
 		assertEquals(testBean, deserializedObject);
 	}
 
-
-	@SuppressWarnings("serial")
-	private static class TestBean implements Serializable {
-
-		private final String text;
-
-		TestBean(String text) {
-			Assert.notNull(text, "text must not be null");
-			this.text = text;
-		}
-
-		public boolean equals(Object other) {
-			return (other instanceof TestBean && this.text.equals(((TestBean) other).text));
-		}
-
-		public int hashCode() {
-			return this.text.hashCode();
-		}
+	@Test
+	public void messageConversionExceptionForClassNotFound() throws Exception {
+		SimpleMessageConverter converter = new SimpleMessageConverter();
+		TestBean testBean = new TestBean("foo");
+		Message message = converter.toMessage(testBean, new MessageProperties());
+		String contentType = message.getMessageProperties().getContentType();
+		assertEquals("application/x-java-serialized-object", contentType);
+		byte[] body = message.getBody();
+		body[10] = 'z';
+		this.exception.expect(MessageConversionException.class);
+		this.exception.expectCause(instanceOf(IllegalStateException.class));
+		converter.fromMessage(message);
 	}
 
 }

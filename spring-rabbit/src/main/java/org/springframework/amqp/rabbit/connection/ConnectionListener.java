@@ -16,14 +16,38 @@
 
 package org.springframework.amqp.rabbit.connection;
 
+import com.rabbitmq.client.ShutdownSignalException;
+
 /**
+ * A listener for connection creation and closing.
+ *
  * @author Dave Syer
+ * @author Gary Russell
  *
  */
+@FunctionalInterface
 public interface ConnectionListener {
 
+	/**
+	 * Called when a new connection is established.
+	 * @param connection the connection.
+	 */
 	void onCreate(Connection connection);
 
-	void onClose(Connection connection);
+	/**
+	 * Called when a connection is closed.
+	 * @param connection the connection.
+	 * @see #onShutDown(ShutdownSignalException)
+	 */
+	default void onClose(Connection connection) {
+	}
+
+	/**
+	 * Called when a connection is force closed.
+	 * @param signal the shut down signal.
+	 * @since 2.0
+	 */
+	default void onShutDown(ShutdownSignalException signal) {
+	}
 
 }

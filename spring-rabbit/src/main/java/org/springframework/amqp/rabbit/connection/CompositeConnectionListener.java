@@ -20,8 +20,11 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.CopyOnWriteArrayList;
 
+import com.rabbitmq.client.ShutdownSignalException;
+
 /**
  * @author Dave Syer
+ * @author Gary Russell
  *
  */
 public class CompositeConnectionListener implements ConnectionListener {
@@ -29,14 +32,21 @@ public class CompositeConnectionListener implements ConnectionListener {
 	private List<ConnectionListener> delegates = new CopyOnWriteArrayList<ConnectionListener>();
 
 	public void onCreate(Connection connection) {
-		for (ConnectionListener delegate : delegates) {
+		for (ConnectionListener delegate : this.delegates) {
 			delegate.onCreate(connection);
 		}
 	}
 
 	public void onClose(Connection connection) {
-		for (ConnectionListener delegate : delegates) {
+		for (ConnectionListener delegate : this.delegates) {
 			delegate.onClose(connection);
+		}
+	}
+
+	@Override
+	public void onShutDown(ShutdownSignalException signal) {
+		for (ConnectionListener delegate : this.delegates) {
+			delegate.onShutDown(signal);
 		}
 	}
 

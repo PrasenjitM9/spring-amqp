@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2015 the original author or authors.
+ * Copyright 2014-2016 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -34,8 +34,10 @@ import org.springframework.beans.factory.DisposableBean;
 import org.springframework.beans.factory.InitializingBean;
 import org.springframework.context.ApplicationContext;
 import org.springframework.context.ApplicationContextAware;
+import org.springframework.context.ApplicationListener;
 import org.springframework.context.ConfigurableApplicationContext;
 import org.springframework.context.SmartLifecycle;
+import org.springframework.context.event.ContextRefreshedEvent;
 import org.springframework.util.Assert;
 import org.springframework.util.StringUtils;
 
@@ -61,7 +63,8 @@ import org.springframework.util.StringUtils;
  * @see MessageListenerContainer
  * @see RabbitListenerContainerFactory
  */
-public class RabbitListenerEndpointRegistry implements DisposableBean, SmartLifecycle, ApplicationContextAware {
+public class RabbitListenerEndpointRegistry implements DisposableBean, SmartLifecycle, ApplicationContextAware,
+		ApplicationListener<ContextRefreshedEvent> {
 
 	protected final Log logger = LogFactory.getLog(getClass());
 
@@ -71,6 +74,8 @@ public class RabbitListenerEndpointRegistry implements DisposableBean, SmartLife
 	private int phase = Integer.MAX_VALUE;
 
 	private ConfigurableApplicationContext applicationContext;
+
+	private boolean contextRefreshed;
 
 
 	@Override
@@ -205,7 +210,7 @@ public class RabbitListenerEndpointRegistry implements DisposableBean, SmartLife
 					((DisposableBean) listenerContainer).destroy();
 				}
 				catch (Exception ex) {
-					logger.warn("Failed to destroy message listener container", ex);
+					this.logger.warn("Failed to destroy message listener container", ex);
 				}
 			}
 		}
@@ -227,9 +232,7 @@ public class RabbitListenerEndpointRegistry implements DisposableBean, SmartLife
 	@Override
 	public void start() {
 		for (MessageListenerContainer listenerContainer : getListenerContainers()) {
-			if (listenerContainer.isAutoStartup()) {
-				startIfNecessary(listenerContainer);
-			}
+			startIfNecessary(listenerContainer);
 		}
 	}
 
@@ -261,23 +264,31 @@ public class RabbitListenerEndpointRegistry implements DisposableBean, SmartLife
 
 	/**
 	 * Start the specified {@link MessageListenerContainer} if it should be started
-	 * on startup.
+	 * on startup or when start is called explicitly after startup.
 	 * @see MessageListenerContainer#isAutoStartup()
 	 */
-	private static void startIfNecessary(MessageListenerContainer listenerContainer) {
-		if (listenerContainer.isAutoStartup()) {
+	private void startIfNecessary(MessageListenerContainer listenerContainer) {
+		if (this.contextRefreshed || listenerContainer.isAutoStartup()) {
 			listenerContainer.start();
 		}
 	}
 
 
-	private static class AggregatingCallback implements Runnable {
+	@Override
+	public void onApplicationEvent(ContextRefreshedEvent event) {
+		if (event.getApplicationContext().equals(this.applicationContext)) {
+			this.contextRefreshed = true;
+		}
+	}
+
+
+	private static final class AggregatingCallback implements Runnable {
 
 		private final AtomicInteger count;
 
 		private final Runnable finishCallback;
 
-		private AggregatingCallback(int count, Runnable finishCallback) {
+		AggregatingCallback(int count, Runnable finishCallback) {
 			this.count = new AtomicInteger(count);
 			this.finishCallback = finishCallback;
 		}

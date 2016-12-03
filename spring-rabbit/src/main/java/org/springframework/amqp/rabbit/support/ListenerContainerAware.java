@@ -29,6 +29,7 @@ import org.springframework.amqp.rabbit.core.ChannelAwareMessageListener;
  * @since 1.5
  *
  */
+@FunctionalInterface
 public interface ListenerContainerAware {
 
 	/**

@@ -33,7 +33,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
-import org.apache.log4j.Level;
+import org.apache.logging.log4j.Level;
 import org.junit.After;
 import org.junit.Rule;
 import org.junit.Test;
@@ -49,11 +49,11 @@ import org.springframework.amqp.rabbit.connection.ConnectionProxy;
 import org.springframework.amqp.rabbit.core.ChannelAwareMessageListener;
 import org.springframework.amqp.rabbit.core.RabbitAdmin;
 import org.springframework.amqp.rabbit.core.RabbitTemplate;
+import org.springframework.amqp.rabbit.junit.BrokerRunning;
+import org.springframework.amqp.rabbit.junit.BrokerTestUtils;
+import org.springframework.amqp.rabbit.junit.LongRunningIntegrationTest;
 import org.springframework.amqp.rabbit.listener.adapter.MessageListenerAdapter;
-import org.springframework.amqp.rabbit.test.BrokerRunning;
-import org.springframework.amqp.rabbit.test.BrokerTestUtils;
-import org.springframework.amqp.rabbit.test.Log4jLevelAdjuster;
-import org.springframework.amqp.rabbit.test.LongRunningIntegrationTest;
+import org.springframework.amqp.rabbit.test.LogLevelAdjuster;
 import org.springframework.amqp.utils.test.TestUtils;
 import org.springframework.beans.factory.DisposableBean;
 import org.springframework.context.support.GenericApplicationContext;
@@ -89,13 +89,13 @@ public class MessageListenerRecoveryCachingConnectionIntegrationTests {
 	public LongRunningIntegrationTest longTests = new LongRunningIntegrationTest();
 
 	@Rule
-	public Log4jLevelAdjuster logLevels = new Log4jLevelAdjuster(Level.DEBUG, RabbitTemplate.class, ManualAckListener.class,
+	public LogLevelAdjuster logLevels = new LogLevelAdjuster(Level.DEBUG, RabbitTemplate.class, ManualAckListener.class,
 			SimpleMessageListenerContainer.class, BlockingQueueConsumer.class, CachingConnectionFactory.class);
 
 	@Rule
-	public BrokerRunning brokerIsRunning = BrokerRunning.isRunningWithEmptyQueues(queue, sendQueue);
+	public BrokerRunning brokerIsRunning = BrokerRunning.isRunningWithEmptyQueues(queue.getName(), sendQueue.getName());
 
-	protected ConnectionFactory createConnectionFactory() {
+	protected CachingConnectionFactory createConnectionFactory() {
 		CachingConnectionFactory connectionFactory = new CachingConnectionFactory();
 		connectionFactory.setHost("localhost");
 		connectionFactory.setChannelCacheSize(concurrentConsumers);
@@ -273,7 +273,9 @@ public class MessageListenerRecoveryCachingConnectionIntegrationTests {
 		RabbitTemplate template = new RabbitTemplate(connectionFactory1);
 
 		CountDownLatch latch = new CountDownLatch(messageCount);
-		ConnectionFactory connectionFactory2 = createConnectionFactory();
+		CachingConnectionFactory connectionFactory2 = createConnectionFactory();
+		// this test closes the underlying connection normally; it won't automatically recover.
+		connectionFactory2.getRabbitConnectionFactory().setAutomaticRecoveryEnabled(false);
 		container = createContainer(queue.getName(),
 				new CloseConnectionListener((ConnectionProxy) connectionFactory2.createConnection(), latch),
 				connectionFactory2);
@@ -423,7 +425,7 @@ public class MessageListenerRecoveryCachingConnectionIntegrationTests {
 			template.convertAndSend("nonexistent", "foo" + i);
 		}
 		assertTrue(latch.await(10, TimeUnit.SECONDS));
-		Map<?,?> consumers = TestUtils.getPropertyValue(container, "consumers", Map.class);
+		Map<?, ?> consumers = TestUtils.getPropertyValue(container, "consumers", Map.class);
 		assertEquals(1, consumers.size());
 		Object consumer = consumers.keySet().iterator().next();
 
@@ -525,7 +527,8 @@ public class MessageListenerRecoveryCachingConnectionIntegrationTests {
 					// intentional error (causes exception on connection thread):
 					throw new RuntimeException("Planned");
 				}
-			} finally {
+			}
+			finally {
 				latch.countDown();
 			}
 		}
@@ -548,7 +551,8 @@ public class MessageListenerRecoveryCachingConnectionIntegrationTests {
 			if (failed.compareAndSet(false, true)) {
 				// intentional error (causes exception on connection thread):
 				channel.abort();
-			} else {
+			}
+			else {
 				latch.countDown();
 			}
 		}
@@ -574,7 +578,8 @@ public class MessageListenerRecoveryCachingConnectionIntegrationTests {
 			if (failed.compareAndSet(false, true)) {
 				// intentional error (causes exception on connection thread):
 				connection.close();
-			} else {
+			}
+			else {
 				latch.countDown();
 			}
 		}

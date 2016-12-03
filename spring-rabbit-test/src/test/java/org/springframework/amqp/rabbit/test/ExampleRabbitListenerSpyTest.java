@@ -37,6 +37,7 @@ import org.springframework.amqp.rabbit.connection.CachingConnectionFactory;
 import org.springframework.amqp.rabbit.connection.ConnectionFactory;
 import org.springframework.amqp.rabbit.core.RabbitAdmin;
 import org.springframework.amqp.rabbit.core.RabbitTemplate;
+import org.springframework.amqp.rabbit.junit.BrokerRunning;
 import org.springframework.amqp.rabbit.test.mockito.LatchCountDownAndCallRealMethodAnswer;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.context.annotation.Bean;
@@ -142,12 +143,12 @@ public class ExampleRabbitListenerSpyTest {
 
 	public static class Listener {
 
-		@RabbitListener(id="foo", queues="#{queue1.name}")
+		@RabbitListener(id = "foo", queues = "#{queue1.name}")
 		public String foo(String foo) {
 			return foo.toUpperCase();
 		}
 
-		@RabbitListener(id="bar", queues="#{queue2.name}")
+		@RabbitListener(id = "bar", queues = "#{queue2.name}")
 		public void foo(@Payload String foo, @Header("amqp_receivedRoutingKey") String rk) {
 		}
 

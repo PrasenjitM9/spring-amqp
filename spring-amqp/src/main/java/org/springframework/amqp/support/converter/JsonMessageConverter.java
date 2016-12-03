@@ -37,6 +37,7 @@ import org.springframework.amqp.core.MessageProperties;
  * @author Dave Syer
  * @author Sam Nelson
  * @author Andreas Asplund
+ * @author Artem Bilan
  */
 public class JsonMessageConverter extends AbstractJsonMessageConverter {
 
@@ -46,17 +47,20 @@ public class JsonMessageConverter extends AbstractJsonMessageConverter {
 
 	private JavaTypeMapper javaTypeMapper = new DefaultJavaTypeMapper();
 
+	private boolean typeMapperSet;
+
 	public JsonMessageConverter() {
 		super();
 		initializeJsonObjectMapper();
 	}
 
 	public JavaTypeMapper getJavaTypeMapper() {
-		return javaTypeMapper;
+		return this.javaTypeMapper;
 	}
 
 	public void setJavaTypeMapper(JavaTypeMapper javaTypeMapper) {
 		this.javaTypeMapper = javaTypeMapper;
+		this.typeMapperSet = true;
 	}
 
 	/**
@@ -71,11 +75,19 @@ public class JsonMessageConverter extends AbstractJsonMessageConverter {
 		this.jsonObjectMapper = jsonObjectMapper;
 	}
 
+	@Override
+	public void setBeanClassLoader(ClassLoader classLoader) {
+		super.setBeanClassLoader(classLoader);
+		if (!this.typeMapperSet) {
+			((DefaultJavaTypeMapper) this.javaTypeMapper).setBeanClassLoader(classLoader);
+		}
+	}
+
 	/**
 	 * Subclass and override to customize.
 	 */
 	protected void initializeJsonObjectMapper() {
-		jsonObjectMapper
+		this.jsonObjectMapper
 				.configure(
 						DeserializationConfig.Feature.FAIL_ON_UNKNOWN_PROPERTIES,
 						false);
@@ -128,14 +140,14 @@ public class JsonMessageConverter extends AbstractJsonMessageConverter {
 			JavaType targetJavaType) throws JsonParseException,
 			JsonMappingException, IOException {
 		String contentAsString = new String(body, encoding);
-		return jsonObjectMapper.readValue(contentAsString, targetJavaType);
+		return this.jsonObjectMapper.readValue(contentAsString, targetJavaType);
 	}
 
 	private Object convertBytesToObject(byte[] body, String encoding,
 			Class<?> targetClass) throws JsonParseException,
 			JsonMappingException, IOException {
 		String contentAsString = new String(body, encoding);
-		return jsonObjectMapper.readValue(contentAsString, jsonObjectMapper.constructType(targetClass));
+		return this.jsonObjectMapper.readValue(contentAsString, this.jsonObjectMapper.constructType(targetClass));
 	}
 
 	@Override
@@ -144,7 +156,7 @@ public class JsonMessageConverter extends AbstractJsonMessageConverter {
 			throws MessageConversionException {
 		byte[] bytes = null;
 		try {
-			String jsonString = jsonObjectMapper
+			String jsonString = this.jsonObjectMapper
 					.writeValueAsString(objectToConvert);
 			bytes = jsonString.getBytes(getDefaultCharset());
 		}
@@ -159,7 +171,7 @@ public class JsonMessageConverter extends AbstractJsonMessageConverter {
 		}
 
 		if (getClassMapper() == null) {
-			getJavaTypeMapper().fromJavaType(jsonObjectMapper.constructType(objectToConvert.getClass()),
+			getJavaTypeMapper().fromJavaType(this.jsonObjectMapper.constructType(objectToConvert.getClass()),
 					messageProperties);
 
 		}

@@ -24,6 +24,7 @@ import org.springframework.amqp.core.MessageDeliveryMode;
 import org.springframework.amqp.core.MessageProperties;
 import org.springframework.messaging.MessageHeaders;
 import org.springframework.messaging.support.AbstractHeaderMapper;
+import org.springframework.util.MimeType;
 import org.springframework.util.StringUtils;
 
 /**
@@ -73,8 +74,8 @@ public class SimpleAmqpHeaderMapper extends AbstractHeaderMapper<MessageProperti
 			amqpMessageProperties.setContentType(contentType);
 		}
 		Object correlationId = headers.get(AmqpHeaders.CORRELATION_ID);
-		if (correlationId instanceof byte[]) {
-			amqpMessageProperties.setCorrelationId((byte[]) correlationId);
+		if (correlationId instanceof String) {
+			amqpMessageProperties.setCorrelationId((String) correlationId);
 		}
 		Integer delay = getHeaderIfAvailable(headers, AmqpHeaders.DELAY, Integer.class);
 		if (delay != null) {
@@ -181,13 +182,13 @@ public class SimpleAmqpHeaderMapper extends AbstractHeaderMapper<MessageProperti
 			if (StringUtils.hasText(contentType)) {
 				headers.put(AmqpHeaders.CONTENT_TYPE, contentType);
 			}
-			byte[] correlationId = amqpMessageProperties.getCorrelationId();
-			if (correlationId != null && correlationId.length > 0) {
+			String correlationId = amqpMessageProperties.getCorrelationId();
+			if (StringUtils.hasText(correlationId)) {
 				headers.put(AmqpHeaders.CORRELATION_ID, correlationId);
 			}
-			MessageDeliveryMode deliveryMode = amqpMessageProperties.getDeliveryMode();
-			if (deliveryMode != null) {
-				headers.put(AmqpHeaders.DELIVERY_MODE, deliveryMode);
+			MessageDeliveryMode receivedDeliveryMode = amqpMessageProperties.getReceivedDeliveryMode();
+			if (receivedDeliveryMode != null) {
+				headers.put(AmqpHeaders.RECEIVED_DELIVERY_MODE, receivedDeliveryMode);
 			}
 			long deliveryTag = amqpMessageProperties.getDeliveryTag();
 			if (deliveryTag > 0) {
@@ -237,9 +238,9 @@ public class SimpleAmqpHeaderMapper extends AbstractHeaderMapper<MessageProperti
 			if (StringUtils.hasText(type)) {
 				headers.put(AmqpHeaders.TYPE, type);
 			}
-			String userId = amqpMessageProperties.getUserId();
+			String userId = amqpMessageProperties.getReceivedUserId();
 			if (StringUtils.hasText(userId)) {
-				headers.put(AmqpHeaders.USER_ID, userId);
+				headers.put(AmqpHeaders.RECEIVED_USER_ID, userId);
 			}
 			String consumerTag = amqpMessageProperties.getConsumerTag();
 			if (StringUtils.hasText(consumerTag)) {
@@ -274,11 +275,7 @@ public class SimpleAmqpHeaderMapper extends AbstractHeaderMapper<MessageProperti
 		Object contentType = getHeaderIfAvailable(headers, AmqpHeaders.CONTENT_TYPE, Object.class);
 
 		if (contentType != null) {
-			String contentTypeClassName = contentType.getClass().getName();
-
-			// TODO: 2.0 - check instanceof MimeType instead
-			if (contentTypeClassName.equals("org.springframework.http.MediaType")
-					|| contentTypeClassName.equals("org.springframework.util.MimeType")) {
+			if (contentType instanceof MimeType) {
 				contentTypeStringValue = contentType.toString();
 			}
 			else if (contentType instanceof String) {
@@ -287,7 +284,7 @@ public class SimpleAmqpHeaderMapper extends AbstractHeaderMapper<MessageProperti
 			else {
 				if (logger.isWarnEnabled()) {
 					logger.warn("skipping header '" + AmqpHeaders.CONTENT_TYPE +
-							"' since it is not of expected type [" + contentTypeClassName + "]");
+							"' since it is not of expected type [" + contentType.getClass().getName() + "]");
 				}
 			}
 		}

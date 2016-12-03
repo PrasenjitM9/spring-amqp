@@ -96,7 +96,7 @@ public class RabbitResourceHolder extends ResourceHolderSupport {
 	 * @return true if the resources should be released.
 	 */
 	public boolean isReleaseAfterCompletion() {
-		return releaseAfterCompletion;
+		return this.releaseAfterCompletion;
 	}
 
 	public final void addConnection(Connection connection) {
@@ -146,14 +146,15 @@ public class RabbitResourceHolder extends ResourceHolderSupport {
 	public void commitAll() throws AmqpException {
 		try {
 			for (Channel channel : this.channels) {
-				if (deliveryTags.containsKey(channel)) {
-					for (Long deliveryTag : deliveryTags.get(channel)) {
+				if (this.deliveryTags.containsKey(channel)) {
+					for (Long deliveryTag : this.deliveryTags.get(channel)) {
 						channel.basicAck(deliveryTag, false);
 					}
 				}
 				channel.txCommit();
 			}
-		} catch (IOException e) {
+		}
+		catch (IOException e) {
 			throw new AmqpException("failed to commit RabbitMQ transaction", e);
 		}
 	}
@@ -174,7 +175,7 @@ public class RabbitResourceHolder extends ResourceHolderSupport {
 				logger.debug("Could not close synchronized Rabbit Channel after transaction", ex);
 			}
 		}
-		for (Connection con : this.connections) {//NOSONAR
+		for (Connection con : this.connections) { //NOSONAR
 			RabbitUtils.closeConnection(con);
 		}
 		this.connections.clear();
@@ -192,11 +193,12 @@ public class RabbitResourceHolder extends ResourceHolderSupport {
 				logger.debug("Rolling back messages to channel: " + channel);
 			}
 			RabbitUtils.rollbackIfNecessary(channel);
-			if (deliveryTags.containsKey(channel)) {
-				for (Long deliveryTag : deliveryTags.get(channel)) {
+			if (this.deliveryTags.containsKey(channel)) {
+				for (Long deliveryTag : this.deliveryTags.get(channel)) {
 					try {
 						channel.basicReject(deliveryTag, true);
-					} catch (IOException ex) {
+					}
+					catch (IOException ex) {
 						throw new AmqpIOException(ex);
 					}
 				}

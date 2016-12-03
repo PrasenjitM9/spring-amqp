@@ -36,10 +36,6 @@ import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 
 import org.springframework.util.Assert;
-import org.springframework.util.ObjectUtils;
-import org.springframework.util.ReflectionUtils;
-import org.springframework.util.ReflectionUtils.MethodCallback;
-import org.springframework.util.ReflectionUtils.MethodFilter;
 
 import com.rabbitmq.client.AMQP;
 import com.rabbitmq.client.AMQP.Basic.RecoverOk;
@@ -53,12 +49,12 @@ import com.rabbitmq.client.AMQP.Tx.CommitOk;
 import com.rabbitmq.client.AMQP.Tx.RollbackOk;
 import com.rabbitmq.client.AMQP.Tx.SelectOk;
 import com.rabbitmq.client.AlreadyClosedException;
+import com.rabbitmq.client.BuiltinExchangeType;
 import com.rabbitmq.client.Channel;
 import com.rabbitmq.client.Command;
 import com.rabbitmq.client.ConfirmListener;
 import com.rabbitmq.client.Connection;
 import com.rabbitmq.client.Consumer;
-import com.rabbitmq.client.FlowListener;
 import com.rabbitmq.client.GetResponse;
 import com.rabbitmq.client.Method;
 import com.rabbitmq.client.ReturnListener;
@@ -76,24 +72,6 @@ import com.rabbitmq.client.ShutdownSignalException;
 public class PublisherCallbackChannelImpl
 		implements PublisherCallbackChannel, ConfirmListener, ReturnListener, ShutdownListener {
 
-	private static final String[] METHODS_OF_INTEREST =
-			new String[] { "consumerCount", "messageCount" };
-
-	private static final MethodFilter METHOD_FILTER = new MethodFilter() {
-
-		@Override
-		public boolean matches(java.lang.reflect.Method method) {
-			return ObjectUtils.containsElement(METHODS_OF_INTEREST, method.getName());
-		}
-
-	};
-
-	private static volatile java.lang.reflect.Method consumerCountMethod;
-
-	private static volatile java.lang.reflect.Method messageCountMethod;
-
-	private static volatile boolean conditionalMethodsChecked;
-
 	private final Log logger = LogFactory.getLog(this.getClass());
 
 	private final Channel delegate;
@@ -101,36 +79,13 @@ public class PublisherCallbackChannelImpl
 	private final ConcurrentMap<String, Listener> listeners = new ConcurrentHashMap<String, Listener>();
 
 	private final Map<Listener, SortedMap<Long, PendingConfirm>> pendingConfirms
-		= new ConcurrentHashMap<PublisherCallbackChannel.Listener, SortedMap<Long,PendingConfirm>>();
+		= new ConcurrentHashMap<PublisherCallbackChannel.Listener, SortedMap<Long, PendingConfirm>>();
 
 	private final SortedMap<Long, Listener> listenerForSeq = new ConcurrentSkipListMap<Long, Listener>();
 
 	public PublisherCallbackChannelImpl(Channel delegate) {
 		delegate.addShutdownListener(this);
 		this.delegate = delegate;
-
-		if (!conditionalMethodsChecked) {
-			// The following reflection is required to maintain compatibility with pre 3.6.x clients.
-			ReflectionUtils.doWithMethods(delegate.getClass(), new MethodCallback(){
-
-				@Override
-				public void doWith(java.lang.reflect.Method method)
-						throws IllegalArgumentException, IllegalAccessException {
-					if ("consumerCount".equals(method.getName()) && method.getParameterTypes().length == 1
-							&& String.class.equals(method.getParameterTypes()[0])
-							&& long.class.equals(method.getReturnType())) {
-						consumerCountMethod = method;
-					}
-					else if ("messageCount".equals(method.getName()) && method.getParameterTypes().length == 1
-							&& String.class.equals(method.getParameterTypes()[0])
-							&& long.class.equals(method.getReturnType())) {
-						messageCountMethod = method;
-					}
-				}
-
-			}, METHOD_FILTER);
-			conditionalMethodsChecked = true;
-		}
 	}
 
 //////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -184,6 +139,7 @@ public class PublisherCallbackChannelImpl
 	 */
 	@Override
 	@Deprecated
+	@SuppressWarnings("deprecation")
 	public boolean flowBlocked() {
 		return this.delegate.flowBlocked();
 	}
@@ -200,13 +156,13 @@ public class PublisherCallbackChannelImpl
 
 	@Override
 	@SuppressWarnings("deprecation")
-	public void addFlowListener(FlowListener listener) {
+	public void addFlowListener(com.rabbitmq.client.FlowListener listener) {
 		this.delegate.addFlowListener(listener);
 	}
 
 	@Override
 	@SuppressWarnings("deprecation")
-	public boolean removeFlowListener(FlowListener listener) {
+	public boolean removeFlowListener(com.rabbitmq.client.FlowListener listener) {
 		return this.delegate.removeFlowListener(listener);
 	}
 
@@ -273,8 +229,18 @@ public class PublisherCallbackChannelImpl
 	}
 
 	@Override
+	public DeclareOk exchangeDeclare(String exchange, BuiltinExchangeType type) throws IOException {
+		return this.delegate.exchangeDeclare(exchange, type);
+	}
+
+	@Override
 	public DeclareOk exchangeDeclare(String exchange, String type,
 			boolean durable) throws IOException {
+		return this.delegate.exchangeDeclare(exchange, type, durable);
+	}
+
+	@Override
+	public DeclareOk exchangeDeclare(String exchange, BuiltinExchangeType type, boolean durable) throws IOException {
 		return this.delegate.exchangeDeclare(exchange, type, durable);
 	}
 
@@ -287,11 +253,23 @@ public class PublisherCallbackChannelImpl
 	}
 
 	@Override
+	public DeclareOk exchangeDeclare(String exchange, BuiltinExchangeType type, boolean durable, boolean autoDelete,
+			Map<String, Object> arguments) throws IOException {
+		return this.delegate.exchangeDeclare(exchange, type, durable, autoDelete, arguments);
+	}
+
+	@Override
 	public DeclareOk exchangeDeclare(String exchange, String type,
 			boolean durable, boolean autoDelete, boolean internal,
 			Map<String, Object> arguments) throws IOException {
 		return this.delegate.exchangeDeclare(exchange, type, durable, autoDelete,
 				internal, arguments);
+	}
+
+	@Override
+	public DeclareOk exchangeDeclare(String exchange, BuiltinExchangeType type, boolean durable, boolean autoDelete,
+			boolean internal, Map<String, Object> arguments) throws IOException {
+		return this.delegate.exchangeDeclare(exchange, type, durable, autoDelete, internal, arguments);
 	}
 
 	@Override
@@ -578,6 +556,12 @@ public class PublisherCallbackChannelImpl
 	}
 
 	@Override
+	public void exchangeDeclareNoWait(String exchange, BuiltinExchangeType type, boolean durable, boolean autoDelete,
+			boolean internal, Map<String, Object> arguments) throws IOException {
+		this.delegate.exchangeDeclareNoWait(exchange, type, durable, autoDelete, internal, arguments);
+	}
+
+	@Override
 	public void exchangeDeleteNoWait(String exchange, boolean ifUnused) throws IOException {
 		this.delegate.exchangeDeleteNoWait(exchange, ifUnused);
 	}
@@ -611,23 +595,17 @@ public class PublisherCallbackChannelImpl
 
 	@Override
 	public long consumerCount(String queue) throws IOException {
-		if (consumerCountMethod != null) {
-			return (Long) ReflectionUtils.invokeMethod(consumerCountMethod, this.delegate, new Object[] { queue });
-		}
-		throw new UnsupportedOperationException("'consumerCount()' requires a 3.6+ client library");
+		return this.delegate.consumerCount(queue);
 	}
 
 	@Override
 	public long messageCount(String queue) throws IOException {
-		if (messageCountMethod != null) {
-			return (Long) ReflectionUtils.invokeMethod(messageCountMethod, this.delegate, new Object[] { queue });
-		}
-		throw new UnsupportedOperationException("'messageCountMethod()' requires a 3.6+ client library");
+		return this.delegate.messageCount(queue);
 	}
 
 	@Override
 	public Channel getDelegate() {
-		return delegate;
+		return this.delegate;
 	}
 
 //////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -640,8 +618,8 @@ public class PublisherCallbackChannelImpl
 			this.delegate.close();
 		}
 		catch (AlreadyClosedException e) {
-			if (logger.isTraceEnabled()) {
-				logger.trace(this.delegate + " is already closed");
+			if (this.logger.isTraceEnabled()) {
+				this.logger.trace(this.delegate + " is already closed");
 			}
 		}
 		generateNacksForPendingAcks("Channel closed by application");
@@ -652,20 +630,31 @@ public class PublisherCallbackChannelImpl
 			Listener listener = entry.getKey();
 			for (Entry<Long, PendingConfirm> confirmEntry : entry.getValue().entrySet()) {
 				confirmEntry.getValue().setCause(cause);
-				if (logger.isDebugEnabled()) {
-					logger.debug(this.toString() + " PC:Nack:(close):" + confirmEntry.getKey());
+				if (this.logger.isDebugEnabled()) {
+					this.logger.debug(this.toString() + " PC:Nack:(close):" + confirmEntry.getKey());
 				}
 				processAck(confirmEntry.getKey(), false, false, false);
 			}
 			listener.revoke(this);
 		}
-		if (logger.isDebugEnabled()) {
-			logger.debug("PendingConfirms cleared");
+		if (this.logger.isDebugEnabled()) {
+			this.logger.debug("PendingConfirms cleared");
 		}
 		this.pendingConfirms.clear();
 		this.listenerForSeq.clear();
 		this.listeners.clear();
 	}
+
+    @Override
+    public synchronized int getPendingConfirmsCount(Listener listener) {
+        SortedMap<Long, PendingConfirm> pendingConfirmsForListener = this.pendingConfirms.get(listener);
+        if (pendingConfirmsForListener == null) {
+            return 0;
+        }
+        else {
+            return pendingConfirmsForListener.entrySet().size();
+        }
+    }
 
 	/**
 	 * Add the listener and return the internal map of pending confirmations for that listener.
@@ -680,8 +669,8 @@ public class PublisherCallbackChannelImpl
 		}
 		if (this.listeners.putIfAbsent(listener.getUUID(), listener) == null) {
 			this.pendingConfirms.put(listener, new ConcurrentSkipListMap<Long, PendingConfirm>());
-			if (logger.isDebugEnabled()) {
-				logger.debug("Added listener " + listener);
+			if (this.logger.isDebugEnabled()) {
+				this.logger.debug("Added listener " + listener);
 			}
 		}
 	}
@@ -714,8 +703,8 @@ public class PublisherCallbackChannelImpl
 	@Override
 	public void handleAck(long seq, boolean multiple)
 			throws IOException {
-		if (logger.isDebugEnabled()) {
-			logger.debug(this.toString() + " PC:Ack:" + seq + ":" + multiple);
+		if (this.logger.isDebugEnabled()) {
+			this.logger.debug(this.toString() + " PC:Ack:" + seq + ":" + multiple);
 		}
 		this.processAck(seq, true, multiple, true);
 	}
@@ -723,8 +712,8 @@ public class PublisherCallbackChannelImpl
 	@Override
 	public void handleNack(long seq, boolean multiple)
 			throws IOException {
-		if (logger.isDebugEnabled()) {
-			logger.debug(this.toString() + " PC:Nack:" + seq + ":" + multiple);
+		if (this.logger.isDebugEnabled()) {
+			this.logger.debug(this.toString() + " PC:Nack:" + seq + ":" + multiple);
 		}
 		this.processAck(seq, false, multiple, true);
 	}
@@ -774,8 +763,8 @@ public class PublisherCallbackChannelImpl
 				}
 			}
 			else {
-				if (logger.isDebugEnabled()) {
-					logger.debug(this.delegate.toString() + " No listener for seq:" + seq);
+				if (this.logger.isDebugEnabled()) {
+					this.logger.debug(this.delegate.toString() + " No listener for seq:" + seq);
 				}
 			}
 		}
@@ -784,14 +773,14 @@ public class PublisherCallbackChannelImpl
 	private void doHandleConfirm(boolean ack, Listener listener, PendingConfirm pendingConfirm) {
 		try {
 			if (listener.isConfirmListener()) {
-				if (logger.isDebugEnabled()) {
-					logger.debug("Sending confirm " + pendingConfirm);
+				if (this.logger.isDebugEnabled()) {
+					this.logger.debug("Sending confirm " + pendingConfirm);
 				}
 				listener.handleConfirm(pendingConfirm, ack);
 			}
 		}
 		catch (Exception e) {
-			logger.error("Exception delivering confirm", e);
+			this.logger.error("Exception delivering confirm", e);
 		}
 	}
 
@@ -812,13 +801,12 @@ public class PublisherCallbackChannelImpl
 			String exchange,
 			String routingKey,
 			AMQP.BasicProperties properties,
-			byte[] body) throws IOException
-	{
+			byte[] body) throws IOException {
 		String uuidObject = properties.getHeaders().get(RETURN_CORRELATION_KEY).toString();
 		Listener listener = this.listeners.get(uuidObject);
 		if (listener == null || !listener.isReturnListener()) {
-			if (logger.isWarnEnabled()) {
-				logger.warn("No Listener for returned message");
+			if (this.logger.isWarnEnabled()) {
+				this.logger.warn("No Listener for returned message");
 			}
 		}
 		else {

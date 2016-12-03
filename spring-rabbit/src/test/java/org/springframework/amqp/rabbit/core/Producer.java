@@ -20,7 +20,11 @@ import org.springframework.amqp.core.Message;
 import org.springframework.amqp.core.MessageProperties;
 import org.springframework.amqp.rabbit.connection.SingleConnectionFactory;
 
-public class Producer {
+public final class Producer {
+
+	private Producer() {
+		super();
+	}
 
 	/**
 	 * @param args
@@ -47,10 +51,10 @@ public class Producer {
 		for (int i = 1; i <= numMessages; i++) {
 			byte[] bytes = "testing".getBytes();
 			MessageProperties properties = new MessageProperties();
-			properties.getHeaders().put("float", new Float(3.14));
+			properties.getHeaders().put("float", 3.14f);
 			Message message = new Message(bytes, properties);
 			template.send(exchange, routingKey, message);
-			System.out.println("sending " + i + "...");
+			System .out .println("sending " + i + "...");
 		}
 	}
 

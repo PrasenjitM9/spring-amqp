@@ -35,7 +35,7 @@ import com.rabbitmq.client.Channel;
 public abstract class RabbitAccessor implements InitializingBean {
 
 	/** Logger available to subclasses */
-	protected final Log logger = LogFactory.getLog(getClass());
+	protected final Log logger = LogFactory.getLog(getClass()); // NOSONAR
 
 	private volatile ConnectionFactory connectionFactory;
 
@@ -59,7 +59,7 @@ public abstract class RabbitAccessor implements InitializingBean {
 	 *
 	 * @param connectionFactory The connection factory.
 	 */
-	public void setConnectionFactory(ConnectionFactory connectionFactory) {
+	public final void setConnectionFactory(ConnectionFactory connectionFactory) {
 		this.connectionFactory = connectionFactory;
 	}
 

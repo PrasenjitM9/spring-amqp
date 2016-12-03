@@ -25,7 +25,7 @@ import static org.junit.Assert.fail;
 import java.util.Map;
 import java.util.UUID;
 
-import org.apache.log4j.Level;
+import org.apache.logging.log4j.Level;
 import org.junit.After;
 import org.junit.Rule;
 import org.junit.Test;
@@ -34,12 +34,11 @@ import org.springframework.amqp.core.AcknowledgeMode;
 import org.springframework.amqp.core.Queue;
 import org.springframework.amqp.rabbit.connection.CachingConnectionFactory;
 import org.springframework.amqp.rabbit.core.RabbitTemplate;
+import org.springframework.amqp.rabbit.junit.BrokerRunning;
+import org.springframework.amqp.rabbit.junit.BrokerTestUtils;
 import org.springframework.amqp.rabbit.listener.exception.FatalListenerStartupException;
 import org.springframework.amqp.rabbit.support.DefaultMessagePropertiesConverter;
-import org.springframework.amqp.rabbit.test.BrokerRunning;
-import org.springframework.amqp.rabbit.test.BrokerTestUtils;
-import org.springframework.amqp.rabbit.test.Log4jLevelAdjuster;
-import org.springframework.amqp.support.ConsumerTagStrategy;
+import org.springframework.amqp.rabbit.test.LogLevelAdjuster;
 import org.springframework.amqp.utils.test.TestUtils;
 
 /**
@@ -56,10 +55,10 @@ public class BlockingQueueConsumerIntegrationTests {
 	private static Queue queue2 = new Queue("test.queue2");
 
 	@Rule
-	public BrokerRunning brokerIsRunning = BrokerRunning.isRunningWithEmptyQueues(queue1, queue2);
+	public BrokerRunning brokerIsRunning = BrokerRunning.isRunningWithEmptyQueues(queue1.getName(), queue2.getName());
 
 	@Rule
-	public Log4jLevelAdjuster logLevels = new Log4jLevelAdjuster(Level.INFO, RabbitTemplate.class,
+	public LogLevelAdjuster logLevels = new LogLevelAdjuster(Level.INFO, RabbitTemplate.class,
 			SimpleMessageListenerContainer.class, BlockingQueueConsumer.class,
 			BlockingQueueConsumerIntegrationTests.class);
 
@@ -81,13 +80,7 @@ public class BlockingQueueConsumerIntegrationTests {
 				new DefaultMessagePropertiesConverter(), new ActiveObjectCounter<BlockingQueueConsumer>(),
 				AcknowledgeMode.AUTO, true, 1, queue1.getName(), queue2.getName());
 		final String consumerTagPrefix = UUID.randomUUID().toString();
-		blockingQueueConsumer.setTagStrategy(new ConsumerTagStrategy() {
-
-			@Override
-			public String createConsumerTag(String queue) {
-				return consumerTagPrefix + '#' + queue;
-			}
-		});
+		blockingQueueConsumer.setTagStrategy(queue -> consumerTagPrefix + '#' + queue);
 		blockingQueueConsumer.start();
 		assertNotNull(TestUtils.getPropertyValue(blockingQueueConsumer, "consumerTags", Map.class).get(
 				consumerTagPrefix + "#" + queue1.getName()));

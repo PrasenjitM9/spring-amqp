@@ -23,6 +23,8 @@ import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 
 import org.springframework.amqp.AmqpIOException;
+import org.springframework.amqp.AmqpRejectAndDontRequeueException;
+import org.springframework.amqp.rabbit.listener.MessageRejectedWhileStoppingException;
 import org.springframework.amqp.rabbit.support.RabbitExceptionTranslator;
 import org.springframework.util.Assert;
 
@@ -53,7 +55,8 @@ public abstract class RabbitUtils {
 		if (connection != null) {
 			try {
 				connection.close();
-			} catch (Exception ex) {
+			}
+			catch (Exception ex) {
 				logger.debug("Ignoring Connection exception - assuming already closed: " + ex.getMessage(), ex);
 			}
 		}
@@ -91,7 +94,8 @@ public abstract class RabbitUtils {
 		Assert.notNull(channel, "Channel must not be null");
 		try {
 			channel.txCommit();
-		} catch (IOException ex) {
+		}
+		catch (IOException ex) {
 			throw new AmqpIOException(ex);
 		}
 	}
@@ -100,7 +104,8 @@ public abstract class RabbitUtils {
 		Assert.notNull(channel, "Channel must not be null");
 		try {
 			channel.txRollback();
-		} catch (IOException ex) {
+		}
+		catch (IOException ex) {
 			throw new AmqpIOException(ex);
 		}
 	}
@@ -124,7 +129,8 @@ public abstract class RabbitUtils {
 			 * If not transactional then we are auto-acking (at least as of 1.0.0.M2) so there is nothing to recover.
 			 * Messages are going to be lost in general.
 			 */
-		} catch (Exception ex) {
+		}
+		catch (Exception ex) {
 			throw RabbitExceptionTranslator.convertRabbitAccessException(ex);
 		}
 	}
@@ -137,7 +143,8 @@ public abstract class RabbitUtils {
 	public static void declareTransactional(Channel channel) {
 		try {
 			channel.txSelect();
-		} catch (IOException e) {
+		}
+		catch (IOException e) {
 			throw RabbitExceptionTranslator.convertRabbitAccessException(e);
 		}
 	}
@@ -281,6 +288,32 @@ public abstract class RabbitUtils {
 					&& ((AMQP.Connection.Close) shutdownReason).getClassId() == 40 // exchange
 					&& ((AMQP.Connection.Close) shutdownReason).getMethodId() == 10; // declare
 		}
+	}
+
+	/**
+	 * Determine whether a message should be requeued; returns true if the throwable is a
+	 * {@link MessageRejectedWhileStoppingException} or defaultRequeueRejected is true and
+	 * there is not an {@link AmqpRejectAndDontRequeueException} in the cause chain.
+	 * @param defaultRequeueRejected the default requeue rejected.
+	 * @param throwable the throwable.
+	 * @param logger the logger to use for debug.
+	 * @return true to requeue.
+	 * @since 2.0
+	 */
+	public static boolean shouldRequeue(boolean defaultRequeueRejected, Throwable throwable, Log logger) {
+		boolean shouldRequeue = defaultRequeueRejected ||
+				throwable instanceof MessageRejectedWhileStoppingException;
+		Throwable t = throwable;
+		while (shouldRequeue && t != null) {
+			if (t instanceof AmqpRejectAndDontRequeueException) {
+				shouldRequeue = false;
+			}
+			t = t.getCause();
+		}
+		if (logger.isDebugEnabled()) {
+			logger.debug("Rejecting messages (requeue=" + shouldRequeue + ")");
+		}
+		return shouldRequeue;
 	}
 
 }

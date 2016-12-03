@@ -54,7 +54,7 @@ public class BindingBuilderTests {
 	@Test
 	public void customBinding() {
 		class CustomExchange extends AbstractExchange {
-			public CustomExchange(String name) {
+			CustomExchange(String name) {
 				super(name);
 			}
 
@@ -67,7 +67,7 @@ public class BindingBuilderTests {
 				bind(new Queue("q")).//
 				to(new CustomExchange("f")).//
 				with("r").//
-				and(Collections.<String, Object> singletonMap("k", new Object()));
+				and(Collections.<String, Object>singletonMap("k", new Object()));
 		assertNotNull(binding);
 	}
 

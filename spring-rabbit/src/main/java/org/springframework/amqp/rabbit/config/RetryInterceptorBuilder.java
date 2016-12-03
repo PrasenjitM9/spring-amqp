@@ -133,7 +133,7 @@ public abstract class RetryInterceptorBuilder<T extends MethodInterceptor> {
 	 * @param maxInterval The max interval.
 	 * @return this.
 	 */
-	public RetryInterceptorBuilder<T> backOffOptions(long initialInterval, double multiplier , long maxInterval) {
+	public RetryInterceptorBuilder<T> backOffOptions(long initialInterval, double multiplier, long maxInterval) {
 		Assert.isNull(this.retryOperations, "cannot set the back off policy when a custom retryOperations has been set");
 		Assert.isTrue(!this.backOffPolicySet, "cannot set the back off options when a back off policy has been set");
 		ExponentialBackOffPolicy policy = new ExponentialBackOffPolicy();
@@ -200,10 +200,7 @@ public abstract class RetryInterceptorBuilder<T extends MethodInterceptor> {
 	public abstract T build();
 
 
-	private RetryInterceptorBuilder() {
-	}
-
-	public static class StatefulRetryInterceptorBuilder extends RetryInterceptorBuilder<StatefulRetryOperationsInterceptor> {
+	public static final class StatefulRetryInterceptorBuilder extends RetryInterceptorBuilder<StatefulRetryOperationsInterceptor> {
 
 		private final StatefulRetryOperationsInterceptorFactoryBean factoryBean =
 				new StatefulRetryOperationsInterceptorFactoryBean();
@@ -211,6 +208,10 @@ public abstract class RetryInterceptorBuilder<T extends MethodInterceptor> {
 		private MessageKeyGenerator messageKeyGenerator;
 
 		private NewMessageIdentifier newMessageIdentifier;
+
+		StatefulRetryInterceptorBuilder() {
+			super();
+		}
 
 		/**
 		 * Stateful retry requires messages to be identifiable. Default is to use the message id header; use a custom
@@ -283,24 +284,23 @@ public abstract class RetryInterceptorBuilder<T extends MethodInterceptor> {
 			return this.factoryBean.getObject();
 		}
 
-		private StatefulRetryInterceptorBuilder() {
-		}
-
 	}
 
 
-	public static class StatelessRetryInterceptorBuilder extends RetryInterceptorBuilder<RetryOperationsInterceptor> {
+	public static final class StatelessRetryInterceptorBuilder
+			extends RetryInterceptorBuilder<RetryOperationsInterceptor> {
 
 		private final StatelessRetryOperationsInterceptorFactoryBean factoryBean =
 				new StatelessRetryOperationsInterceptorFactoryBean();
+
+		StatelessRetryInterceptorBuilder() {
+			super();
+		}
 
 		@Override
 		public RetryOperationsInterceptor build() {
 			this.applyCommonSettings(this.factoryBean);
 			return this.factoryBean.getObject();
-		}
-
-		private StatelessRetryInterceptorBuilder() {
 		}
 
 	}

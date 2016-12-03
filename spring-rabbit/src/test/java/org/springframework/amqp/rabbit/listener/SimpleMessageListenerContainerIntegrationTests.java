@@ -28,11 +28,12 @@ import java.util.concurrent.atomic.AtomicInteger;
 
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
-import org.apache.log4j.Level;
+import org.apache.logging.log4j.Level;
 import org.junit.After;
 import org.junit.Before;
 import org.junit.Rule;
 import org.junit.Test;
+import org.junit.rules.ExpectedException;
 import org.junit.runner.RunWith;
 import org.junit.runners.Parameterized;
 import org.junit.runners.Parameterized.Parameters;
@@ -44,11 +45,11 @@ import org.springframework.amqp.core.Queue;
 import org.springframework.amqp.rabbit.connection.CachingConnectionFactory;
 import org.springframework.amqp.rabbit.core.ChannelAwareMessageListener;
 import org.springframework.amqp.rabbit.core.RabbitTemplate;
+import org.springframework.amqp.rabbit.junit.BrokerRunning;
+import org.springframework.amqp.rabbit.junit.BrokerTestUtils;
+import org.springframework.amqp.rabbit.junit.LongRunningIntegrationTest;
 import org.springframework.amqp.rabbit.listener.adapter.MessageListenerAdapter;
-import org.springframework.amqp.rabbit.test.BrokerRunning;
-import org.springframework.amqp.rabbit.test.BrokerTestUtils;
-import org.springframework.amqp.rabbit.test.Log4jLevelAdjuster;
-import org.springframework.amqp.rabbit.test.LongRunningIntegrationTest;
+import org.springframework.amqp.rabbit.test.LogLevelAdjuster;
 import org.springframework.beans.factory.DisposableBean;
 import org.springframework.transaction.TransactionDefinition;
 import org.springframework.transaction.TransactionException;
@@ -81,16 +82,19 @@ public class SimpleMessageListenerContainerIntegrationTests {
 	public LongRunningIntegrationTest longTests = new LongRunningIntegrationTest();
 
 	@Rule
-	public Log4jLevelAdjuster logLevels = new Log4jLevelAdjuster(Level.OFF, RabbitTemplate.class,
+	public LogLevelAdjuster logLevels = new LogLevelAdjuster(Level.OFF, RabbitTemplate.class,
 			ConditionalRejectingErrorHandler.class,
 			SimpleMessageListenerContainer.class, BlockingQueueConsumer.class, CachingConnectionFactory.class);
 
 	@Rule
-	public Log4jLevelAdjuster testLogLevels = new Log4jLevelAdjuster(Level.DEBUG,
+	public LogLevelAdjuster testLogLevels = new LogLevelAdjuster(Level.DEBUG,
 			SimpleMessageListenerContainerIntegrationTests.class);
 
 	@Rule
-	public BrokerRunning brokerIsRunning = BrokerRunning.isRunningWithEmptyQueues(queue);
+	public BrokerRunning brokerIsRunning = BrokerRunning.isRunningWithEmptyQueues(queue.getName());
+
+	@Rule
+	public ExpectedException exception = ExpectedException.none();
 
 	private final int messageCount;
 
@@ -114,19 +118,19 @@ public class SimpleMessageListenerContainerIntegrationTests {
 
 	@Parameters
 	public static List<Object[]> getParameters() {
-		return Arrays.asList( //
-				params(0, 1, 1, AcknowledgeMode.AUTO), //
-				params(1, 1, 1, AcknowledgeMode.NONE), //
-				params(2, 4, 1, AcknowledgeMode.AUTO), //
-				extern(3, 4, 1, AcknowledgeMode.AUTO), //
-				params(4, 4, 1, AcknowledgeMode.AUTO, false), //
-				params(5, 2, 2, AcknowledgeMode.AUTO), //
-				params(6, 2, 2, AcknowledgeMode.NONE), //
-				params(7, 20, 4, AcknowledgeMode.AUTO), //
-				params(8, 20, 4, AcknowledgeMode.NONE), //
-				params(9, 300, 4, AcknowledgeMode.AUTO), //
-				params(10, 300, 4, AcknowledgeMode.NONE), //
-				params(11, 300, 4, AcknowledgeMode.AUTO, 10) //
+		return Arrays.asList(
+				params(0, 1, 1, AcknowledgeMode.AUTO),
+				params(1, 1, 1, AcknowledgeMode.NONE),
+				params(2, 4, 1, AcknowledgeMode.AUTO),
+				extern(3, 4, 1, AcknowledgeMode.AUTO),
+				params(4, 4, 1, AcknowledgeMode.AUTO, false),
+				params(5, 2, 2, AcknowledgeMode.AUTO),
+				params(6, 2, 2, AcknowledgeMode.NONE),
+				params(7, 20, 4, AcknowledgeMode.AUTO),
+				params(8, 20, 4, AcknowledgeMode.NONE),
+				params(9, 300, 4, AcknowledgeMode.AUTO),
+				params(10, 300, 4, AcknowledgeMode.NONE),
+				params(11, 300, 4, AcknowledgeMode.AUTO, 10)
 				);
 	}
 
@@ -211,6 +215,18 @@ public class SimpleMessageListenerContainerIntegrationTests {
 		doListenerWithExceptionTest(latch, new ChannelAwareListener(latch, true));
 	}
 
+	@Test
+	public void testNullQueue() throws Exception {
+		exception.expect(IllegalArgumentException.class);
+		container = createContainer((MessageListener) (m) -> { }, (Queue) null);
+	}
+
+	@Test
+	public void testNullQueueName() throws Exception {
+		exception.expect(IllegalArgumentException.class);
+		container = createContainer((MessageListener) (m) -> { }, (String) null);
+	}
+
 	private void doSunnyDayTest(CountDownLatch latch, Object listener) throws Exception {
 		container = createContainer(listener);
 		for (int i = 0; i < messageCount; i++) {
@@ -247,15 +263,34 @@ public class SimpleMessageListenerContainerIntegrationTests {
 		}
 		if (acknowledgeMode.isTransactionAllowed()) {
 			assertNotNull(template.receiveAndConvert(queue.getName()));
-		} else {
+		}
+		else {
 			assertNull(template.receiveAndConvert(queue.getName()));
 		}
 	}
 
 	private SimpleMessageListenerContainer createContainer(Object listener) {
+		SimpleMessageListenerContainer container = createContainer(listener, queue.getName());
+		container.afterPropertiesSet();
+		container.start();
+		return container;
+	}
+
+	private SimpleMessageListenerContainer createContainer(Object listener, String queue) {
+		SimpleMessageListenerContainer container = doCreateContainer(listener);
+		container.setQueueNames(queue);
+		return container;
+	}
+
+	private SimpleMessageListenerContainer createContainer(Object listener, Queue queue) {
+		SimpleMessageListenerContainer container = doCreateContainer(listener);
+		container.setQueues(queue);
+		return container;
+	}
+
+	private SimpleMessageListenerContainer doCreateContainer(Object listener) {
 		SimpleMessageListenerContainer container = new SimpleMessageListenerContainer(template.getConnectionFactory());
 		container.setMessageListener(listener);
-		container.setQueueNames(queue.getName());
 		container.setTxSize(txSize);
 		container.setPrefetchCount(txSize);
 		container.setConcurrentConsumers(concurrentConsumers);
@@ -267,8 +302,6 @@ public class SimpleMessageListenerContainerIntegrationTests {
 		if (externalTransaction) {
 			container.setTransactionManager(new TestTransactionManager());
 		}
-		container.afterPropertiesSet();
-		container.start();
 		return container;
 	}
 
@@ -297,7 +330,8 @@ public class SimpleMessageListenerContainerIntegrationTests {
 				if (fail) {
 					throw new RuntimeException("Planned failure");
 				}
-			} finally {
+			}
+			finally {
 				latch.countDown();
 			}
 		}
@@ -330,7 +364,8 @@ public class SimpleMessageListenerContainerIntegrationTests {
 				if (fail) {
 					throw new RuntimeException("Planned failure");
 				}
-			} finally {
+			}
+			finally {
 				latch.countDown();
 			}
 		}
@@ -363,7 +398,8 @@ public class SimpleMessageListenerContainerIntegrationTests {
 				if (fail) {
 					throw new RuntimeException("Planned failure");
 				}
-			} finally {
+			}
+			finally {
 				latch.countDown();
 			}
 		}
@@ -372,6 +408,10 @@ public class SimpleMessageListenerContainerIntegrationTests {
 
 	@SuppressWarnings("serial")
 	private class TestTransactionManager extends AbstractPlatformTransactionManager {
+
+		TestTransactionManager() {
+			super();
+		}
 
 		@Override
 		protected void doBegin(Object transaction, TransactionDefinition definition) throws TransactionException {

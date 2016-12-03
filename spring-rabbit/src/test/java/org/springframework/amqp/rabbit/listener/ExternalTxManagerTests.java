@@ -25,6 +25,7 @@ import static org.mockito.Matchers.anyMap;
 import static org.mockito.Matchers.anyString;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -39,8 +40,8 @@ import org.mockito.Mockito;
 import org.mockito.invocation.InvocationOnMock;
 import org.mockito.stubbing.Answer;
 
-import org.springframework.amqp.core.Message;
 import org.springframework.amqp.core.MessageListener;
+import org.springframework.amqp.rabbit.connection.AbstractConnectionFactory;
 import org.springframework.amqp.rabbit.connection.CachingConnectionFactory;
 import org.springframework.amqp.rabbit.connection.SingleConnectionFactory;
 import org.springframework.amqp.rabbit.core.ChannelAwareMessageListener;
@@ -64,7 +65,7 @@ import com.rabbitmq.client.Envelope;
  * @since 1.1.2
  *
  */
-public class ExternalTxManagerTests {
+public abstract class ExternalTxManagerTests {
 
 	/**
 	 * Verifies that an up-stack RabbitTemplate uses the listener's
@@ -80,12 +81,12 @@ public class ExternalTxManagerTests {
 
 		final CachingConnectionFactory cachingConnectionFactory = new CachingConnectionFactory(mockConnectionFactory);
 
-		when(mockConnectionFactory.newConnection((ExecutorService) null)).thenReturn(mockConnection);
+		when(mockConnectionFactory.newConnection(any(ExecutorService.class), anyString())).thenReturn(mockConnection);
 		when(mockConnection.isOpen()).thenReturn(true);
 
 		final AtomicReference<Exception> tooManyChannels = new AtomicReference<Exception>();
 
-		doAnswer(new Answer<Channel>(){
+		doAnswer(new Answer<Channel>() {
 			boolean done;
 			@Override
 			public Channel answer(InvocationOnMock invocation) throws Throwable {
@@ -101,38 +102,29 @@ public class ExternalTxManagerTests {
 		}).when(mockConnection).createChannel();
 
 		final AtomicReference<Consumer> consumer = new AtomicReference<Consumer>();
+		final CountDownLatch consumerLatch = new CountDownLatch(1);
 
-		doAnswer(new Answer<String>() {
-
-			@Override
-			public String answer(InvocationOnMock invocation) throws Throwable {
-				consumer.set((Consumer) invocation.getArguments()[6]);
-				return "consumerTag";
-			}
+		doAnswer(invocation -> {
+			consumer.set(invocation.getArgumentAt(6, Consumer.class));
+			consumerLatch.countDown();
+			return "consumerTag";
 		}).when(onlyChannel)
 			.basicConsume(anyString(), anyBoolean(), anyString(), anyBoolean(), anyBoolean(), anyMap(), any(Consumer.class));
 
 		final CountDownLatch commitLatch = new CountDownLatch(1);
-		doAnswer(new Answer<String>() {
-
-			@Override
-			public String answer(InvocationOnMock invocation) throws Throwable {
-				commitLatch.countDown();
-				return null;
-			}
+		doAnswer(invocation -> {
+			commitLatch.countDown();
+			return null;
 		}).when(onlyChannel).txCommit();
 
 		final CountDownLatch latch = new CountDownLatch(1);
-		SimpleMessageListenerContainer container = new SimpleMessageListenerContainer(cachingConnectionFactory);
-		container.setMessageListener(new MessageListener() {
-			@Override
-			public void onMessage(Message message) {
-				RabbitTemplate rabbitTemplate = new RabbitTemplate(cachingConnectionFactory);
-				rabbitTemplate.setChannelTransacted(true);
-				// should use same channel as container
-				rabbitTemplate.convertAndSend("foo", "bar", "baz");
-				latch.countDown();
-			}
+		AbstractMessageListenerContainer container = createContainer(cachingConnectionFactory);
+		container.setMessageListener((MessageListener) message -> {
+			RabbitTemplate rabbitTemplate = new RabbitTemplate(cachingConnectionFactory);
+			rabbitTemplate.setChannelTransacted(true);
+			// should use same channel as container
+			rabbitTemplate.convertAndSend("foo", "bar", "baz");
+			latch.countDown();
 		});
 		container.setQueueNames("queue");
 		container.setChannelTransacted(true);
@@ -140,6 +132,7 @@ public class ExternalTxManagerTests {
 		container.setTransactionManager(new DummyTxManager());
 		container.afterPropertiesSet();
 		container.start();
+		assertTrue(consumerLatch.await(10, TimeUnit.SECONDS));
 
 		consumer.get().handleDelivery("qux", new Envelope(1, false, "foo", "bar"), new BasicProperties(), new byte[] {0});
 
@@ -166,6 +159,72 @@ public class ExternalTxManagerTests {
 	}
 
 	/**
+	 * Verifies that the channel is rolled back after an exception.
+	 */
+	@SuppressWarnings("unchecked")
+	@Test
+	public void testMessageListenerRollback() throws Exception {
+		ConnectionFactory mockConnectionFactory = mock(ConnectionFactory.class);
+		Connection mockConnection = mock(Connection.class);
+		final Channel channel = mock(Channel.class);
+		when(channel.isOpen()).thenReturn(true);
+
+		final CachingConnectionFactory cachingConnectionFactory = new CachingConnectionFactory(mockConnectionFactory);
+
+		when(mockConnectionFactory.newConnection(any(ExecutorService.class), anyString())).thenReturn(mockConnection);
+		when(mockConnection.isOpen()).thenReturn(true);
+
+		final AtomicReference<Exception> tooManyChannels = new AtomicReference<Exception>();
+
+		doAnswer(invocation -> channel).when(mockConnection).createChannel();
+
+		final AtomicReference<Consumer> consumer = new AtomicReference<Consumer>();
+		final CountDownLatch consumerLatch = new CountDownLatch(1);
+
+		doAnswer(invocation -> {
+			consumer.set(invocation.getArgumentAt(6, Consumer.class));
+			consumerLatch.countDown();
+			return "consumerTag";
+		}).when(channel)
+				.basicConsume(anyString(), anyBoolean(), anyString(), anyBoolean(), anyBoolean(), anyMap(),
+						any(Consumer.class));
+
+		final CountDownLatch rollbackLatch = new CountDownLatch(1);
+		doAnswer(invocation -> {
+			rollbackLatch.countDown();
+			return null;
+		}).when(channel).txRollback();
+
+		final CountDownLatch latch = new CountDownLatch(1);
+		AbstractMessageListenerContainer container = createContainer(cachingConnectionFactory);
+		container.setMessageListener(message -> {
+			latch.countDown();
+			throw new RuntimeException("force rollback");
+		});
+		container.setQueueNames("queue");
+		container.setChannelTransacted(true);
+		container.setShutdownTimeout(100);
+		container.setTransactionManager(new DummyTxManager());
+		container.afterPropertiesSet();
+		container.start();
+		assertTrue(consumerLatch.await(10, TimeUnit.SECONDS));
+
+		consumer.get().handleDelivery("qux", new Envelope(1, false, "foo", "bar"), new BasicProperties(),
+				new byte[] { 0 });
+
+		assertTrue(latch.await(10, TimeUnit.SECONDS));
+
+		Exception e = tooManyChannels.get();
+		if (e != null) {
+			throw e;
+		}
+
+		verify(mockConnection, times(1)).createChannel();
+		assertTrue(rollbackLatch.await(10, TimeUnit.SECONDS));
+		container.stop();
+	}
+
+	/**
 	 * Verifies that an up-stack RabbitTemplate does not use the listener's
 	 * channel when it has its own connection factory.
 	 */
@@ -181,18 +240,20 @@ public class ExternalTxManagerTests {
 		when(listenerChannel.isOpen()).thenReturn(true);
 		when(templateChannel.isOpen()).thenReturn(true);
 
-		final CachingConnectionFactory cachingConnectionFactory = new CachingConnectionFactory(listenerConnectionFactory);
-		final CachingConnectionFactory cachingTemplateConnectionFactory = new CachingConnectionFactory(templateConnectionFactory);
+		final CachingConnectionFactory cachingConnectionFactory = new CachingConnectionFactory(
+				listenerConnectionFactory);
+		final CachingConnectionFactory cachingTemplateConnectionFactory = new CachingConnectionFactory(
+				templateConnectionFactory);
 
-		when(listenerConnectionFactory.newConnection((ExecutorService) null)).thenReturn(listenerConnection);
+		when(listenerConnectionFactory.newConnection(any(ExecutorService.class), anyString())).thenReturn(listenerConnection);
 		when(listenerConnection.isOpen()).thenReturn(true);
-		when(templateConnectionFactory.newConnection((ExecutorService) null)).thenReturn(templateConnection);
+		when(templateConnectionFactory.newConnection(any(ExecutorService.class), anyString())).thenReturn(templateConnection);
 		when(templateConnection.isOpen()).thenReturn(true);
 		when(templateConnection.createChannel()).thenReturn(templateChannel);
 
 		final AtomicReference<Exception> tooManyChannels = new AtomicReference<Exception>();
 
-		doAnswer(new Answer<Channel>(){
+		doAnswer(new Answer<Channel>() {
 			boolean done;
 			@Override
 			public Channel answer(InvocationOnMock invocation) throws Throwable {
@@ -208,46 +269,33 @@ public class ExternalTxManagerTests {
 		}).when(listenerConnection).createChannel();
 
 		final AtomicReference<Consumer> consumer = new AtomicReference<Consumer>();
+		final CountDownLatch consumerLatch = new CountDownLatch(1);
 
-		doAnswer(new Answer<String>() {
-
-			@Override
-			public String answer(InvocationOnMock invocation) throws Throwable {
-				consumer.set((Consumer) invocation.getArguments()[6]);
-				return "consumerTag";
-			}
+		doAnswer(invocation -> {
+			consumer.set(invocation.getArgumentAt(6, Consumer.class));
+			consumerLatch.countDown();
+			return "consumerTag";
 		}).when(listenerChannel)
 			.basicConsume(anyString(), anyBoolean(), anyString(), anyBoolean(), anyBoolean(), anyMap(), any(Consumer.class));
 
 		final CountDownLatch commitLatch = new CountDownLatch(2);
-		doAnswer(new Answer<String>() {
-
-			@Override
-			public String answer(InvocationOnMock invocation) throws Throwable {
-				commitLatch.countDown();
-				return null;
-			}
+		doAnswer(invocation -> {
+			commitLatch.countDown();
+			return null;
 		}).when(listenerChannel).txCommit();
-		doAnswer(new Answer<String>() {
-
-			@Override
-			public String answer(InvocationOnMock invocation) throws Throwable {
-				commitLatch.countDown();
-				return null;
-			}
+		doAnswer(invocation -> {
+			commitLatch.countDown();
+			return null;
 		}).when(templateChannel).txCommit();
 
 		final CountDownLatch latch = new CountDownLatch(1);
-		SimpleMessageListenerContainer container = new SimpleMessageListenerContainer(cachingConnectionFactory);
-		container.setMessageListener(new MessageListener() {
-			@Override
-			public void onMessage(Message message) {
-				RabbitTemplate rabbitTemplate = new RabbitTemplate(cachingTemplateConnectionFactory);
-				rabbitTemplate.setChannelTransacted(true);
-				// should use same channel as container
-				rabbitTemplate.convertAndSend("foo", "bar", "baz");
-				latch.countDown();
-			}
+		AbstractMessageListenerContainer container = createContainer(cachingConnectionFactory);
+		container.setMessageListener((MessageListener) message -> {
+			RabbitTemplate rabbitTemplate = new RabbitTemplate(cachingTemplateConnectionFactory);
+			rabbitTemplate.setChannelTransacted(true);
+			// should use same channel as container
+			rabbitTemplate.convertAndSend("foo", "bar", "baz");
+			latch.countDown();
 		});
 		container.setQueueNames("queue");
 		container.setChannelTransacted(true);
@@ -255,6 +303,7 @@ public class ExternalTxManagerTests {
 		container.setTransactionManager(new DummyTxManager());
 		container.afterPropertiesSet();
 		container.start();
+		assertTrue(consumerLatch.await(10, TimeUnit.SECONDS));
 
 		consumer.get().handleDelivery("qux", new Envelope(1, false, "foo", "bar"), new BasicProperties(), new byte[] {0});
 
@@ -296,12 +345,12 @@ public class ExternalTxManagerTests {
 
 		final SingleConnectionFactory singleConnectionFactory = new SingleConnectionFactory(mockConnectionFactory);
 
-		when(mockConnectionFactory.newConnection((ExecutorService) null)).thenReturn(mockConnection);
+		when(mockConnectionFactory.newConnection(any(ExecutorService.class), anyString())).thenReturn(mockConnection);
 		when(mockConnection.isOpen()).thenReturn(true);
 
 		final AtomicReference<Exception> tooManyChannels = new AtomicReference<Exception>();
 
-		doAnswer(new Answer<Channel>(){
+		doAnswer(new Answer<Channel>() {
 			boolean done;
 			@Override
 			public Channel answer(InvocationOnMock invocation) throws Throwable {
@@ -317,41 +366,31 @@ public class ExternalTxManagerTests {
 		}).when(mockConnection).createChannel();
 
 		final AtomicReference<Consumer> consumer = new AtomicReference<Consumer>();
+		final CountDownLatch consumerLatch = new CountDownLatch(1);
 
-		doAnswer(new Answer<String>() {
-
-			@Override
-			public String answer(InvocationOnMock invocation) throws Throwable {
-				consumer.set((Consumer) invocation.getArguments()[6]);
-				return "consumerTag";
-			}
+		doAnswer(invocation -> {
+			consumer.set(invocation.getArgumentAt(6, Consumer.class));
+			consumerLatch.countDown();
+			return "consumerTag";
 		}).when(onlyChannel)
 			.basicConsume(anyString(), anyBoolean(), anyString(), anyBoolean(), anyBoolean(), anyMap(), any(Consumer.class));
 
 		final CountDownLatch commitLatch = new CountDownLatch(1);
-		doAnswer(new Answer<String>() {
-
-			@Override
-			public String answer(InvocationOnMock invocation) throws Throwable {
-				commitLatch.countDown();
-				return null;
-			}
+		doAnswer(invocation -> {
+			commitLatch.countDown();
+			return null;
 		}).when(onlyChannel).txCommit();
 
 		final CountDownLatch latch = new CountDownLatch(1);
 		final AtomicReference<Channel> exposed = new AtomicReference<Channel>();
-		SimpleMessageListenerContainer container = new SimpleMessageListenerContainer(singleConnectionFactory);
-		container.setMessageListener(new ChannelAwareMessageListener() {
-			@Override
-			public void onMessage(Message message, Channel channel) {
-				exposed.set(channel);
-				RabbitTemplate rabbitTemplate = new RabbitTemplate(singleConnectionFactory);
-				rabbitTemplate.setChannelTransacted(true);
-				// should use same channel as container
-				rabbitTemplate.convertAndSend("foo", "bar", "baz");
-				latch.countDown();
-			}
-
+		AbstractMessageListenerContainer container = createContainer(singleConnectionFactory);
+		container.setMessageListener((ChannelAwareMessageListener) (message, channel) -> {
+			exposed.set(channel);
+			RabbitTemplate rabbitTemplate = new RabbitTemplate(singleConnectionFactory);
+			rabbitTemplate.setChannelTransacted(true);
+			// should use same channel as container
+			rabbitTemplate.convertAndSend("foo", "bar", "baz");
+			latch.countDown();
 		});
 		container.setQueueNames("queue");
 		container.setChannelTransacted(true);
@@ -359,6 +398,7 @@ public class ExternalTxManagerTests {
 		container.setTransactionManager(new DummyTxManager());
 		container.afterPropertiesSet();
 		container.start();
+		assertTrue(consumerLatch.await(10, TimeUnit.SECONDS));
 
 		consumer.get().handleDelivery("qux", new Envelope(1, false, "foo", "bar"), new BasicProperties(), new byte[] {0});
 
@@ -398,12 +438,12 @@ public class ExternalTxManagerTests {
 
 		final SingleConnectionFactory singleConnectionFactory = new SingleConnectionFactory(mockConnectionFactory);
 
-		when(mockConnectionFactory.newConnection((ExecutorService) null)).thenReturn(mockConnection);
+		when(mockConnectionFactory.newConnection(any(ExecutorService.class), anyString())).thenReturn(mockConnection);
 		when(mockConnection.isOpen()).thenReturn(true);
 
 		final AtomicReference<Exception> tooManyChannels = new AtomicReference<Exception>();
 
-		doAnswer(new Answer<Channel>(){
+		doAnswer(new Answer<Channel>() {
 			boolean done;
 			@Override
 			public Channel answer(InvocationOnMock invocation) throws Throwable {
@@ -419,41 +459,31 @@ public class ExternalTxManagerTests {
 		}).when(mockConnection).createChannel();
 
 		final AtomicReference<Consumer> consumer = new AtomicReference<Consumer>();
+		final CountDownLatch consumerLatch = new CountDownLatch(1);
 
-		doAnswer(new Answer<String>() {
-
-			@Override
-			public String answer(InvocationOnMock invocation) throws Throwable {
-				consumer.set((Consumer) invocation.getArguments()[6]);
-				return "consumerTag";
-			}
+		doAnswer(invocation -> {
+			consumer.set(invocation.getArgumentAt(6, Consumer.class));
+			consumerLatch.countDown();
+			return "consumerTag";
 		}).when(onlyChannel)
 			.basicConsume(anyString(), anyBoolean(), anyString(), anyBoolean(), anyBoolean(), anyMap(), any(Consumer.class));
 
 		final CountDownLatch commitLatch = new CountDownLatch(1);
-		doAnswer(new Answer<String>() {
-
-			@Override
-			public String answer(InvocationOnMock invocation) throws Throwable {
-				commitLatch.countDown();
-				return null;
-			}
+		doAnswer(invocation -> {
+			commitLatch.countDown();
+			return null;
 		}).when(onlyChannel).txCommit();
 
 		final CountDownLatch latch = new CountDownLatch(1);
 		final AtomicReference<Channel> exposed = new AtomicReference<Channel>();
 		SimpleMessageListenerContainer container = new SimpleMessageListenerContainer(singleConnectionFactory);
-		container.setMessageListener(new ChannelAwareMessageListener() {
-			@Override
-			public void onMessage(Message message, Channel channel) {
-				exposed.set(channel);
-				RabbitTemplate rabbitTemplate = new RabbitTemplate(singleConnectionFactory);
-				rabbitTemplate.setChannelTransacted(true);
-				// should use same channel as container
-				rabbitTemplate.convertAndSend("foo", "bar", "baz");
-				latch.countDown();
-			}
-
+		container.setMessageListener((ChannelAwareMessageListener) (message, channel) -> {
+			exposed.set(channel);
+			RabbitTemplate rabbitTemplate = new RabbitTemplate(singleConnectionFactory);
+			rabbitTemplate.setChannelTransacted(true);
+			// should use same channel as container
+			rabbitTemplate.convertAndSend("foo", "bar", "baz");
+			latch.countDown();
 		});
 		container.setQueueNames("queue");
 		container.setChannelTransacted(true);
@@ -462,6 +492,7 @@ public class ExternalTxManagerTests {
 		container.setTransactionManager(new DummyTxManager());
 		container.afterPropertiesSet();
 		container.start();
+		assertTrue(consumerLatch.await(10, TimeUnit.SECONDS));
 
 		consumer.get().handleDelivery("qux", new Envelope(1, false, "foo", "bar"), new BasicProperties(), new byte[] {0});
 
@@ -501,12 +532,12 @@ public class ExternalTxManagerTests {
 
 		final CachingConnectionFactory cachingConnectionFactory = new CachingConnectionFactory(mockConnectionFactory);
 
-		when(mockConnectionFactory.newConnection((ExecutorService) null)).thenReturn(mockConnection);
+		when(mockConnectionFactory.newConnection(any(ExecutorService.class), anyString())).thenReturn(mockConnection);
 		when(mockConnection.isOpen()).thenReturn(true);
 
 		final AtomicReference<Exception> tooManyChannels = new AtomicReference<Exception>();
 
-		doAnswer(new Answer<Channel>(){
+		doAnswer(new Answer<Channel>() {
 			boolean done;
 			@Override
 			public Channel answer(InvocationOnMock invocation) throws Throwable {
@@ -522,38 +553,30 @@ public class ExternalTxManagerTests {
 		}).when(mockConnection).createChannel();
 
 		final AtomicReference<Consumer> consumer = new AtomicReference<Consumer>();
+		final CountDownLatch consumerLatch = new CountDownLatch(1);
 
-		doAnswer(new Answer<String>() {
-
-			@Override
-			public String answer(InvocationOnMock invocation) throws Throwable {
-				consumer.set((Consumer) invocation.getArguments()[6]);
-				return "consumerTag";
-			}
+		doAnswer(invocation -> {
+			consumer.set(invocation.getArgumentAt(6, Consumer.class));
+			consumerLatch.countDown();
+			return "consumerTag";
 		}).when(onlyChannel)
-			.basicConsume(anyString(), anyBoolean(), anyString(), anyBoolean(), anyBoolean(), anyMap(), any(Consumer.class));
+				.basicConsume(anyString(), anyBoolean(), anyString(), anyBoolean(), anyBoolean(), anyMap(),
+						any(Consumer.class));
 
 		final CountDownLatch commitLatch = new CountDownLatch(1);
-		doAnswer(new Answer<String>() {
-
-			@Override
-			public String answer(InvocationOnMock invocation) throws Throwable {
-				commitLatch.countDown();
-				return null;
-			}
+		doAnswer(invocation -> {
+			commitLatch.countDown();
+			return null;
 		}).when(onlyChannel).txCommit();
 
 		final CountDownLatch latch = new CountDownLatch(1);
-		SimpleMessageListenerContainer container = new SimpleMessageListenerContainer(cachingConnectionFactory);
-		container.setMessageListener(new MessageListener() {
-			@Override
-			public void onMessage(Message message) {
-				RabbitTemplate rabbitTemplate = new RabbitTemplate(cachingConnectionFactory);
-				rabbitTemplate.setChannelTransacted(true);
-				// should use same channel as container
-				rabbitTemplate.convertAndSend("foo", "bar", "baz");
-				latch.countDown();
-			}
+		AbstractMessageListenerContainer container = createContainer(cachingConnectionFactory);
+		container.setMessageListener((MessageListener) message -> {
+			RabbitTemplate rabbitTemplate = new RabbitTemplate(cachingConnectionFactory);
+			rabbitTemplate.setChannelTransacted(true);
+			// should use same channel as container
+			rabbitTemplate.convertAndSend("foo", "bar", "baz");
+			latch.countDown();
 		});
 		container.setQueueNames("queue");
 		container.setChannelTransacted(true);
@@ -561,6 +584,7 @@ public class ExternalTxManagerTests {
 		container.setTransactionManager(new RabbitTransactionManager(cachingConnectionFactory));
 		container.afterPropertiesSet();
 		container.start();
+		assertTrue(consumerLatch.await(10, TimeUnit.SECONDS));
 
 		consumer.get().handleDelivery("qux", new Envelope(1, false, "foo", "bar"), new BasicProperties(), new byte[] {0});
 
@@ -584,6 +608,8 @@ public class ExternalTxManagerTests {
 
 		container.stop();
 	}
+
+	protected abstract AbstractMessageListenerContainer createContainer(AbstractConnectionFactory connectionFactory);
 
 	@SuppressWarnings("serial")
 	private static class DummyTxManager extends AbstractPlatformTransactionManager {

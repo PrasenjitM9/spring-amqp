@@ -24,7 +24,6 @@ import static org.mockito.AdditionalMatchers.aryEq;
 import static org.mockito.Matchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
-import static org.springframework.amqp.rabbit.test.MessageTestUtils.createTextMessage;
 
 import java.io.Serializable;
 import java.lang.reflect.Method;
@@ -45,10 +44,10 @@ import org.springframework.amqp.core.MessageProperties;
 import org.springframework.amqp.rabbit.listener.adapter.MessagingMessageListenerAdapter;
 import org.springframework.amqp.rabbit.listener.adapter.ReplyFailureException;
 import org.springframework.amqp.rabbit.listener.exception.ListenerExecutionFailedException;
+import org.springframework.amqp.rabbit.test.MessageTestUtils;
 import org.springframework.amqp.support.AmqpHeaders;
 import org.springframework.amqp.support.AmqpMessageHeaderAccessor;
 import org.springframework.amqp.support.converter.MessageConversionException;
-import org.springframework.amqp.support.converter.SimpleMessageConverter;
 import org.springframework.amqp.utils.SerializationUtils;
 import org.springframework.beans.factory.support.StaticListableBeanFactory;
 import org.springframework.messaging.Message;
@@ -71,6 +70,7 @@ import com.rabbitmq.client.Channel;
 /**
  * @author Stephane Nicoll
  * @author Artem Bilan
+ * @author Gary Russell
  */
 public class MethodRabbitListenerEndpointTests {
 
@@ -118,7 +118,7 @@ public class MethodRabbitListenerEndpointTests {
 				org.springframework.amqp.core.Message.class, Channel.class);
 
 		Channel channel = mock(Channel.class);
-		listener.onMessage(createTextMessage("test"), channel);
+		listener.onMessage(MessageTestUtils.createTextMessage("test"), channel);
 		assertDefaultListenerMethodInvocation();
 	}
 
@@ -127,7 +127,7 @@ public class MethodRabbitListenerEndpointTests {
 		MessagingMessageListenerAdapter listener = createDefaultInstance(Message.class);
 
 		Channel channel = mock(Channel.class);
-		listener.onMessage(createTextMessage("test"), channel);
+		listener.onMessage(MessageTestUtils.createTextMessage("test"), channel);
 		assertDefaultListenerMethodInvocation();
 	}
 
@@ -140,7 +140,7 @@ public class MethodRabbitListenerEndpointTests {
 		properties.setHeader("myCounter", 55);
 		properties.setConsumerTag("consumerTag");
 		properties.setConsumerQueue("queue");
-		org.springframework.amqp.core.Message message = createTextMessage("my payload", properties);
+		org.springframework.amqp.core.Message message = MessageTestUtils.createTextMessage("my payload", properties);
 		listener.onMessage(message, channel);
 		assertDefaultListenerMethodInvocation();
 	}
@@ -152,7 +152,7 @@ public class MethodRabbitListenerEndpointTests {
 		Channel channel = mock(Channel.class);
 		MessageProperties properties = new MessageProperties();
 		properties.setHeader("myCounter", 24);
-		org.springframework.amqp.core.Message message = createTextMessage("my payload", properties);
+		org.springframework.amqp.core.Message message = MessageTestUtils.createTextMessage("my payload", properties);
 		listener.onMessage(message, channel);
 		assertDefaultListenerMethodInvocation();
 	}
@@ -165,7 +165,7 @@ public class MethodRabbitListenerEndpointTests {
 		MessageProperties properties = new MessageProperties();
 		properties.setHeader("customInt", 1234);
 		properties.setMessageId("abcd-1234");
-		org.springframework.amqp.core.Message message = createTextMessage("my payload", properties);
+		org.springframework.amqp.core.Message message = MessageTestUtils.createTextMessage("my payload", properties);
 		listener.onMessage(message, channel);
 		assertDefaultListenerMethodInvocation();
 	}
@@ -178,7 +178,7 @@ public class MethodRabbitListenerEndpointTests {
 		MessageProperties properties = new MessageProperties();
 		properties.setHeader("customLong", 4567L);
 		properties.setType("myMessageType");
-		org.springframework.amqp.core.Message message = createTextMessage("my payload", properties);
+		org.springframework.amqp.core.Message message = MessageTestUtils.createTextMessage("my payload", properties);
 		listener.onMessage(message, channel);
 		assertDefaultListenerMethodInvocation();
 	}
@@ -191,7 +191,7 @@ public class MethodRabbitListenerEndpointTests {
 		MessageProperties properties = new MessageProperties();
 		properties.setHeader("customBoolean", true);
 		properties.setAppId("myAppId");
-		org.springframework.amqp.core.Message message = createTextMessage("my payload", properties);
+		org.springframework.amqp.core.Message message = MessageTestUtils.createTextMessage("my payload", properties);
 		listener.onMessage(message, channel);
 		assertDefaultListenerMethodInvocation();
 	}
@@ -217,7 +217,7 @@ public class MethodRabbitListenerEndpointTests {
 
 		Channel channel = mock(Channel.class);
 
-		listener.onMessage(createTextMessage("33"), channel);
+		listener.onMessage(MessageTestUtils.createTextMessage("33"), channel);
 		assertDefaultListenerMethodInvocation();
 	}
 
@@ -232,8 +232,8 @@ public class MethodRabbitListenerEndpointTests {
 		listener.setResponseExchange(responseExchange);
 		listener.setResponseRoutingKey(responseRoutingKey);
 		MessageProperties properties = new MessageProperties();
-		properties.setCorrelationId(correlationId.getBytes(SimpleMessageConverter.DEFAULT_CHARSET));
-		org.springframework.amqp.core.Message message = createTextMessage(body, properties);
+		properties.setCorrelationId(correlationId);
+		org.springframework.amqp.core.Message message = MessageTestUtils.createTextMessage(body, properties);
 
 		processAndReply(listener, message, responseExchange, responseRoutingKey, false, correlationId);
 		assertDefaultListenerMethodInvocation();
@@ -246,7 +246,7 @@ public class MethodRabbitListenerEndpointTests {
 		listener.setResponseExchange("fooQueue");
 		String body = "echo text";
 
-		org.springframework.amqp.core.Message message = createTextMessage(body, new MessageProperties());
+		org.springframework.amqp.core.Message message = MessageTestUtils.createTextMessage(body, new MessageProperties());
 
 
 		processAndReply(listener, message, "fooQueue", "", false, null);
@@ -260,7 +260,7 @@ public class MethodRabbitListenerEndpointTests {
 		listener.setResponseExchange("fooQueue");
 		String body = "echo text";
 
-		org.springframework.amqp.core.Message message = createTextMessage(body, new MessageProperties());
+		org.springframework.amqp.core.Message message = MessageTestUtils.createTextMessage(body, new MessageProperties());
 
 		try {
 			processAndReply(listener, message, "fooQueue", "", false, null);
@@ -284,7 +284,7 @@ public class MethodRabbitListenerEndpointTests {
 
 		MessageProperties properties = new MessageProperties();
 		properties.setReplyToAddress(replyTo);
-		org.springframework.amqp.core.Message message = createTextMessage(body, properties);
+		org.springframework.amqp.core.Message message = MessageTestUtils.createTextMessage(body, properties);
 
 
 		processAndReply(listener, message, "replyToQueue", "myRouting", true, null);
@@ -299,7 +299,7 @@ public class MethodRabbitListenerEndpointTests {
 
 		MessageProperties properties = new MessageProperties();
 		properties.setMessageId(messageId);
-		org.springframework.amqp.core.Message message = createTextMessage(body, properties);
+		org.springframework.amqp.core.Message message = MessageTestUtils.createTextMessage(body, properties);
 
 		// MessageId is used as fallback when no correlationId is set
 		processAndReply(listener, message, "replyDestination", "", false, messageId);
@@ -324,7 +324,7 @@ public class MethodRabbitListenerEndpointTests {
 	public void emptySendTo() throws Exception {
 		MessagingMessageListenerAdapter listener = createDefaultInstance(String.class);
 
-		processAndReply(listener, createTextMessage("content"), "", "", false, null);
+		processAndReply(listener, MessageTestUtils.createTextMessage("content"), "", "", false, null);
 		assertDefaultListenerMethodInvocation();
 	}
 
@@ -352,7 +352,7 @@ public class MethodRabbitListenerEndpointTests {
 		Method method = getListenerMethod(methodName, String.class);
 		MessagingMessageListenerAdapter listener = createInstance(customFactory, method);
 		Channel channel = mock(Channel.class);
-		listener.onMessage(createTextMessage("test"), channel); // test is a valid value
+		listener.onMessage(MessageTestUtils.createTextMessage("test"), channel); // test is a valid value
 		assertListenerMethodInvocation(sample, methodName);
 	}
 
@@ -366,7 +366,7 @@ public class MethodRabbitListenerEndpointTests {
 		Channel channel = mock(Channel.class);
 
 		thrown.expect(ListenerExecutionFailedException.class);
-		listener.onMessage(createTextMessage("invalid value"), channel); // test is an invalid value
+		listener.onMessage(MessageTestUtils.createTextMessage("invalid value"), channel); // test is an invalid value
 
 	}
 
@@ -378,9 +378,9 @@ public class MethodRabbitListenerEndpointTests {
 		Channel channel = mock(Channel.class);
 
 		thrown.expect(ListenerExecutionFailedException.class);
-		thrown.expectCause(Matchers.isA(MessageConversionException.class));
+		thrown.expectCause(Matchers.isA(org.springframework.messaging.converter.MessageConversionException.class));
 		thrown.expectMessage(getDefaultListenerMethod(Integer.class).toGenericString()); // ref to method
-		listener.onMessage(createTextMessage("test"), channel); // test is not a valid integer
+		listener.onMessage(MessageTestUtils.createTextMessage("test"), channel); // test is not a valid integer
 	}
 
 	@Test
@@ -390,8 +390,8 @@ public class MethodRabbitListenerEndpointTests {
 
 		thrown.expect(ListenerExecutionFailedException.class);
 		thrown.expectCause(Matchers.<Throwable>either(Matchers.instanceOf(MethodArgumentTypeMismatchException.class))
-				.or(Matchers.instanceOf(MessageConversionException.class)));
-		listener.onMessage(createTextMessage("test"), channel);  // Message<String> as Message<Integer>
+				.or(Matchers.instanceOf(org.springframework.messaging.converter.MessageConversionException.class)));
+		listener.onMessage(MessageTestUtils.createTextMessage("test"), channel);  // Message<String> as Message<Integer>
 	}
 
 	private MessagingMessageListenerAdapter createInstance(

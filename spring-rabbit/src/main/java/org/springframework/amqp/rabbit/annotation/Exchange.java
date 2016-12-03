@@ -16,12 +16,12 @@
 
 package org.springframework.amqp.rabbit.annotation;
 
-import static java.lang.annotation.RetentionPolicy.RUNTIME;
-
 import java.lang.annotation.Retention;
+import java.lang.annotation.RetentionPolicy;
 import java.lang.annotation.Target;
 
 import org.springframework.amqp.core.ExchangeTypes;
+import org.springframework.core.annotation.AliasFor;
 
 /**
  * An exchange to which to bind a {@code RabbitListener} queue.
@@ -31,16 +31,24 @@ import org.springframework.amqp.core.ExchangeTypes;
  *
  */
 @Target({})
-@Retention(RUNTIME)
+@Retention(RetentionPolicy.RUNTIME)
 public @interface Exchange {
 
 	/**
 	 * @return the exchange name.
 	 */
-	String value();
+	@AliasFor("name")
+	String value() default "";
 
 	/**
-	 * The exchange type - only DIRECT, FANOUT and TOPIC exchanges are supported.
+	 * @return the exchange name.
+	 * @since 2.0
+	 */
+	@AliasFor("value")
+	String name() default "";
+
+	/**
+	 * The exchange type - only DIRECT, FANOUT TOPIC, and HEADERS exchanges are supported.
 	 * @return the exchange type.
 	 */
 	String type() default ExchangeTypes.DIRECT;
@@ -54,5 +62,31 @@ public @interface Exchange {
 	 * @return true if the exchange is to be declared as auto-delete.
 	 */
 	String autoDelete() default "false";
+
+	/**
+	 * @return true if the exchange is to be declared as internal.
+	 * @since 1.6
+	 */
+	String internal() default "false";
+
+	/**
+	 * @return true if the declaration exceptions should be ignored.
+	 * @since 1.6
+	 */
+	String ignoreDeclarationExceptions() default "false";
+
+	/**
+	 * @return true if the exchange is to be declared as an
+	 * 'x-delayed-message' exchange. Requires the delayed message exchange
+	 * plugin on the broker.
+	 * @since 1.6.4
+	 */
+	String delayed() default "false";
+
+	/**
+	 * @return the arguments to apply when declaring this exchange.
+	 * @since 1.6
+	 */
+	Argument[] arguments() default {};
 
 }

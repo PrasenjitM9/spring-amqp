@@ -1,5 +1,5 @@
 /*
- * Copyright 2002-2014 the original author or authors.
+ * Copyright 2002-2016 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -21,6 +21,8 @@ import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertThat;
 import static org.junit.Assert.assertTrue;
+import static org.mockito.Matchers.any;
+import static org.mockito.Matchers.anyString;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
@@ -34,12 +36,13 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 
+import org.junit.Rule;
 import org.junit.Test;
+import org.junit.rules.ExpectedException;
 import org.mockito.Mockito;
-import org.mockito.invocation.InvocationOnMock;
-import org.mockito.stubbing.Answer;
 
 import org.springframework.amqp.AmqpAuthenticationException;
+import org.springframework.amqp.core.Address;
 import org.springframework.amqp.core.Message;
 import org.springframework.amqp.core.MessageProperties;
 import org.springframework.amqp.core.ReceiveAndReplyCallback;
@@ -53,15 +56,11 @@ import org.springframework.amqp.support.converter.SimpleMessageConverter;
 import org.springframework.amqp.utils.SerializationUtils;
 import org.springframework.expression.Expression;
 import org.springframework.expression.spel.standard.SpelExpressionParser;
-import org.springframework.retry.RecoveryCallback;
-import org.springframework.retry.RetryContext;
 import org.springframework.retry.support.RetryTemplate;
 import org.springframework.transaction.TransactionDefinition;
 import org.springframework.transaction.TransactionException;
-import org.springframework.transaction.TransactionStatus;
 import org.springframework.transaction.support.AbstractPlatformTransactionManager;
 import org.springframework.transaction.support.DefaultTransactionStatus;
-import org.springframework.transaction.support.TransactionCallback;
 import org.springframework.transaction.support.TransactionTemplate;
 
 import com.rabbitmq.client.AMQP;
@@ -80,6 +79,9 @@ import com.rabbitmq.client.impl.AMQImpl;
  *
  */
 public class RabbitTemplateTests {
+
+	@Rule
+	public ExpectedException exception = ExpectedException.none();
 
 	@Test
 	public void returnConnectionAfterCommit() throws Exception {
@@ -107,7 +109,7 @@ public class RabbitTemplateTests {
 		Connection mockConnection = mock(Connection.class);
 		Channel mockChannel = mock(Channel.class);
 
-		when(mockConnectionFactory.newConnection((ExecutorService) null)).thenReturn(mockConnection);
+		when(mockConnectionFactory.newConnection(any(ExecutorService.class), anyString())).thenReturn(mockConnection);
 		when(mockConnection.isOpen()).thenReturn(true);
 		when(mockConnection.createChannel()).thenReturn(mockChannel);
 
@@ -116,21 +118,15 @@ public class RabbitTemplateTests {
 		final RabbitTemplate template = new RabbitTemplate(new CachingConnectionFactory(mockConnectionFactory));
 		template.setChannelTransacted(true);
 
-		txTemplate.execute(new TransactionCallback<Object>() {
-			@Override
-			public Object doInTransaction(TransactionStatus status) {
-				template.convertAndSend("foo", "bar");
-				return null;
-			}
+		txTemplate.execute(status -> {
+			template.convertAndSend("foo", "bar");
+			return null;
 		});
-		txTemplate.execute(new TransactionCallback<Object>() {
-			@Override
-			public Object doInTransaction(TransactionStatus status) {
-				template.convertAndSend("baz", "qux");
-				return null;
-			}
+		txTemplate.execute(status -> {
+			template.convertAndSend("baz", "qux");
+			return null;
 		});
-		verify(mockConnectionFactory, Mockito.times(1)).newConnection(Mockito.any(ExecutorService.class));
+		verify(mockConnectionFactory, Mockito.times(1)).newConnection(any(ExecutorService.class), anyString());
 		// ensure we used the same channel
 		verify(mockConnection, Mockito.times(1)).createChannel();
 	}
@@ -174,21 +170,18 @@ public class RabbitTemplateTests {
 		Connection mockConnection = mock(Connection.class);
 		Channel mockChannel = mock(Channel.class);
 
-		when(mockConnectionFactory.newConnection((ExecutorService) null)).thenReturn(mockConnection);
+		when(mockConnectionFactory.newConnection(any(ExecutorService.class), anyString())).thenReturn(mockConnection);
 		when(mockConnection.isOpen()).thenReturn(true);
 		when(mockConnection.createChannel()).thenReturn(mockChannel);
 
 		when(mockChannel.queueDeclare()).thenReturn(new AMQImpl.Queue.DeclareOk("foo", 0, 0));
 
 		final AtomicReference<Consumer> consumer = new AtomicReference<Consumer>();
-		doAnswer(new Answer<Object>() {
-			@Override
-			public Object answer(InvocationOnMock invocation) throws Throwable {
-				consumer.set((Consumer) invocation.getArguments()[6]);
-				return null;
-			}
+		doAnswer(invocation -> {
+			consumer.set(invocation.getArgumentAt(6, Consumer.class));
+			return null;
 		}).when(mockChannel).basicConsume(Mockito.anyString(), Mockito.anyBoolean(), Mockito.anyString(),
-				Mockito.anyBoolean(), Mockito.anyBoolean(), Mockito.anyMap(), Mockito.any(Consumer.class));
+				Mockito.anyBoolean(), Mockito.anyBoolean(), Mockito.anyMap(), any(Consumer.class));
 		RabbitTemplate template = new RabbitTemplate(new SingleConnectionFactory(mockConnectionFactory));
 		template.setReplyTimeout(1);
 		Message input = new Message("Hello, world!".getBytes(), new MessageProperties());
@@ -202,14 +195,10 @@ public class RabbitTemplateTests {
 	public void testRetry() throws Exception {
 		ConnectionFactory mockConnectionFactory = mock(ConnectionFactory.class);
 		final AtomicInteger count = new AtomicInteger();
-		doAnswer(new Answer<Void>() {
-
-			@Override
-			public Void answer(InvocationOnMock invocation) throws Throwable {
-				count.incrementAndGet();
-				throw new AuthenticationFailureException("foo");
-			}
-		}).when(mockConnectionFactory).newConnection((ExecutorService) null);
+		doAnswer(invocation -> {
+			count.incrementAndGet();
+			throw new AuthenticationFailureException("foo");
+		}).when(mockConnectionFactory).newConnection(any(ExecutorService.class), anyString());
 
 		RabbitTemplate template = new RabbitTemplate(new SingleConnectionFactory(mockConnectionFactory));
 		template.setRetryTemplate(new RetryTemplate());
@@ -226,28 +215,19 @@ public class RabbitTemplateTests {
 	public void testRecovery() throws Exception {
 		ConnectionFactory mockConnectionFactory = mock(ConnectionFactory.class);
 		final AtomicInteger count = new AtomicInteger();
-		doAnswer(new Answer<Void>() {
-
-			@Override
-			public Void answer(InvocationOnMock invocation) throws Throwable {
-				count.incrementAndGet();
-				throw new AuthenticationFailureException("foo");
-			}
-		}).when(mockConnectionFactory).newConnection((ExecutorService) null);
+		doAnswer(invocation -> {
+			count.incrementAndGet();
+			throw new AuthenticationFailureException("foo");
+		}).when(mockConnectionFactory).newConnection(any(ExecutorService.class), anyString());
 
 		RabbitTemplate template = new RabbitTemplate(new SingleConnectionFactory(mockConnectionFactory));
 		template.setRetryTemplate(new RetryTemplate());
 
 		final AtomicBoolean recoverInvoked = new AtomicBoolean();
 
-		template.setRecoveryCallback(new RecoveryCallback<Object>() {
-
-			@Override
-			public Object recover(RetryContext context) throws Exception {
-				recoverInvoked.set(true);
-				return null;
-			}
-
+		template.setRecoveryCallback(context -> {
+			recoverInvoked.set(true);
+			return null;
 		});
 		template.convertAndSend("foo", "bar", "baz");
 		assertEquals(3, count.get());
@@ -270,6 +250,21 @@ public class RabbitTemplateTests {
 		RabbitTemplate template = new RabbitTemplate(cf);
 		template.convertAndSend("foo");
 		verify(channel).addListener(template);
+	}
+
+	@Test
+	public void testNoListenerAllowed1() {
+		RabbitTemplate template = new RabbitTemplate();
+		this.exception.expect(IllegalStateException.class);
+		template.expectedQueueNames();
+	}
+
+	@Test
+	public void testNoListenerAllowed2() {
+		RabbitTemplate template = new RabbitTemplate();
+		template.setReplyAddress(Address.AMQ_RABBITMQ_REPLY_TO);
+		this.exception.expect(IllegalStateException.class);
+		template.expectedQueueNames();
 	}
 
 	public final static AtomicInteger LOOKUP_KEY_COUNT = new AtomicInteger();

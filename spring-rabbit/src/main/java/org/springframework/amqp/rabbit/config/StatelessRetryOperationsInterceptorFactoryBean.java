@@ -22,7 +22,6 @@ import org.apache.commons.logging.LogFactory;
 import org.springframework.amqp.core.Message;
 import org.springframework.amqp.rabbit.retry.MessageRecoverer;
 import org.springframework.retry.RetryOperations;
-import org.springframework.retry.interceptor.MethodInvocationRecoverer;
 import org.springframework.retry.interceptor.RetryOperationsInterceptor;
 import org.springframework.retry.support.RetryTemplate;
 
@@ -39,12 +38,14 @@ import org.springframework.retry.support.RetryTemplate;
  * @see RetryOperations#execute(org.springframework.retry.RetryCallback, org.springframework.retry.RecoveryCallback)
  *
  * @author Dave Syer
+ * @author Gary Russell
  *
  */
 public class StatelessRetryOperationsInterceptorFactoryBean extends AbstractRetryOperationsInterceptorFactoryBean {
 
 	private static Log logger = LogFactory.getLog(StatelessRetryOperationsInterceptorFactoryBean.class);
 
+	@Override
 	public RetryOperationsInterceptor getObject() {
 
 		RetryOperationsInterceptor retryInterceptor = new RetryOperationsInterceptor();
@@ -55,22 +56,22 @@ public class StatelessRetryOperationsInterceptorFactoryBean extends AbstractRetr
 		retryInterceptor.setRetryOperations(retryTemplate);
 
 		final MessageRecoverer messageRecoverer = getMessageRecoverer();
-		retryInterceptor.setRecoverer(new MethodInvocationRecoverer<Void>() {
-			public Void recover(Object[] args, Throwable cause) {
-				Message message = (Message) args[1];
-				if (messageRecoverer == null) {
-					logger.warn("Message dropped on recovery: " + message, cause);
-				} else {
-					messageRecoverer.recover(message, cause);
-				}
-				return null;
+		retryInterceptor.setRecoverer((args, cause) -> {
+			Message message = (Message) args[1];
+			if (messageRecoverer == null) {
+				logger.warn("Message dropped on recovery: " + message, cause);
 			}
+			else {
+				messageRecoverer.recover(message, cause);
+			}
+			return null;
 		});
 
 		return retryInterceptor;
 
 	}
 
+	@Override
 	public Class<?> getObjectType() {
 		return RetryOperationsInterceptor.class;
 	}

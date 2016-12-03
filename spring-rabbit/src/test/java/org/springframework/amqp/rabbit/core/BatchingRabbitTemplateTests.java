@@ -28,7 +28,6 @@ import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.spy;
-import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 
 import java.io.OutputStream;
@@ -55,10 +54,10 @@ import org.springframework.amqp.core.MessageProperties;
 import org.springframework.amqp.rabbit.connection.CachingConnectionFactory;
 import org.springframework.amqp.rabbit.core.support.BatchingStrategy;
 import org.springframework.amqp.rabbit.core.support.SimpleBatchingStrategy;
+import org.springframework.amqp.rabbit.junit.BrokerRunning;
+import org.springframework.amqp.rabbit.junit.BrokerTestUtils;
 import org.springframework.amqp.rabbit.listener.ConditionalRejectingErrorHandler;
 import org.springframework.amqp.rabbit.listener.SimpleMessageListenerContainer;
-import org.springframework.amqp.rabbit.test.BrokerRunning;
-import org.springframework.amqp.rabbit.test.BrokerTestUtils;
 import org.springframework.amqp.support.postprocessor.AbstractCompressingPostProcessor;
 import org.springframework.amqp.support.postprocessor.DelegatingDecompressingPostProcessor;
 import org.springframework.amqp.support.postprocessor.GUnzipPostProcessor;
@@ -69,8 +68,6 @@ import org.springframework.amqp.utils.test.TestUtils;
 import org.springframework.beans.DirectFieldAccessor;
 import org.springframework.scheduling.concurrent.ThreadPoolTaskScheduler;
 import org.springframework.util.ReflectionUtils;
-import org.springframework.util.ReflectionUtils.MethodCallback;
-import org.springframework.util.ReflectionUtils.MethodFilter;
 import org.springframework.util.StopWatch;
 
 /**
@@ -231,13 +228,9 @@ public class BatchingRabbitTemplateTests {
 		final CountDownLatch latch = new CountDownLatch(2);
 		SimpleMessageListenerContainer container = new SimpleMessageListenerContainer(this.connectionFactory);
 		container.setQueueNames(ROUTE);
-		container.setMessageListener(new MessageListener() {
-
-			@Override
-			public void onMessage(Message message) {
-				received.add(message);
-				latch.countDown();
-			}
+		container.setMessageListener((MessageListener) message -> {
+			received.add(message);
+			latch.countDown();
 		});
 		container.setReceiveTimeout(100);
 		container.afterPropertiesSet();
@@ -270,13 +263,9 @@ public class BatchingRabbitTemplateTests {
 		final CountDownLatch latch = new CountDownLatch(count);
 		SimpleMessageListenerContainer container = new SimpleMessageListenerContainer(this.connectionFactory);
 		container.setQueueNames(ROUTE);
-		container.setMessageListener(new MessageListener() {
-
-			@Override
-			public void onMessage(Message message) {
-				received.add(message);
-				latch.countDown();
-			}
+		container.setMessageListener((MessageListener) message -> {
+			received.add(message);
+			latch.countDown();
 		});
 		container.setReceiveTimeout(100);
 		container.setPrefetchCount(1000);
@@ -298,7 +287,7 @@ public class BatchingRabbitTemplateTests {
 			}
 			assertTrue(latch.await(60,  TimeUnit.SECONDS));
 			watch.stop();
-			System.out.println(watch.getTotalTimeMillis());
+			// System .out .println(watch.getTotalTimeMillis());
 			assertEquals(count, received.size());
 		}
 		finally {
@@ -310,12 +299,7 @@ public class BatchingRabbitTemplateTests {
 	public void testDebatchByContainerBadMessageRejected() throws Exception {
 		SimpleMessageListenerContainer container = new SimpleMessageListenerContainer(this.connectionFactory);
 		container.setQueueNames(ROUTE);
-		container.setMessageListener(new MessageListener() {
-
-			@Override
-			public void onMessage(Message message) {
-			}
-		});
+		container.setMessageListener((MessageListener) message -> { });
 		container.setReceiveTimeout(100);
 		ConditionalRejectingErrorHandler errorHandler = new ConditionalRejectingErrorHandler();
 		container.setErrorHandler(errorHandler);
@@ -335,7 +319,7 @@ public class BatchingRabbitTemplateTests {
 			Thread.sleep(1000);
 			ArgumentCaptor<Object> arg1 = ArgumentCaptor.forClass(Object.class);
 			ArgumentCaptor<Throwable> arg2 = ArgumentCaptor.forClass(Throwable.class);
-			verify(logger, times(2)).warn(arg1.capture(), arg2.capture()); // CRE logs 2 WARNs ensure the message was rejected
+			verify(logger).warn(arg1.capture(), arg2.capture());
 			assertThat(arg2.getValue().getMessage(), containsString("Bad batched message received"));
 		}
 		finally {
@@ -464,10 +448,11 @@ public class BatchingRabbitTemplateTests {
 	}
 
 	private Message receive(BatchingRabbitTemplate template) throws InterruptedException {
-		Message message = null;
+		Message message = template.receive(ROUTE);
 		int n = 0;
-		while (n++ < 200 && (message = template.receive(ROUTE)) == null) {
+		while (n++ < 200 && message == null) {
 			Thread.sleep(50);
+			message = template.receive(ROUTE);
 		}
 		assertNotNull(message);
 		return message;
@@ -479,13 +464,9 @@ public class BatchingRabbitTemplateTests {
 		final CountDownLatch latch = new CountDownLatch(2);
 		SimpleMessageListenerContainer container = new SimpleMessageListenerContainer(this.connectionFactory);
 		container.setQueueNames(ROUTE);
-		container.setMessageListener(new MessageListener() {
-
-			@Override
-			public void onMessage(Message message) {
-				received.add(message);
-				latch.countDown();
-			}
+		container.setMessageListener((MessageListener) message -> {
+			received.add(message);
+			latch.countDown();
 		});
 		container.setReceiveTimeout(100);
 		container.setAfterReceivePostProcessors(new DelegatingDecompressingPostProcessor());
@@ -515,20 +496,10 @@ public class BatchingRabbitTemplateTests {
 
 	private int getStreamLevel(Object stream) throws Exception {
 		final AtomicReference<Method> m = new AtomicReference<Method>();
-		ReflectionUtils.doWithMethods(AbstractCompressingPostProcessor.class, new MethodCallback() {
-
-			@Override
-			public void doWith(Method method) throws IllegalArgumentException, IllegalAccessException {
-				method.setAccessible(true);
-				m.set(method);
-			}
-		}, new MethodFilter() {
-
-			@Override
-			public boolean matches(Method method) {
-				return method.getName().equals("getCompressorStream");
-			}
-		});
+		ReflectionUtils.doWithMethods(AbstractCompressingPostProcessor.class, method -> {
+			method.setAccessible(true);
+			m.set(method);
+		}, method -> method.getName().equals("getCompressorStream"));
 		Object zipStream = m.get().invoke(stream, mock(OutputStream.class));
 		return TestUtils.getPropertyValue(zipStream, "def.level", Integer.class);
 	}

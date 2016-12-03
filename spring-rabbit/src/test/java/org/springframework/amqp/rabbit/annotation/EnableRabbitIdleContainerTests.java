@@ -36,10 +36,10 @@ import org.springframework.amqp.rabbit.connection.CachingConnectionFactory;
 import org.springframework.amqp.rabbit.connection.ConnectionFactory;
 import org.springframework.amqp.rabbit.core.RabbitAdmin;
 import org.springframework.amqp.rabbit.core.RabbitTemplate;
+import org.springframework.amqp.rabbit.junit.BrokerRunning;
 import org.springframework.amqp.rabbit.listener.ListenerContainerIdleEvent;
 import org.springframework.amqp.rabbit.listener.MessageListenerContainer;
 import org.springframework.amqp.rabbit.listener.RabbitListenerEndpointRegistry;
-import org.springframework.amqp.rabbit.test.BrokerRunning;
 import org.springframework.amqp.utils.test.TestUtils;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.context.annotation.Bean;
@@ -141,7 +141,7 @@ public class EnableRabbitIdleContainerTests {
 
 		private boolean barEventReceived;
 
-		@RabbitListener(id="foo", queues="#{queue.name}")
+		@RabbitListener(id = "foo", queues = "#{queue.name}")
 		public String listenFoo(String foo) {
 			logger.info("foo: " + foo);
 			return foo.toUpperCase();
@@ -157,7 +157,7 @@ public class EnableRabbitIdleContainerTests {
 			this.latch.countDown();
 		}
 
-		@RabbitListener(id="bar", queues="#{queue.name}")
+		@RabbitListener(id = "bar", queues = "#{queue.name}")
 		public String listenBar(String bar) {
 			logger.info("bar: " + bar);
 			return bar.toUpperCase();

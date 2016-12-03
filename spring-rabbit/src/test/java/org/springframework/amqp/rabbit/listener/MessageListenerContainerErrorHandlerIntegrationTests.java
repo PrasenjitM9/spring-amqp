@@ -31,7 +31,6 @@ import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.verify;
 
-import java.util.HashMap;
 import java.util.Map;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
@@ -43,8 +42,6 @@ import org.junit.After;
 import org.junit.Before;
 import org.junit.Rule;
 import org.junit.Test;
-import org.mockito.invocation.InvocationOnMock;
-import org.mockito.stubbing.Answer;
 
 import org.springframework.amqp.AmqpRejectAndDontRequeueException;
 import org.springframework.amqp.core.AcknowledgeMode;
@@ -55,14 +52,15 @@ import org.springframework.amqp.core.Message;
 import org.springframework.amqp.core.MessageBuilder;
 import org.springframework.amqp.core.MessageListener;
 import org.springframework.amqp.core.Queue;
+import org.springframework.amqp.core.QueueBuilder;
 import org.springframework.amqp.rabbit.connection.CachingConnectionFactory;
 import org.springframework.amqp.rabbit.core.ChannelAwareMessageListener;
 import org.springframework.amqp.rabbit.core.RabbitAdmin;
 import org.springframework.amqp.rabbit.core.RabbitTemplate;
+import org.springframework.amqp.rabbit.junit.BrokerRunning;
+import org.springframework.amqp.rabbit.junit.BrokerTestUtils;
 import org.springframework.amqp.rabbit.listener.adapter.MessageListenerAdapter;
 import org.springframework.amqp.rabbit.listener.exception.ListenerExecutionFailedException;
-import org.springframework.amqp.rabbit.test.BrokerRunning;
-import org.springframework.amqp.rabbit.test.BrokerTestUtils;
 import org.springframework.amqp.support.converter.MessageConversionException;
 import org.springframework.amqp.utils.test.TestUtils;
 import org.springframework.beans.DirectFieldAccessor;
@@ -90,17 +88,13 @@ public class MessageListenerContainerErrorHandlerIntegrationTests {
 	private volatile CountDownLatch errorsHandled;
 
 	@Rule
-	public BrokerRunning brokerIsRunning = BrokerRunning.isRunningWithEmptyQueues(queue);
+	public BrokerRunning brokerIsRunning = BrokerRunning.isRunningWithEmptyQueues(queue.getName());
 
 	@Before
 	public void setUp() {
-		doAnswer(new Answer<Void>() {
-
-			@Override
-			public Void answer(InvocationOnMock invocation) throws Throwable {
-				errorsHandled.countDown();
-				return null;
-			}
+		doAnswer(invocation -> {
+			errorsHandled.countDown();
+			return null;
 		}).when(errorHandler).handleError(any(Throwable.class));
 	}
 
@@ -117,27 +111,19 @@ public class MessageListenerContainerErrorHandlerIntegrationTests {
 		final CountDownLatch messageReceived = new CountDownLatch(1);
 		final CountDownLatch spiedQLogger = new CountDownLatch(1);
 		final CountDownLatch errorHandled = new CountDownLatch(1);
-		container.setErrorHandler(new ErrorHandler() {
-
-			@Override
-			public void handleError(Throwable t) {
-				errorHandled.countDown();
-				throw new AmqpRejectAndDontRequeueException("foo", t);
-			}
+		container.setErrorHandler(t -> {
+			errorHandled.countDown();
+			throw new AmqpRejectAndDontRequeueException("foo", t);
 		});
-		container.setMessageListener(new MessageListener() {
-
-			@Override
-			public void onMessage(Message message) {
-				try {
-					messageReceived.countDown();
-					spiedQLogger.await(10, TimeUnit.SECONDS);
-				}
-				catch (InterruptedException e) {
-					Thread.currentThread().interrupt();
-				}
-				throw new RuntimeException("bar");
+		container.setMessageListener((MessageListener) message -> {
+			try {
+				messageReceived.countDown();
+				spiedQLogger.await(10, TimeUnit.SECONDS);
 			}
+			catch (InterruptedException e) {
+				Thread.currentThread().interrupt();
+			}
+			throw new RuntimeException("bar");
 		});
 		container.start();
 		Log logger = spy(TestUtils.getPropertyValue(container, "logger", Log.class));
@@ -215,9 +201,10 @@ public class MessageListenerContainerErrorHandlerIntegrationTests {
 		container.setMessageListener(messageListener);
 
 		RabbitAdmin admin = new RabbitAdmin(template.getConnectionFactory());
-		Map<String, Object> args = new HashMap<String, Object>();
-		args.put("x-dead-letter-exchange", "test.DLE");
-		Queue queue = new Queue("", false, false, true, args);
+		Queue queue = QueueBuilder.nonDurable("")
+				.autoDelete()
+				.withArgument("x-dead-letter-exchange", "test.DLE")
+				.build();
 		String testQueueName = admin.declareQueue(queue);
 		// Create a DeadLetterExchange and bind a queue to it with the original routing key
 		DirectExchange dle = new DirectExchange("test.DLE", false, true);
@@ -248,16 +235,12 @@ public class MessageListenerContainerErrorHandlerIntegrationTests {
 
 		// Verify that the exception strategy has access to the message
 		final AtomicReference<Message> failed = new AtomicReference<Message>();
-		ConditionalRejectingErrorHandler eh = new ConditionalRejectingErrorHandler(new FatalExceptionStrategy() {
-
-			@Override
-			public boolean isFatal(Throwable t) {
-				if (t instanceof ListenerExecutionFailedException) {
-					failed.set(((ListenerExecutionFailedException) t).getFailedMessage());
-				}
-				return t instanceof ListenerExecutionFailedException
-						&& t.getCause() instanceof MessageConversionException;
+		ConditionalRejectingErrorHandler eh = new ConditionalRejectingErrorHandler(t -> {
+			if (t instanceof ListenerExecutionFailedException) {
+				failed.set(((ListenerExecutionFailedException) t).getFailedMessage());
 			}
+			return t instanceof ListenerExecutionFailedException
+					&& t.getCause() instanceof MessageConversionException;
 		});
 		container.setErrorHandler(eh);
 
@@ -358,7 +341,8 @@ public class MessageListenerContainerErrorHandlerIntegrationTests {
 				logger.debug("Message in pojo: " + value);
 				Thread.sleep(100L);
 				throw exception;
-			} finally {
+			}
+			finally {
 				latch.countDown();
 			}
 		}
@@ -380,11 +364,13 @@ public class MessageListenerContainerErrorHandlerIntegrationTests {
 				logger.debug("Message in listener: " + value);
 				try {
 					Thread.sleep(100L);
-				} catch (InterruptedException e) {
+				}
+				catch (InterruptedException e) {
 					// Ignore this exception
 				}
 				throw exception;
-			} finally {
+			}
+			finally {
 				latch.countDown();
 			}
 		}
@@ -406,11 +392,13 @@ public class MessageListenerContainerErrorHandlerIntegrationTests {
 				logger.debug("Message in channel aware listener: " + value);
 				try {
 					Thread.sleep(100L);
-				} catch (InterruptedException e) {
+				}
+				catch (InterruptedException e) {
 					// Ignore this exception
 				}
 				throw exception;
-			} finally {
+			}
+			finally {
 				latch.countDown();
 			}
 		}

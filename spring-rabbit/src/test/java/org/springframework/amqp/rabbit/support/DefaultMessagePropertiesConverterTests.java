@@ -32,6 +32,7 @@ import java.util.Map;
 import org.junit.Before;
 import org.junit.Test;
 
+import org.springframework.amqp.core.MessageDeliveryMode;
 import org.springframework.amqp.core.MessageProperties;
 
 import com.rabbitmq.client.AMQP.BasicProperties;
@@ -85,7 +86,6 @@ public class DefaultMessagePropertiesConverterTests {
 	}
 
 	@Test
-	@SuppressWarnings("unchecked")
 	public void testToMessagePropertiesLongStringDeepInList() {
 		Map<String, Object> headers = new HashMap<String, Object>();
 		headers.put("list", Arrays.asList(Arrays.asList(longString)));
@@ -189,37 +189,15 @@ public class DefaultMessagePropertiesConverterTests {
 	}
 
 	@Test
-	public void testCorrelationIdAsString() {
-		MessageProperties messageProperties = new MessageProperties();
-		this.messagePropertiesConverter
-				.setCorrelationIdAsString(DefaultMessagePropertiesConverter.CorrelationIdPolicy.BOTH);
-		messageProperties.setCorrelationIdString("foo");
-		messageProperties.setCorrelationId("bar".getBytes()); // foo should win
-		BasicProperties basicProps = this.messagePropertiesConverter.fromMessageProperties(messageProperties, "UTF-8");
-		assertEquals("foo", basicProps.getCorrelationId());
-		messageProperties = this.messagePropertiesConverter.toMessageProperties(basicProps, null, "UTF-8");
-		assertEquals("foo", messageProperties.getCorrelationIdString());
-		assertEquals("foo", new String(messageProperties.getCorrelationId()));
-
-		this.messagePropertiesConverter
-				.setCorrelationIdAsString(DefaultMessagePropertiesConverter.CorrelationIdPolicy.STRING);
-		messageProperties.setCorrelationIdString("foo");
-		messageProperties.setCorrelationId("bar".getBytes()); // foo should win
-		basicProps = this.messagePropertiesConverter.fromMessageProperties(messageProperties, "UTF-8");
-		assertEquals("foo", basicProps.getCorrelationId());
-		messageProperties = this.messagePropertiesConverter.toMessageProperties(basicProps, null, "UTF-8");
-		assertEquals("foo", messageProperties.getCorrelationIdString());
-		assertNull(messageProperties.getCorrelationId());
-
-		this.messagePropertiesConverter
-				.setCorrelationIdAsString(DefaultMessagePropertiesConverter.CorrelationIdPolicy.BYTES);
-		messageProperties.setCorrelationIdString("foo");
-		messageProperties.setCorrelationId("bar".getBytes()); // bar should win
-		basicProps = this.messagePropertiesConverter.fromMessageProperties(messageProperties, "UTF-8");
-		assertEquals("bar", basicProps.getCorrelationId());
-		messageProperties = this.messagePropertiesConverter.toMessageProperties(basicProps, null, "UTF-8");
-		assertNull(messageProperties.getCorrelationIdString());
-		assertEquals("bar", new String(messageProperties.getCorrelationId()));
+	public void testInboundDeliveryMode() {
+		DefaultMessagePropertiesConverter converter = new DefaultMessagePropertiesConverter();
+		MessageProperties props = new MessageProperties();
+		props.setDeliveryMode(MessageDeliveryMode.NON_PERSISTENT);
+		BasicProperties bProps = converter.fromMessageProperties(props, "UTF-8");
+		assertEquals(MessageDeliveryMode.toInt(MessageDeliveryMode.NON_PERSISTENT), bProps.getDeliveryMode().intValue());
+		props = converter.toMessageProperties(bProps, null, "UTF-8");
+		assertEquals(MessageDeliveryMode.NON_PERSISTENT, props.getReceivedDeliveryMode());
+		assertNull(props.getDeliveryMode());
 	}
 
 }

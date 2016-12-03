@@ -25,7 +25,11 @@ import org.hamcrest.Matcher;
  * @since 1.6
  *
  */
-public class RabbitMatchers {
+public final class RabbitMatchers {
+
+	private RabbitMatchers() {
+		super();
+	}
 
 	public static Matcher<String> matchesRegex(String pattern) {
 		return new RegexMatcher(pattern);
@@ -35,7 +39,7 @@ public class RabbitMatchers {
 
 		private final String pattern;
 
-		private RegexMatcher(String pattern) {
+		RegexMatcher(String pattern) {
 			this.pattern = pattern;
 		}
 

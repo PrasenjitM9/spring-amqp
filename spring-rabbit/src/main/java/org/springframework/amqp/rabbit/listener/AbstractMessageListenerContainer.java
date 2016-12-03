@@ -20,11 +20,21 @@ import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
+import java.util.Map.Entry;
 import java.util.Set;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.Executor;
 
+import org.aopalliance.aop.Advice;
+import org.apache.commons.logging.Log;
+
+import org.springframework.amqp.AmqpConnectException;
+import org.springframework.amqp.AmqpIOException;
+import org.springframework.amqp.AmqpRejectAndDontRequeueException;
 import org.springframework.amqp.core.AcknowledgeMode;
 import org.springframework.amqp.core.Message;
 import org.springframework.amqp.core.MessageListener;
@@ -39,21 +49,38 @@ import org.springframework.amqp.rabbit.connection.RabbitResourceHolder;
 import org.springframework.amqp.rabbit.connection.RabbitUtils;
 import org.springframework.amqp.rabbit.connection.RoutingConnectionFactory;
 import org.springframework.amqp.rabbit.core.ChannelAwareMessageListener;
+import org.springframework.amqp.rabbit.core.RabbitAdmin;
 import org.springframework.amqp.rabbit.listener.exception.FatalListenerExecutionException;
+import org.springframework.amqp.rabbit.listener.exception.FatalListenerStartupException;
 import org.springframework.amqp.rabbit.listener.exception.ListenerExecutionFailedException;
+import org.springframework.amqp.rabbit.support.DefaultMessagePropertiesConverter;
+import org.springframework.amqp.rabbit.support.MessagePropertiesConverter;
+import org.springframework.amqp.support.ConditionalExceptionLogger;
+import org.springframework.amqp.support.ConsumerTagStrategy;
 import org.springframework.amqp.support.converter.MessageConversionException;
 import org.springframework.amqp.support.converter.MessageConverter;
 import org.springframework.amqp.support.postprocessor.MessagePostProcessorUtils;
+import org.springframework.aop.framework.ProxyFactory;
+import org.springframework.aop.support.DefaultPointcutAdvisor;
 import org.springframework.beans.factory.BeanNameAware;
 import org.springframework.beans.factory.DisposableBean;
 import org.springframework.context.ApplicationContext;
 import org.springframework.context.ApplicationContextAware;
-import org.springframework.context.SmartLifecycle;
+import org.springframework.context.ApplicationEventPublisher;
+import org.springframework.context.ApplicationEventPublisherAware;
+import org.springframework.core.task.SimpleAsyncTaskExecutor;
+import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.interceptor.DefaultTransactionAttribute;
+import org.springframework.transaction.interceptor.TransactionAttribute;
 import org.springframework.transaction.support.TransactionSynchronizationManager;
 import org.springframework.util.Assert;
 import org.springframework.util.ErrorHandler;
+import org.springframework.util.StringUtils;
+import org.springframework.util.backoff.BackOff;
+import org.springframework.util.backoff.FixedBackOff;
 
 import com.rabbitmq.client.Channel;
+import com.rabbitmq.client.ShutdownSignalException;
 
 /**
  * @author Mark Pollack
@@ -63,13 +90,61 @@ import com.rabbitmq.client.Channel;
  * @author Gary Russell
  */
 public abstract class AbstractMessageListenerContainer extends RabbitAccessor
-		implements MessageListenerContainer, ApplicationContextAware, BeanNameAware, DisposableBean, SmartLifecycle {
+		implements MessageListenerContainer, ApplicationContextAware, BeanNameAware, DisposableBean,
+				ApplicationEventPublisherAware {
+
+	static final int DEFAULT_FAILED_DECLARATION_RETRY_INTERVAL = 5000;
 
 	public static final boolean DEFAULT_DEBATCHING_ENABLED = true;
 
-	private volatile String beanName;
+	public static final int DEFAULT_PREFETCH_COUNT = 1;
 
-	private volatile boolean autoStartup = true;
+	/**
+	 * The default recovery interval: 5000 ms = 5 seconds.
+	 */
+	public static final long DEFAULT_RECOVERY_INTERVAL = 5000;
+
+	public static final long DEFAULT_SHUTDOWN_TIMEOUT = 5000;
+
+	private final ContainerDelegate delegate = this::actualInvokeListener;
+
+	protected final Object consumersMonitor = new Object(); //NOSONAR
+
+	private final Map<String, Object> consumerArgs = new HashMap<String, Object>();
+
+	private ContainerDelegate proxy = this.delegate;
+
+	private long shutdownTimeout = DEFAULT_SHUTDOWN_TIMEOUT;
+
+	private ApplicationEventPublisher applicationEventPublisher;
+
+	private PlatformTransactionManager transactionManager;
+
+	private TransactionAttribute transactionAttribute = new DefaultTransactionAttribute();
+
+	private String beanName;
+
+	private Executor taskExecutor = new SimpleAsyncTaskExecutor();
+
+	private boolean taskExecutorSet;
+
+	private BackOff recoveryBackOff = new FixedBackOff(DEFAULT_RECOVERY_INTERVAL, FixedBackOff.UNLIMITED_ATTEMPTS);
+
+	private MessagePropertiesConverter messagePropertiesConverter = new DefaultMessagePropertiesConverter();
+
+	private RabbitAdmin rabbitAdmin;
+
+	private boolean missingQueuesFatal = true;
+
+	private boolean missingQueuesFatalSet;
+
+	private boolean autoDeclare = true;
+
+	private boolean mismatchedQueuesFatal = false;
+
+	private long failedDeclarationRetryInterval = DEFAULT_FAILED_DECLARATION_RETRY_INTERVAL;
+
+	private boolean autoStartup = true;
 
 	private int phase = Integer.MAX_VALUE;
 
@@ -101,30 +176,57 @@ public abstract class AbstractMessageListenerContainer extends RabbitAccessor
 
 	private String listenerId;
 
+	private Advice[] adviceChain = new Advice[0];
+
+	private ConsumerTagStrategy consumerTagStrategy;
+
+	private volatile boolean exclusive;
+
+	private volatile boolean defaultRequeueRejected = true;
+
+	private volatile int prefetchCount = DEFAULT_PREFETCH_COUNT;
+
+	private long idleEventInterval;
+
+	private volatile long lastReceive = System.currentTimeMillis();
+
+	private boolean statefulRetryFatalWithNullMessageId = true;
+
+	private ConditionalExceptionLogger exclusiveConsumerExceptionLogger = new DefaultExclusiveConsumerLogger();
+
+
+	/**
+	 * {@inheritDoc}
+	 * @since 1.5
+	 */
+	@Override
+	public void setApplicationEventPublisher(ApplicationEventPublisher applicationEventPublisher) {
+		this.applicationEventPublisher = applicationEventPublisher;
+	}
+
+	protected ApplicationEventPublisher getApplicationEventPublisher() {
+		return this.applicationEventPublisher;
+	}
+
 	/**
 	 * <p>
 	 * Flag controlling the behaviour of the container with respect to message acknowledgement. The most common usage is
 	 * to let the container handle the acknowledgements (so the listener doesn't need to know about the channel or the
 	 * message).
-	 * </p>
 	 * <p>
 	 * Set to {@link AcknowledgeMode#MANUAL} if the listener will send the acknowledgements itself using
 	 * {@link Channel#basicAck(long, boolean)}. Manual acks are consistent with either a transactional or
 	 * non-transactional channel, but if you are doing no other work on the channel at the same other than receiving a
 	 * single message then the transaction is probably unnecessary.
-	 * </p>
 	 * <p>
 	 * Set to {@link AcknowledgeMode#NONE} to tell the broker not to expect any acknowledgements, and it will assume all
 	 * messages are acknowledged as soon as they are sent (this is "autoack" in native Rabbit broker terms). If
 	 * {@link AcknowledgeMode#NONE} then the channel cannot be transactional (so the container will fail on start up if
 	 * that flag is accidentally set).
-	 * </p>
-	 *
 	 * @param acknowledgeMode the acknowledge mode to set. Defaults to {@link AcknowledgeMode#AUTO}
-	 *
 	 * @see AcknowledgeMode
 	 */
-	public void setAcknowledgeMode(AcknowledgeMode acknowledgeMode) {
+	public final void setAcknowledgeMode(AcknowledgeMode acknowledgeMode) {
 		this.acknowledgeMode = acknowledgeMode;
 	}
 
@@ -132,7 +234,7 @@ public abstract class AbstractMessageListenerContainer extends RabbitAccessor
 	 * @return the acknowledgeMode
 	 */
 	public AcknowledgeMode getAcknowledgeMode() {
-		return acknowledgeMode;
+		return this.acknowledgeMode;
 	}
 
 	/**
@@ -140,7 +242,8 @@ public abstract class AbstractMessageListenerContainer extends RabbitAccessor
 	 * @param queueName the desired queueName(s) (can not be <code>null</code>)
 	 */
 	public void setQueueNames(String... queueName) {
-		this.queueNames = new CopyOnWriteArrayList<String>(Arrays.asList(queueName));
+		Assert.noNullElements(queueName, "Queue name(s) cannot be null");
+		this.queueNames = new CopyOnWriteArrayList<>(Arrays.asList(queueName));
 	}
 
 	/**
@@ -150,10 +253,10 @@ public abstract class AbstractMessageListenerContainer extends RabbitAccessor
 	public void setQueues(Queue... queues) {
 		List<String> queueNames = new ArrayList<String>(queues.length);
 		for (int i = 0; i < queues.length; i++) {
-			Assert.notNull(queues[i], "Queue must not be null.");
+			Assert.notNull(queues[i], "Queue (" + i + ") must not be null.");
 			queueNames.add(queues[i].getName());
 		}
-		queueNames = new CopyOnWriteArrayList<String>(queueNames);
+		queueNames = new CopyOnWriteArrayList<>(queueNames);
 		this.queueNames = queueNames;
 	}
 
@@ -166,7 +269,7 @@ public abstract class AbstractMessageListenerContainer extends RabbitAccessor
 
 	protected String[] getRequiredQueueNames() {
 		Assert.state(this.queueNames.size() > 0, "Queue names must not be empty.");
-		return this.getQueueNames();
+		return getQueueNames();
 	}
 
 	protected Set<String> getQueueNamesAsSet() {
@@ -191,7 +294,7 @@ public abstract class AbstractMessageListenerContainer extends RabbitAccessor
 		Assert.notNull(queues, "'queues' cannot be null");
 		Assert.noNullElements(queues, "'queues' cannot contain null elements");
 		String[] queueNames = new String[queues.length];
-		for (int i = 0; i< queues.length; i++) {
+		for (int i = 0; i < queues.length; i++) {
 			queueNames[i] = queues[i].getName();
 		}
 		this.addQueueNames(queueNames);
@@ -205,7 +308,6 @@ public abstract class AbstractMessageListenerContainer extends RabbitAccessor
 	public boolean removeQueueNames(String... queueNames) {
 		Assert.notNull(queueNames, "'queueNames' cannot be null");
 		Assert.noNullElements(queueNames, "'queueNames' cannot contain null elements");
-		Assert.isTrue(this.queueNames.size() - queueNames.length > 0, "Cannot remove the last queue");
 		return this.queueNames.removeAll(Arrays.asList(queueNames));
 	}
 
@@ -218,7 +320,7 @@ public abstract class AbstractMessageListenerContainer extends RabbitAccessor
 		Assert.notNull(queues, "'queues' cannot be null");
 		Assert.noNullElements(queues, "'queues' cannot contain null elements");
 		String[] queueNames = new String[queues.length];
-		for (int i = 0; i< queues.length; i++) {
+		for (int i = 0; i < queues.length; i++) {
 			queueNames[i] = queues[i].getName();
 		}
 		return this.removeQueueNames(queueNames);
@@ -251,17 +353,39 @@ public abstract class AbstractMessageListenerContainer extends RabbitAccessor
 	}
 
 	/**
-	 * Set the message listener implementation to register. This can be either a Spring {@link MessageListener} object
-	 * or a Spring {@link ChannelAwareMessageListener} object.
+	 * Set the message listener implementation to register. This can be either a Spring
+	 * {@link MessageListener} object or a Spring {@link ChannelAwareMessageListener}
+	 * object. Using the strongly typed
+	 * {@link #setChannelAwareMessageListener(ChannelAwareMessageListener)} is preferred.
 	 *
 	 * @param messageListener The listener.
-	 * @throws IllegalArgumentException if the supplied listener is not a {@link MessageListener} or a
-	 * {@link ChannelAwareMessageListener}
+	 * @throws IllegalArgumentException if the supplied listener is not a
+	 * {@link MessageListener} or a {@link ChannelAwareMessageListener}
 	 * @see MessageListener
 	 * @see ChannelAwareMessageListener
 	 */
 	public void setMessageListener(Object messageListener) {
 		checkMessageListener(messageListener);
+		this.messageListener = messageListener;
+	}
+
+	/**
+	 * Set the {@link MessageListener}; strongly typed version of
+	 * {@link #setMessageListener(Object)}.
+	 * @param messageListener the listener.
+	 * @since 2.0
+	 */
+	public void setMessageListener(MessageListener messageListener) {
+		this.messageListener = messageListener;
+	}
+
+	/**
+	 * Set the {@link ChannelAwareMessageListener}; strongly typed version of
+	 * {@link #setMessageListener(Object)}.
+	 * @param messageListener the listener.
+	 * @since 2.0
+	 */
+	public void setChannelAwareMessageListener(ChannelAwareMessageListener messageListener) {
 		this.messageListener = messageListener;
 	}
 
@@ -309,7 +433,7 @@ public abstract class AbstractMessageListenerContainer extends RabbitAccessor
 
 	@Override
 	public MessageConverter getMessageConverter() {
-		return messageConverter;
+		return this.messageConverter;
 	}
 
 	/**
@@ -319,6 +443,22 @@ public abstract class AbstractMessageListenerContainer extends RabbitAccessor
 	 */
 	public void setDeBatchingEnabled(boolean deBatchingEnabled) {
 		this.deBatchingEnabled = deBatchingEnabled;
+	}
+
+	/**
+	 * Public setter for the {@link Advice} to apply to listener executions.
+	 * <p>
+	 * If a {code #setTransactionManager(PlatformTransactionManager) transactionManager} is provided as well, then
+	 * separate advice is created for the transaction and applied first in the chain. In that case the advice chain
+	 * provided here should not contain a transaction interceptor (otherwise two transactions would be be applied).
+	 * @param adviceChain the advice chain to set
+	 */
+	public void setAdviceChain(Advice... adviceChain) {
+		this.adviceChain = Arrays.copyOf(adviceChain, adviceChain.length);
+	}
+
+	protected Advice[] getAdviceChain() {
+		return this.adviceChain;
 	}
 
 	/**
@@ -382,7 +522,7 @@ public abstract class AbstractMessageListenerContainer extends RabbitAccessor
 	}
 
 	protected final ApplicationContext getApplicationContext() {
-		return applicationContext;
+		return this.applicationContext;
 	}
 
 	@Override
@@ -416,13 +556,334 @@ public abstract class AbstractMessageListenerContainer extends RabbitAccessor
 	}
 
 	/**
+	 * Set the implementation of {@link ConsumerTagStrategy} to generate consumer tags.
+	 * By default, the RabbitMQ server generates consumer tags.
+	 * @param consumerTagStrategy the consumerTagStrategy to set.
+	 * @since 1.4.5
+	 */
+	public void setConsumerTagStrategy(ConsumerTagStrategy consumerTagStrategy) {
+		this.consumerTagStrategy = consumerTagStrategy;
+	}
+
+	/**
+	 * Return the consumer tag strategy to use.
+	 * @return the strategy.
+	 * @since 2.0
+	 */
+	protected ConsumerTagStrategy getConsumerTagStrategy() {
+		return this.consumerTagStrategy;
+	}
+
+	/**
+	 * Set consumer arguments.
+	 * @param args the arguments.
+	 * @since 1.3
+	 */
+	public void setConsumerArguments(Map<String, Object> args) {
+		synchronized (this.consumersMonitor) {
+			this.consumerArgs.clear();
+			this.consumerArgs.putAll(args);
+		}
+	}
+
+	/**
+	 * Return the consumer arguments.
+	 * @return the arguments.
+	 * @since 2.0
+	 */
+	protected Map<String, Object> getConsumerArguments() {
+		return this.consumerArgs;
+	}
+
+	/**
+	 * Set to true for an exclusive consumer.
+	 * @param exclusive true for an exclusive consumer.
+	 */
+	public void setExclusive(boolean exclusive) {
+		this.exclusive = exclusive;
+	}
+
+	/**
+	 * Return whether the consumers should be exclusive.
+	 * @return true for exclusive consumers.
+	 */
+	protected boolean isExclusive() {
+		return this.exclusive;
+	}
+
+	/**
+	 * Set the default behavior when a message is rejected, for example because the listener
+	 * threw an exception. When true, messages will be requeued, when false, they will not. For
+	 * versions of Rabbit that support dead-lettering, the message must not be requeued in order
+	 * to be sent to the dead letter exchange. Setting to false causes all rejections to not
+	 * be requeued. When true, the default can be overridden by the listener throwing an
+	 * {@link AmqpRejectAndDontRequeueException}. Default true.
+	 * @param defaultRequeueRejected true to reject by default.
+	 */
+	public void setDefaultRequeueRejected(boolean defaultRequeueRejected) {
+		this.defaultRequeueRejected = defaultRequeueRejected;
+	}
+
+	/**
+	 * Return the default requeue rejected.
+	 * @return the boolean.
+	 * @see #setDefaultRequeueRejected(boolean)
+	 * @since 2.0
+	 */
+	protected boolean isDefaultRequeueRejected() {
+		return this.defaultRequeueRejected;
+	}
+
+	/**
+	 * Tell the broker how many messages to send to each consumer in a single request.
+	 * Often this can be set quite high to improve throughput.
+	 * @param prefetchCount the prefetch count
+	 */
+	public void setPrefetchCount(int prefetchCount) {
+		this.prefetchCount = prefetchCount;
+	}
+
+	/**
+	 * Return the prefetch count.
+	 * @return the count.
+	 * @since 2.0
+	 */
+	protected int getPrefetchCount() {
+		return this.prefetchCount;
+	}
+
+	/**
+	 * The time to wait for workers in milliseconds after the container is stopped. If any
+	 * workers are active when the shutdown signal comes they will be allowed to finish
+	 * processing as long as they can finish within this timeout. Defaults
+	 * to 5 seconds.
+	 * @param shutdownTimeout the shutdown timeout to set
+	 */
+	public void setShutdownTimeout(long shutdownTimeout) {
+		this.shutdownTimeout = shutdownTimeout;
+	}
+
+	protected long getShutdownTimeout() {
+		return this.shutdownTimeout;
+	}
+
+	/**
+	 * How often to emit {@link ListenerContainerIdleEvent}s in milliseconds.
+	 * @param idleEventInterval the interval.
+	 */
+	public void setIdleEventInterval(long idleEventInterval) {
+		this.idleEventInterval = idleEventInterval;
+	}
+
+	protected long getIdleEventInterval() {
+		return this.idleEventInterval;
+	}
+
+	/**
+	 * Get the time the last message was received - initialized to container start
+	 * time.
+	 * @return the time.
+	 */
+	protected long getLastReceive() {
+		return this.lastReceive;
+	}
+
+	/**
+	 * Set the transaction manager to use.
+	 * @param transactionManager the transaction manager.
+	 */
+	public void setTransactionManager(PlatformTransactionManager transactionManager) {
+		this.transactionManager = transactionManager;
+	}
+
+	protected PlatformTransactionManager getTransactionManager() {
+		return this.transactionManager;
+	}
+
+	/**
+	 * Set the transaction attribute to use when using an external transaction manager.
+	 * @param transactionAttribute the transaction attribute to set
+	 */
+	public void setTransactionAttribute(TransactionAttribute transactionAttribute) {
+		this.transactionAttribute = transactionAttribute;
+	}
+
+	protected TransactionAttribute getTransactionAttribute() {
+		return this.transactionAttribute;
+	}
+
+	/**
+	 * Set a task executor for the container - used to create the consumers not at
+	 * runtime.
+	 * @param taskExecutor the task executor.
+	 */
+	public void setTaskExecutor(Executor taskExecutor) {
+		this.taskExecutor = taskExecutor;
+		this.taskExecutorSet = true;
+	}
+
+	protected Executor getTaskExecutor() {
+		return this.taskExecutor;
+	}
+
+	/**
+	 * Specify the interval between recovery attempts, in <b>milliseconds</b>.
+	 * The default is 5000 ms, that is, 5 seconds.
+	 * @param recoveryInterval The recovery interval.
+	 */
+	public void setRecoveryInterval(long recoveryInterval) {
+		this.recoveryBackOff = new FixedBackOff(recoveryInterval, FixedBackOff.UNLIMITED_ATTEMPTS);
+	}
+
+	/**
+	 * Specify the {@link BackOff} for interval between recovery attempts.
+	 * The default is 5000 ms, that is, 5 seconds.
+	 * With the {@link BackOff} you can supply the {@code maxAttempts} for recovery before
+	 * the {@link #stop()} will be performed.
+	 * @param recoveryBackOff The BackOff to recover.
+	 * @since 1.5
+	 */
+	public void setRecoveryBackOff(BackOff recoveryBackOff) {
+		Assert.notNull(recoveryBackOff, "'recoveryBackOff' must not be null.");
+		this.recoveryBackOff = recoveryBackOff;
+	}
+
+	protected BackOff getRecoveryBackOff() {
+		return this.recoveryBackOff;
+	}
+
+	/**
+	 * Set the {@link MessagePropertiesConverter} for this listener container.
+	 * @param messagePropertiesConverter The properties converter.
+	 */
+	public void setMessagePropertiesConverter(MessagePropertiesConverter messagePropertiesConverter) {
+		Assert.notNull(messagePropertiesConverter, "messagePropertiesConverter must not be null");
+		this.messagePropertiesConverter = messagePropertiesConverter;
+	}
+
+	protected MessagePropertiesConverter getMessagePropertiesConverter() {
+		return this.messagePropertiesConverter;
+	}
+
+	protected RabbitAdmin getRabbitAdmin() {
+		return this.rabbitAdmin;
+	}
+
+	/**
+	 * Set the {@link RabbitAdmin}, used to declare any auto-delete queues, bindings
+	 * etc when the container is started. Only needed if those queues use conditional
+	 * declaration (have a 'declared-by' attribute). If not specified, an internal
+	 * admin will be used which will attempt to declare all elements not having a
+	 * 'declared-by' attribute.
+	 * @param rabbitAdmin The admin.
+	 */
+	public final void setRabbitAdmin(RabbitAdmin rabbitAdmin) {
+		this.rabbitAdmin = rabbitAdmin;
+	}
+
+	/**
+	 * If all of the configured queue(s) are not available on the broker, this setting
+	 * determines whether the condition is fatal. When true, and
+	 * the queues are missing during startup, the context refresh() will fail.
+	 * <p> When false, the condition is not considered fatal and the container will
+	 * continue to attempt to start the consumers.
+	 * @param missingQueuesFatal the missingQueuesFatal to set.
+	 * @since 1.3.5
+	 * @see #setAutoDeclare(boolean)
+	 */
+	public void setMissingQueuesFatal(boolean missingQueuesFatal) {
+		this.missingQueuesFatal = missingQueuesFatal;
+		this.missingQueuesFatalSet = true;
+	}
+
+	protected boolean isMissingQueuesFatal() {
+		return this.missingQueuesFatal;
+	}
+
+	protected boolean isMissingQueuesFatalSet() {
+		return this.missingQueuesFatalSet;
+	}
+
+	/**
+	 * Prevent the container from starting if any of the queues defined in the context have
+	 * mismatched arguments (TTL etc). Default false.
+	 * @param mismatchedQueuesFatal true to fail initialization when this condition occurs.
+	 * @since 1.6
+	 */
+	public void setMismatchedQueuesFatal(boolean mismatchedQueuesFatal) {
+		this.mismatchedQueuesFatal = mismatchedQueuesFatal;
+	}
+
+	protected boolean isMismatchedQueuesFatal() {
+		return this.mismatchedQueuesFatal;
+	}
+
+	/**
+	 * Set to true to automatically declare elements (queues, exchanges, bindings)
+	 * in the application context during container start().
+	 * @param autoDeclare the boolean flag to indicate an declaration operation.
+	 * @since 1.4
+	 * @see #redeclareElementsIfNecessary
+	 */
+	public void setAutoDeclare(boolean autoDeclare) {
+		this.autoDeclare = autoDeclare;
+	}
+
+	protected boolean isAutoDeclare() {
+		return this.autoDeclare;
+	}
+
+	/**
+	 * Set the interval between passive queue declaration attempts in milliseconds.
+	 * @param failedDeclarationRetryInterval the interval, default 5000.
+	 * @since 1.3.9
+	 */
+	public void setFailedDeclarationRetryInterval(long failedDeclarationRetryInterval) {
+		this.failedDeclarationRetryInterval = failedDeclarationRetryInterval;
+	}
+
+	protected long getFailedDeclarationRetryInterval() {
+		return this.failedDeclarationRetryInterval;
+	}
+
+	protected boolean isStatefulRetryFatalWithNullMessageId() {
+		return this.statefulRetryFatalWithNullMessageId;
+	}
+
+	/**
+	 * Set whether a message with a null messageId is fatal for the consumer
+	 * when using stateful retry. When false, instead of stopping the consumer,
+	 * the message is rejected and not requeued - it will be discarded or routed
+	 * to the dead letter queue, if so configured. Default true.
+	 * @param statefulRetryFatalWithNullMessageId true for fatal.
+	 * @since 2.0
+	 */
+	public void setStatefulRetryFatalWithNullMessageId(boolean statefulRetryFatalWithNullMessageId) {
+		this.statefulRetryFatalWithNullMessageId = statefulRetryFatalWithNullMessageId;
+	}
+
+	/**
+	 * Set a {@link ConditionalExceptionLogger} for logging exclusive consumer failures. The
+	 * default is to log such failures at WARN level.
+	 * @param exclusiveConsumerExceptionLogger the conditional exception logger.
+	 * @since 1.5
+	 */
+	public void setExclusiveConsumerExceptionLogger(ConditionalExceptionLogger exclusiveConsumerExceptionLogger) {
+		this.exclusiveConsumerExceptionLogger = exclusiveConsumerExceptionLogger;
+	}
+
+	protected ConditionalExceptionLogger getExclusiveConsumerExceptionLogger() {
+		return this.exclusiveConsumerExceptionLogger;
+	}
+
+	/**
 	 * Delegates to {@link #validateConfiguration()} and {@link #initialize()}.
 	 */
 	@Override
 	public final void afterPropertiesSet() {
 		super.afterPropertiesSet();
 		Assert.state(
-				exposeListenerChannel || !getAcknowledgeMode().isManual(),
+				this.exposeListenerChannel || !getAcknowledgeMode().isManual(),
 				"You cannot acknowledge messages manually if the channel is not exposed to the listener "
 						+ "(please check your configuration and set exposeListenerChannel=true or acknowledgeMode!=MANUAL)");
 		Assert.state(
@@ -444,6 +905,19 @@ public abstract class AbstractMessageListenerContainer extends RabbitAccessor
 	 * The default implementation is empty. To be overridden in subclasses.
 	 */
 	protected void validateConfiguration() {
+	}
+
+	protected void initializeProxy(Object delegate) {
+		if (this.getAdviceChain().length == 0) {
+			return;
+		}
+		ProxyFactory factory = new ProxyFactory();
+		for (Advice advice : getAdviceChain()) {
+			factory.addAdvisor(new DefaultPointcutAdvisor(advice));
+		}
+		factory.addInterface(ContainerDelegate.class);
+		factory.setTarget(delegate);
+		this.proxy = (ContainerDelegate) factory.getProxy(ContainerDelegate.class.getClassLoader());
 	}
 
 	/**
@@ -469,8 +943,24 @@ public abstract class AbstractMessageListenerContainer extends RabbitAccessor
 			synchronized (this.lifecycleMonitor) {
 				this.lifecycleMonitor.notifyAll();
 			}
+			initializeProxy(this.delegate);
 			doInitialize();
-		} catch (Exception ex) {
+			if (!this.isExposeListenerChannel() && this.transactionManager != null) {
+				logger.warn("exposeListenerChannel=false is ignored when using a TransactionManager");
+			}
+			if (!this.taskExecutorSet && StringUtils.hasText(this.getBeanName())) {
+				this.taskExecutor = new SimpleAsyncTaskExecutor(this.getBeanName() + "-");
+				this.taskExecutorSet = true;
+			}
+			if (this.transactionManager != null) {
+				if (!isChannelTransacted()) {
+					logger.debug("The 'channelTransacted' is coerced to 'true', when 'transactionManager' is provided");
+					setChannelTransacted(true);
+				}
+
+			}
+		}
+		catch (Exception ex) {
 			throw convertRabbitAccessException(ex);
 		}
 	}
@@ -488,9 +978,11 @@ public abstract class AbstractMessageListenerContainer extends RabbitAccessor
 		// Shut down the invokers.
 		try {
 			doShutdown();
-		} catch (Exception ex) {
+		}
+		catch (Exception ex) {
 			throw convertRabbitAccessException(ex);
-		} finally {
+		}
+		finally {
 			synchronized (this.lifecycleMonitor) {
 				this.running = false;
 				this.lifecycleMonitor.notifyAll();
@@ -532,11 +1024,11 @@ public abstract class AbstractMessageListenerContainer extends RabbitAccessor
 	 */
 	@Override
 	public void start() {
-		if (!initialized) {
+		if (!this.initialized) {
 			synchronized (this.lifecycleMonitor) {
-				if (!initialized) {
+				if (!this.initialized) {
 					afterPropertiesSet();
-					initialized = true;
+					this.initialized = true;
 				}
 			}
 		}
@@ -544,8 +1036,11 @@ public abstract class AbstractMessageListenerContainer extends RabbitAccessor
 			if (logger.isDebugEnabled()) {
 				logger.debug("Starting Rabbit listener container.");
 			}
+			configureAdminIfNeeded();
+			checkMismatchedQueues();
 			doStart();
-		} catch (Exception ex) {
+		}
+		catch (Exception ex) {
 			throw convertRabbitAccessException(ex);
 		}
 	}
@@ -572,9 +1067,11 @@ public abstract class AbstractMessageListenerContainer extends RabbitAccessor
 	public void stop() {
 		try {
 			doStop();
-		} catch (Exception ex) {
+		}
+		catch (Exception ex) {
 			throw convertRabbitAccessException(ex);
-		} finally {
+		}
+		finally {
 			synchronized (this.lifecycleMonitor) {
 				this.running = false;
 				this.lifecycleMonitor.notifyAll();
@@ -584,15 +1081,15 @@ public abstract class AbstractMessageListenerContainer extends RabbitAccessor
 
 	@Override
 	public void stop(Runnable callback) {
-		this.stop();
+		stop();
 		callback.run();
 	}
 
 	/**
-	 * This method is invoked when the container is stopping. The default implementation does nothing, but subclasses
-	 * may override.
+	 * This method is invoked when the container is stopping.
 	 */
 	protected void doStop() {
+		shutdown();
 	}
 
 	/**
@@ -632,12 +1129,12 @@ public abstract class AbstractMessageListenerContainer extends RabbitAccessor
 	 *
 	 * @param channel the Rabbit Channel to operate on
 	 * @param messageIn the received Rabbit Message
-	 * @throws Throwable Any Throwable.
+	 * @throws Exception Any Exception.
 	 *
 	 * @see #invokeListener
 	 * @see #handleListenerException
 	 */
-	protected void executeListener(Channel channel, Message messageIn) throws Throwable {
+	protected void executeListener(Channel channel, Message messageIn) throws Exception {
 		if (!isRunning()) {
 			if (logger.isWarnEnabled()) {
 				logger.warn("Rejecting received message because the listener container has been stopped: " + messageIn);
@@ -676,9 +1173,24 @@ public abstract class AbstractMessageListenerContainer extends RabbitAccessor
 			}
 		}
 		catch (Exception ex) {
+			if (messageIn.getMessageProperties().isFinalRetryForMessageWithNoId()) {
+				if (this.statefulRetryFatalWithNullMessageId) {
+					throw new FatalListenerExecutionException(
+							"Illegal null id in message. Failed to manage retry for message: " + messageIn);
+				}
+				else {
+					throw new ListenerExecutionFailedException("Cannot retry message more than once without an ID",
+							new AmqpRejectAndDontRequeueException("Not retryable; rejecting and not requeuing", ex),
+									messageIn);
+				}
+			}
 			handleListenerException(ex);
 			throw ex;
 		}
+	}
+
+	protected void invokeListener(Channel channel, Message message) throws Exception {
+		this.proxy.invokeListener(channel, message);
 	}
 
 	/**
@@ -688,13 +1200,13 @@ public abstract class AbstractMessageListenerContainer extends RabbitAccessor
 	 * @throws Exception if thrown by Rabbit API methods
 	 * @see #setMessageListener
 	 */
-	protected void invokeListener(Channel channel, Message message) throws Exception {
+	protected void actualInvokeListener(Channel channel, Message message) throws Exception {
 		Object listener = getMessageListener();
 		if (listener instanceof ChannelAwareMessageListener) {
 			doInvokeListener((ChannelAwareMessageListener) listener, channel, message);
 		}
 		else if (listener instanceof MessageListener) {
-			boolean bindChannel = isExposeListenerChannel() && isChannelLocallyTransacted(channel);
+			boolean bindChannel = isExposeListenerChannel() && isChannelLocallyTransacted();
 			if (bindChannel) {
 				RabbitResourceHolder resourceHolder = new RabbitResourceHolder(channel, false);
 				resourceHolder.setSynchronizedWithTransaction(true);
@@ -748,7 +1260,7 @@ public abstract class AbstractMessageListenerContainer extends RabbitAccessor
 				 * we need to bind it temporarily here. Any work done on this channel
 				 * will be committed in the finally block.
 				 */
-				if (isChannelLocallyTransacted(channelToUse) &&
+				if (isChannelLocallyTransacted() &&
 							!TransactionSynchronizationManager.isActualTransactionActive()) {
 						resourceHolder.setSynchronizedWithTransaction(true);
 						TransactionSynchronizationManager.bindResource(this.getConnectionFactory(),
@@ -758,7 +1270,7 @@ public abstract class AbstractMessageListenerContainer extends RabbitAccessor
 			}
 			else {
 				// if locally transacted, bind the current channel to make it available to RabbitTemplate
-				if (isChannelLocallyTransacted(channel)) {
+				if (isChannelLocallyTransacted()) {
 					RabbitResourceHolder localResourceHolder = new RabbitResourceHolder(channelToUse, false);
 					localResourceHolder.setSynchronizedWithTransaction(true);
 					TransactionSynchronizationManager.bindResource(this.getConnectionFactory(),
@@ -783,7 +1295,7 @@ public abstract class AbstractMessageListenerContainer extends RabbitAccessor
 			if (boundHere) {
 				// unbind if we bound
 				TransactionSynchronizationManager.unbindResource(this.getConnectionFactory());
-				if (!isExposeListenerChannel() && isChannelLocallyTransacted(channelToUse)) {
+				if (!isExposeListenerChannel() && isChannelLocallyTransacted()) {
 					/*
 					 *  commit the temporary channel we exposed; the consumer's channel
 					 *  will be committed later. Note that when exposing a different channel
@@ -823,12 +1335,11 @@ public abstract class AbstractMessageListenerContainer extends RabbitAccessor
 	 * listener container's Channel handling and not by an external transaction coordinator.
 	 * <p>
 	 * Note:This method is about finding out whether the Channel's transaction is local or externally coordinated.
-	 * @param channel the Channel to check
 	 * @return whether the given Channel is locally transacted
 	 * @see #isChannelTransacted()
 	 */
-	protected boolean isChannelLocallyTransacted(Channel channel) {
-		return this.isChannelTransacted();
+	protected boolean isChannelLocallyTransacted() {
+		return this.isChannelTransacted() && this.transactionManager == null;
 	}
 
 	/**
@@ -844,11 +1355,144 @@ public abstract class AbstractMessageListenerContainer extends RabbitAccessor
 			// Regular case: failed while active.
 			// Invoke ErrorHandler if available.
 			invokeErrorHandler(ex);
-		} else {
+		}
+		else {
 			// Rare case: listener thread failed after container shutdown.
 			// Log at debug level, to avoid spamming the shutdown log.
 			logger.debug("Listener exception after container shutdown", ex);
 		}
+	}
+
+	/**
+	 * @param e The Exception.
+	 * @param message The failed message.
+	 * @return If 'e' is of type {@link ListenerExecutionFailedException} - return 'e' as it is, otherwise wrap it to
+	 * {@link ListenerExecutionFailedException} and return.
+	 */
+	protected Exception wrapToListenerExecutionFailedExceptionIfNeeded(Exception e, Message message) {
+		if (!(e instanceof ListenerExecutionFailedException)) {
+			// Wrap exception to ListenerExecutionFailedException.
+			return new ListenerExecutionFailedException("Listener threw exception", e, message);
+		}
+		return e;
+	}
+
+	protected final void publishConsumerFailedEvent(String reason, boolean fatal, Throwable t) {
+		if (this.applicationEventPublisher != null) {
+			this.applicationEventPublisher
+					.publishEvent(t == null ? new ListenerContainerConsumerTerminatedEvent(this, reason) :
+							new ListenerContainerConsumerFailedEvent(this, reason, t, fatal));
+		}
+	}
+
+	protected final void publishIdleContainerEvent(long idleTime) {
+		if (this.applicationEventPublisher != null) {
+			this.applicationEventPublisher.publishEvent(
+					new ListenerContainerIdleEvent(this, idleTime, getListenerId(), getQueueNames()));
+		}
+	}
+
+	protected void updateLastReceive() {
+		if (this.idleEventInterval > 0) {
+			this.lastReceive = System.currentTimeMillis();
+		}
+	}
+
+	protected void configureAdminIfNeeded() {
+		if (this.rabbitAdmin == null && this.getApplicationContext() != null) {
+			Map<String, RabbitAdmin> admins = this.getApplicationContext().getBeansOfType(RabbitAdmin.class);
+			if (admins.size() == 1) {
+				this.rabbitAdmin = admins.values().iterator().next();
+			}
+			else {
+				if (isAutoDeclare() || isMismatchedQueuesFatal()) {
+					if (logger.isDebugEnabled()) {
+						logger.debug("For 'autoDeclare' and 'mismatchedQueuesFatal' to work, there must be exactly one "
+								+ "RabbitAdmin in the context or you must inject one into this container; found: "
+								+ admins.size() + " for container " + this.toString());
+					}
+				}
+				if (isMismatchedQueuesFatal()) {
+					throw new IllegalStateException("When 'mismatchedQueuesFatal' is 'true', there must be exactly "
+							+ "one RabbitAdmin in the context or you must inject one into this container; found: "
+							+ admins.size() + " for container " + this.toString());
+				}
+			}
+		}
+	}
+
+	protected void checkMismatchedQueues() {
+		if (this.mismatchedQueuesFatal && this.rabbitAdmin != null) {
+			try {
+				this.rabbitAdmin.initialize();
+			}
+			catch (AmqpConnectException e) {
+				logger.info("Broker not available; cannot check queue declarations");
+			}
+			catch (AmqpIOException e) {
+				if (RabbitUtils.isMismatchedQueueArgs(e)) {
+					throw new FatalListenerStartupException("Mismatched queues", e);
+				}
+				else {
+					logger.info("Failed to get connection during start(): " + e);
+				}
+			}
+		}
+	}
+
+	/**
+	 * Use {@link RabbitAdmin#initialize()} to redeclare everything if necessary.
+	 * Since auto deletion of a queue can cause upstream elements
+	 * (bindings, exchanges) to be deleted too, everything needs to be redeclared if
+	 * a queue is missing.
+	 * Declaration is idempotent so, aside from some network chatter, there is no issue,
+	 * and we only will do it if we detect our queue is gone.
+	 * <p>
+	 * In general it makes sense only for the 'auto-delete' or 'expired' queues,
+	 * but with the server TTL policy we don't have ability to determine 'expiration'
+	 * option for the queue.
+	 * <p>
+	 * Starting with version 1.6, if
+	 * {@link #setMismatchedQueuesFatal(boolean) mismatchedQueuesFatal} is true,
+	 * the declarations are always attempted during restart so the listener will
+	 * fail with a fatal error if mismatches occur.
+	 */
+	protected synchronized void redeclareElementsIfNecessary() {
+		RabbitAdmin rabbitAdmin = getRabbitAdmin();
+		if (rabbitAdmin == null || !isAutoDeclare()) {
+			return;
+		}
+		try {
+			ApplicationContext applicationContext = this.getApplicationContext();
+			if (applicationContext != null) {
+				Set<String> queueNames = this.getQueueNamesAsSet();
+				Map<String, Queue> queueBeans = applicationContext.getBeansOfType(Queue.class);
+				for (Entry<String, Queue> entry : queueBeans.entrySet()) {
+					Queue queue = entry.getValue();
+					if (isMismatchedQueuesFatal() || (queueNames.contains(queue.getName()) &&
+							rabbitAdmin.getQueueProperties(queue.getName()) == null)) {
+						if (logger.isDebugEnabled()) {
+							logger.debug("Redeclaring context exchanges, queues, bindings.");
+						}
+						rabbitAdmin.initialize();
+						return;
+					}
+				}
+			}
+		}
+		catch (Exception e) {
+			if (RabbitUtils.isMismatchedQueueArgs(e)) {
+				throw new FatalListenerStartupException("Mismatched queues", e);
+			}
+			logger.error("Failed to check/redeclare auto-delete queue(s).", e);
+		}
+	}
+
+	@FunctionalInterface
+	private interface ContainerDelegate {
+
+		void invokeListener(Channel channel, Message message) throws Exception;
+
 	}
 
 	/**
@@ -867,17 +1511,46 @@ public abstract class AbstractMessageListenerContainer extends RabbitAccessor
 		}
 	}
 
-	/**
-	 * @param e The Exception.
-	 * @param message The failed message.
-	 * @return If 'e' is of type {@link ListenerExecutionFailedException} - return 'e' as it is, otherwise wrap it to
-	 * {@link ListenerExecutionFailedException} and return.
-	 */
-	protected Exception wrapToListenerExecutionFailedExceptionIfNeeded(Exception e, Message message) {
-		if (!(e instanceof ListenerExecutionFailedException)) {
-			// Wrap exception to ListenerExecutionFailedException.
-			return new ListenerExecutionFailedException("Listener threw exception", e, message);
+	@SuppressWarnings("serial")
+	protected static final class WrappedTransactionException extends RuntimeException {
+
+		protected WrappedTransactionException(Throwable cause) {
+			super(cause);
 		}
-		return e;
+
 	}
+
+	/**
+	 * Default implementation of {@link ConditionalExceptionLogger} for logging exclusive
+	 * consumer failures.
+	 * @since 1.5
+	 */
+	private static class DefaultExclusiveConsumerLogger implements ConditionalExceptionLogger {
+
+		DefaultExclusiveConsumerLogger() {
+			super();
+		}
+
+		@Override
+		public void log(Log logger, String message, Throwable t) {
+			if (t instanceof ShutdownSignalException) {
+				ShutdownSignalException cause = (ShutdownSignalException) t;
+				if (RabbitUtils.isExclusiveUseChannelClose(cause)) {
+					if (logger.isWarnEnabled()) {
+						logger.warn(message + ": " + cause.toString());
+					}
+				}
+				else if (!RabbitUtils.isNormalChannelClose(cause)) {
+					logger.error(message + ": " + cause.getMessage());
+				}
+			}
+			else {
+				if (logger.isErrorEnabled()) {
+					logger.error("Unexpected invocation of " + this.getClass() + ", with message: " + message, t);
+				}
+			}
+		}
+
+	}
+
 }

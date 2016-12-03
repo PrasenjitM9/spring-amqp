@@ -32,14 +32,12 @@ import org.springframework.amqp.core.Queue;
 import org.springframework.amqp.core.TopicExchange;
 import org.springframework.amqp.rabbit.connection.CachingConnectionFactory;
 import org.springframework.amqp.rabbit.connection.RabbitAccessor;
+import org.springframework.amqp.rabbit.junit.BrokerRunning;
+import org.springframework.amqp.rabbit.junit.BrokerTestUtils;
 import org.springframework.amqp.rabbit.listener.ActiveObjectCounter;
 import org.springframework.amqp.rabbit.listener.BlockingQueueConsumer;
 import org.springframework.amqp.rabbit.support.DefaultMessagePropertiesConverter;
-import org.springframework.amqp.rabbit.test.BrokerRunning;
-import org.springframework.amqp.rabbit.test.BrokerTestUtils;
 import org.springframework.amqp.support.converter.SimpleMessageConverter;
-
-import com.rabbitmq.client.Channel;
 
 /**
  * @author Dave Syer
@@ -55,7 +53,7 @@ public class RabbitBindingIntegrationTests {
 	private RabbitTemplate template;
 
 	@Rule
-	public BrokerRunning brokerIsRunning = BrokerRunning.isRunningWithEmptyQueues(queue);
+	public BrokerRunning brokerIsRunning = BrokerRunning.isRunningWithEmptyQueues(queue.getName());
 
 	@Before
 	public void setup() {
@@ -82,35 +80,32 @@ public class RabbitBindingIntegrationTests {
 
 		admin.declareBinding(BindingBuilder.bind(queue).to(exchange).with("*.end"));
 
-		template.execute(new ChannelCallback<Void>() {
-			@Override
-			public Void doInRabbit(Channel channel) throws Exception {
+		template.execute(channel -> {
 
-				BlockingQueueConsumer consumer = createConsumer(template);
-				String tag = consumer.getConsumerTag();
-				assertNotNull(tag);
+			BlockingQueueConsumer consumer = createConsumer(template);
+			String tag = consumer.getConsumerTag();
+			assertNotNull(tag);
 
-				template.convertAndSend("foo", "message");
+			template.convertAndSend("foo", "message");
 
-				try {
+			try {
 
-					String result = getResult(consumer);
-					assertEquals(null, result);
+				String result = getResult(consumer);
+				assertEquals(null, result);
 
-					template.convertAndSend("foo.end", "message");
-					result = getResult(consumer);
-					assertEquals("message", result);
-
-				} finally {
-					consumer.getChannel().basicCancel(tag);
-				}
-
-				return null;
+				template.convertAndSend("foo.end", "message");
+				result = getResult(consumer);
+				assertEquals("message", result);
 
 			}
+			finally {
+				consumer.getChannel().basicCancel(tag);
+			}
+
+			return null;
 
 		});
-
+		admin.deleteExchange("topic");
 	}
 
 	@Test
@@ -122,34 +117,32 @@ public class RabbitBindingIntegrationTests {
 
 		admin.declareBinding(BindingBuilder.bind(queue).to(exchange).with("*.end"));
 
-		template.execute(new ChannelCallback<Void>() {
-			@Override
-			public Void doInRabbit(Channel channel) throws Exception {
+		template.execute(channel -> {
 
-				BlockingQueueConsumer consumer = createConsumer(template);
-				String tag = consumer.getConsumerTag();
-				assertNotNull(tag);
+			BlockingQueueConsumer consumer = createConsumer(template);
+			String tag = consumer.getConsumerTag();
+			assertNotNull(tag);
 
-				template.convertAndSend("topic", "foo", "message");
+			template.convertAndSend("topic", "foo", "message");
 
-				try {
+			try {
 
-					String result = getResult(consumer);
-					assertEquals(null, result);
+				String result = getResult(consumer);
+				assertEquals(null, result);
 
-					template.convertAndSend("topic", "foo.end", "message");
-					result = getResult(consumer);
-					assertEquals("message", result);
-
-				} finally {
-					consumer.getChannel().basicCancel(tag);
-				}
-
-				return null;
+				template.convertAndSend("topic", "foo.end", "message");
+				result = getResult(consumer);
+				assertEquals("message", result);
 
 			}
-		});
+			finally {
+				consumer.getChannel().basicCancel(tag);
+			}
 
+			return null;
+
+		});
+		admin.deleteExchange("topic");
 	}
 
 	@Test
@@ -168,17 +161,14 @@ public class RabbitBindingIntegrationTests {
 		final RabbitTemplate template = new RabbitTemplate(cachingConnectionFactory);
 		template.setExchange(exchange.getName());
 
-		BlockingQueueConsumer consumer = template.execute(new ChannelCallback<BlockingQueueConsumer>() {
-			@Override
-			public BlockingQueueConsumer doInRabbit(Channel channel) throws Exception {
+		BlockingQueueConsumer consumer = template.execute(channel -> {
 
-				BlockingQueueConsumer consumer = createConsumer(template);
-				String tag = consumer.getConsumerTag();
-				assertNotNull(tag);
+			BlockingQueueConsumer consumer1 = createConsumer(template);
+			String tag = consumer1.getConsumerTag();
+			assertNotNull(tag);
 
-				return consumer;
+			return consumer1;
 
-			}
 		});
 
 		template.convertAndSend("foo", "message");
@@ -190,6 +180,7 @@ public class RabbitBindingIntegrationTests {
 		assertEquals("message", result);
 
 		consumer.stop();
+		admin.deleteExchange("topic");
 		cachingConnectionFactory.destroy();
 
 	}
@@ -204,48 +195,44 @@ public class RabbitBindingIntegrationTests {
 
 		admin.declareBinding(BindingBuilder.bind(queue).to(exchange).with("*.end"));
 
-		template.execute(new ChannelCallback<Void>() {
-			@Override
-			public Void doInRabbit(Channel channel) throws Exception {
+		template.execute(channel -> {
 
-				BlockingQueueConsumer consumer = createConsumer(template);
-				String tag = consumer.getConsumerTag();
-				assertNotNull(tag);
+			BlockingQueueConsumer consumer = createConsumer(template);
+			String tag = consumer.getConsumerTag();
+			assertNotNull(tag);
 
-				try {
-					template.convertAndSend("foo", "message");
-					String result = getResult(consumer);
-					assertEquals(null, result);
-				} finally {
-					consumer.stop();
-				}
-
-				return null;
-
+			try {
+				template.convertAndSend("foo", "message");
+				String result = getResult(consumer);
+				assertEquals(null, result);
 			}
+			finally {
+				consumer.stop();
+			}
+
+			return null;
+
 		});
 
-		template.execute(new ChannelCallback<Void>() {
-			@Override
-			public Void doInRabbit(Channel channel) throws Exception {
+		template.execute(channel -> {
 
-				BlockingQueueConsumer consumer = createConsumer(template);
-				String tag = consumer.getConsumerTag();
-				assertNotNull(tag);
+			BlockingQueueConsumer consumer = createConsumer(template);
+			String tag = consumer.getConsumerTag();
+			assertNotNull(tag);
 
-				try {
-					template.convertAndSend("foo.end", "message");
-					String result = getResult(consumer);
-					assertEquals("message", result);
-				} finally {
-					consumer.stop();
-				}
-
-				return null;
-
+			try {
+				template.convertAndSend("foo.end", "message");
+				String result = getResult(consumer);
+				assertEquals("message", result);
 			}
-		});
+			finally {
+				consumer.stop();
+			}
 
+			return null;
+
+		});
+		admin.deleteExchange("topic");
 	}
 
 	@Test
@@ -258,27 +245,25 @@ public class RabbitBindingIntegrationTests {
 
 		admin.declareBinding(BindingBuilder.bind(queue).to(exchange));
 
-		template.execute(new ChannelCallback<Void>() {
-			@Override
-			public Void doInRabbit(Channel channel) throws Exception {
+		template.execute(channel -> {
 
-				BlockingQueueConsumer consumer = createConsumer(template);
-				String tag = consumer.getConsumerTag();
-				assertNotNull(tag);
+			BlockingQueueConsumer consumer = createConsumer(template);
+			String tag = consumer.getConsumerTag();
+			assertNotNull(tag);
 
-				try {
-					template.convertAndSend("message");
-					String result = getResult(consumer);
-					assertEquals("message", result);
-				} finally {
-					consumer.stop();
-				}
-
-				return null;
-
+			try {
+				template.convertAndSend("message");
+				String result = getResult(consumer);
+				assertEquals("message", result);
 			}
-		});
+			finally {
+				consumer.stop();
+			}
 
+			return null;
+
+		});
+		admin.deleteExchange("fanout");
 	}
 
 	private BlockingQueueConsumer createConsumer(RabbitAccessor accessor) {
@@ -309,4 +294,5 @@ public class RabbitBindingIntegrationTests {
 		}
 		return (String) new SimpleMessageConverter().fromMessage(response);
 	}
+
 }

@@ -22,6 +22,8 @@ import org.apache.commons.logging.LogFactory;
 import org.springframework.amqp.AmqpRejectAndDontRequeueException;
 import org.springframework.amqp.rabbit.listener.exception.ListenerExecutionFailedException;
 import org.springframework.amqp.support.converter.MessageConversionException;
+import org.springframework.messaging.handler.annotation.support.MethodArgumentNotValidException;
+import org.springframework.messaging.handler.annotation.support.MethodArgumentTypeMismatchException;
 import org.springframework.util.ErrorHandler;
 
 /**
@@ -32,7 +34,10 @@ import org.springframework.util.ErrorHandler;
  * on broker configuration.
  * <p>
  * The default strategy will do this if the exception is a
- * {@link ListenerExecutionFailedException} with a cause of {@link MessageConversionException}.
+ * {@link ListenerExecutionFailedException} with a cause of {@link MessageConversionException},
+ * {@link org.springframework.messaging.converter.MessageConversionException},
+ * {@link MethodArgumentNotValidException}, {@link MethodArgumentTypeMismatchException},
+ * {@link NoSuchMethodException} or {@link ClassCastException}.
  * <p>
  * The exception will not be wrapped if the {@code cause} chain already contains an
  * {@link AmqpRejectAndDontRequeueException}.
@@ -43,7 +48,7 @@ import org.springframework.util.ErrorHandler;
  */
 public class ConditionalRejectingErrorHandler implements ErrorHandler {
 
-	protected final Log logger = LogFactory.getLog(this.getClass());
+	protected final Log logger = LogFactory.getLog(getClass()); // NOSONAR
 
 	private final FatalExceptionStrategy exceptionStrategy;
 
@@ -64,8 +69,8 @@ public class ConditionalRejectingErrorHandler implements ErrorHandler {
 
 	@Override
 	public void handleError(Throwable t) {
-		if (logger.isWarnEnabled()) {
-			logger.warn("Execution of Rabbit message listener failed.", t);
+		if (this.logger.isWarnEnabled()) {
+			this.logger.warn("Execution of Rabbit message listener failed.", t);
 		}
 		if (!this.causeChainContainsARADRE(t) && this.exceptionStrategy.isFatal(t)) {
 			throw new AmqpRejectAndDontRequeueException("Error Handler converted exception to fatal", t);
@@ -87,19 +92,45 @@ public class ConditionalRejectingErrorHandler implements ErrorHandler {
 		return false;
 	}
 
-	private class DefaultExceptionStrategy implements FatalExceptionStrategy {
+	/**
+	 * Default implementation of {@link FatalExceptionStrategy}.
+	 * @since 1.6.3
+	 */
+	public static class DefaultExceptionStrategy implements FatalExceptionStrategy {
+
+		protected final Log logger = LogFactory.getLog(getClass()); // NOSONAR
 
 		@Override
 		public boolean isFatal(Throwable t) {
 			if (t instanceof ListenerExecutionFailedException
-					&& t.getCause() instanceof MessageConversionException) {
-				if (logger.isWarnEnabled()) {
-					logger.warn("Fatal message conversion error; message rejected; "
+					&& isCauseFatal(t.getCause())) {
+				if (this.logger.isWarnEnabled()) {
+					this.logger.warn(
+							"Fatal message conversion error; message rejected; "
 							+ "it will be dropped or routed to a dead letter exchange, if so configured: "
-							+ ((ListenerExecutionFailedException) t).getFailedMessage(), t);
+							+ ((ListenerExecutionFailedException) t).getFailedMessage());
 				}
 				return true;
 			}
+			return false;
+		}
+
+		private boolean isCauseFatal(Throwable cause) {
+			return cause instanceof MessageConversionException
+					|| cause instanceof org.springframework.messaging.converter.MessageConversionException
+					|| cause instanceof MethodArgumentNotValidException
+					|| cause instanceof MethodArgumentTypeMismatchException
+					|| cause instanceof NoSuchMethodException
+					|| cause instanceof ClassCastException
+					|| isUserCauseFatal(cause);
+		}
+
+		/**
+		 * Subclasses can override this to add custom exceptions.
+		 * @param cause the cause
+		 * @return true if the cause is fatal.
+		 */
+		protected boolean isUserCauseFatal(Throwable cause) {
 			return false;
 		}
 

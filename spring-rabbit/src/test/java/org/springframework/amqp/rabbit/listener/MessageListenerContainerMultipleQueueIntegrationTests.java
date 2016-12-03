@@ -26,7 +26,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
-import org.apache.log4j.Level;
+import org.apache.logging.log4j.Level;
 import org.junit.After;
 import org.junit.Rule;
 import org.junit.Test;
@@ -36,10 +36,10 @@ import org.springframework.amqp.core.AcknowledgeMode;
 import org.springframework.amqp.core.Queue;
 import org.springframework.amqp.rabbit.connection.CachingConnectionFactory;
 import org.springframework.amqp.rabbit.core.RabbitTemplate;
+import org.springframework.amqp.rabbit.junit.BrokerRunning;
+import org.springframework.amqp.rabbit.junit.BrokerTestUtils;
 import org.springframework.amqp.rabbit.listener.adapter.MessageListenerAdapter;
-import org.springframework.amqp.rabbit.test.BrokerRunning;
-import org.springframework.amqp.rabbit.test.BrokerTestUtils;
-import org.springframework.amqp.rabbit.test.Log4jLevelAdjuster;
+import org.springframework.amqp.rabbit.test.LogLevelAdjuster;
 import org.springframework.amqp.support.converter.SimpleMessageConverter;
 
 /**
@@ -56,10 +56,10 @@ public class MessageListenerContainerMultipleQueueIntegrationTests {
 	private static Queue queue2 = new Queue("test.queue.2");
 
 	@Rule
-	public BrokerRunning brokerIsRunning = BrokerRunning.isRunningWithEmptyQueues(queue1, queue2);
+	public BrokerRunning brokerIsRunning = BrokerRunning.isRunningWithEmptyQueues(queue1.getName(), queue2.getName());
 
 	@Rule
-	public Log4jLevelAdjuster logLevels = new Log4jLevelAdjuster(Level.INFO, RabbitTemplate.class,
+	public LogLevelAdjuster logLevels = new LogLevelAdjuster(Level.INFO, RabbitTemplate.class,
 			SimpleMessageListenerContainer.class, BlockingQueueConsumer.class);
 
 	@Rule
@@ -72,42 +72,22 @@ public class MessageListenerContainerMultipleQueueIntegrationTests {
 
 	@Test
 	public void testMultipleQueues() {
-		doTest(1, new ContainerConfigurer() {
-			@Override
-			public void configure(SimpleMessageListenerContainer container) {
-				container.setQueues(queue1, queue2);
-			}
-		});
+		doTest(1, container -> container.setQueues(queue1, queue2));
 	}
 
 	@Test
 	public void testMultipleQueueNames() {
-		doTest(1, new ContainerConfigurer() {
-			@Override
-			public void configure(SimpleMessageListenerContainer container) {
-				container.setQueueNames(queue1.getName(), queue2.getName());
-			}
-		});
+		doTest(1, container -> container.setQueueNames(queue1.getName(), queue2.getName()));
 	}
 
 	@Test
 	public void testMultipleQueuesWithConcurrentConsumers() {
-		doTest(3, new ContainerConfigurer() {
-			@Override
-			public void configure(SimpleMessageListenerContainer container) {
-				container.setQueues(queue1, queue2);
-			}
-		});
+		doTest(3, container -> container.setQueues(queue1, queue2));
 	}
 
 	@Test
 	public void testMultipleQueueNamesWithConcurrentConsumers() {
-		doTest(3, new ContainerConfigurer() {
-			@Override
-			public void configure(SimpleMessageListenerContainer container) {
-				container.setQueueNames(queue1.getName(), queue2.getName());
-			}
-		});
+		doTest(3, container -> container.setQueueNames(queue1.getName(), queue2.getName()));
 	}
 
 
@@ -157,7 +137,7 @@ public class MessageListenerContainerMultipleQueueIntegrationTests {
 		connectionFactory.destroy();
 	}
 
-
+	@FunctionalInterface
 	private interface ContainerConfigurer {
 		void configure(SimpleMessageListenerContainer container);
 	}
@@ -170,7 +150,7 @@ public class MessageListenerContainerMultipleQueueIntegrationTests {
 
 		private final CountDownLatch latch;
 
-		public PojoListener(CountDownLatch latch) {
+		PojoListener(CountDownLatch latch) {
 			this.latch = latch;
 		}
 

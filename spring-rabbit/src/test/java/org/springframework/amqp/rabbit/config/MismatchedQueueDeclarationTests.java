@@ -30,7 +30,7 @@ import org.junit.Test;
 import org.springframework.amqp.rabbit.connection.CachingConnectionFactory;
 import org.springframework.amqp.rabbit.connection.SingleConnectionFactory;
 import org.springframework.amqp.rabbit.core.RabbitAdmin;
-import org.springframework.amqp.rabbit.test.BrokerRunning;
+import org.springframework.amqp.rabbit.junit.BrokerRunning;
 import org.springframework.beans.factory.DisposableBean;
 import org.springframework.context.support.ClassPathXmlApplicationContext;
 import org.springframework.core.env.StandardEnvironment;
@@ -68,7 +68,8 @@ public class MismatchedQueueDeclarationTests {
 		((DisposableBean) connectionFactory).destroy();
 	}
 
-	@Test @Ignore
+	@Test
+	@Ignore
 	public void testAdminFailsWithMismatchedQueue() throws Exception {
 		ClassPathXmlApplicationContext context = new ClassPathXmlApplicationContext();
 		context.setConfigLocation("org/springframework/amqp/rabbit/config/MismatchedQueueDeclarationTests-context.xml");

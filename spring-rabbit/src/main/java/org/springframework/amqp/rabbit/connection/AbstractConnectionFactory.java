@@ -27,6 +27,7 @@ import java.util.concurrent.Executor;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
@@ -39,11 +40,15 @@ import org.springframework.util.Assert;
 import org.springframework.util.StringUtils;
 
 import com.rabbitmq.client.Address;
+import com.rabbitmq.client.Recoverable;
+import com.rabbitmq.client.RecoveryListener;
+import com.rabbitmq.client.impl.recovery.AutorecoveringConnection;
 
 /**
  * @author Dave Syer
  * @author Gary Russell
  * @author Steve Powell
+ * @author Artem Bilan
  *
  */
 public abstract class AbstractConnectionFactory implements ConnectionFactory, DisposableBean, BeanNameAware {
@@ -58,6 +63,26 @@ public abstract class AbstractConnectionFactory implements ConnectionFactory, Di
 
 	private final CompositeChannelListener channelListener = new CompositeChannelListener();
 
+	private final AtomicInteger defaultConnectionNameStrategyCounter = new AtomicInteger();
+
+	private RecoveryListener recoveryListener = new RecoveryListener() {
+
+		@Override
+		public void handleRecoveryStarted(Recoverable recoverable) {
+			if (AbstractConnectionFactory.this.logger.isDebugEnabled()) {
+				AbstractConnectionFactory.this.logger.debug("Connection recovery started: " + recoverable);
+			}
+		}
+
+		@Override
+		public void handleRecovery(Recoverable recoverable) {
+			if (AbstractConnectionFactory.this.logger.isDebugEnabled()) {
+				AbstractConnectionFactory.this.logger.debug("Connection recovery complete: " + recoverable);
+			}
+		}
+
+	};
+
 	private volatile ExecutorService executorService;
 
 	private volatile Address[] addresses;
@@ -65,6 +90,10 @@ public abstract class AbstractConnectionFactory implements ConnectionFactory, Di
 	public static final int DEFAULT_CLOSE_TIMEOUT = 30000;
 
 	private volatile int closeTimeout = DEFAULT_CLOSE_TIMEOUT;
+
+	private ConnectionNameStrategy connectionNameStrategy =
+			connectionFactory -> (this.beanName != null ? this.beanName : "SpringAMQP") +
+					"#" + this.defaultConnectionNameStrategyCounter.getAndIncrement();
 
 	private volatile String beanName;
 
@@ -75,6 +104,25 @@ public abstract class AbstractConnectionFactory implements ConnectionFactory, Di
 	public AbstractConnectionFactory(com.rabbitmq.client.ConnectionFactory rabbitConnectionFactory) {
 		Assert.notNull(rabbitConnectionFactory, "Target ConnectionFactory must not be null");
 		this.rabbitConnectionFactory = rabbitConnectionFactory;
+	}
+
+	/**
+	 * Return a reference to the underlying Rabbit Connection factory.
+	 * @return the connection factory.
+	 * @since 1.5.6
+	 */
+	public com.rabbitmq.client.ConnectionFactory getRabbitConnectionFactory() {
+		return this.rabbitConnectionFactory;
+	}
+
+	/**
+	 * Return the user name from the underlying rabbit connection factory.
+	 * @return the user name.
+	 * @since 1.6
+	 */
+	@Override
+	public String getUsername() {
+		return this.rabbitConnectionFactory.getUsername();
 	}
 
 	public void setUsername(String username) {
@@ -91,9 +139,6 @@ public abstract class AbstractConnectionFactory implements ConnectionFactory, Di
 
 	/**
 	 * Set the {@link ThreadFactory} on the underlying rabbit connection factory.
-	 * Not exposed using XML configuration; define a bean for the Rabbit CF and
-	 * provide it to the Spring CF using the {@code connection-factory} attribute.
-	 * TODO: remove this comment when AMQP-554 is resolved.
 	 * @param threadFactory the thread factory.
 	 * @since 1.5.3
 	 */
@@ -110,11 +155,8 @@ public abstract class AbstractConnectionFactory implements ConnectionFactory, Di
 		try {
 			this.rabbitConnectionFactory.setUri(uri);
 		}
-		catch (URISyntaxException use) {
-			logger.info(BAD_URI, use);
-		}
-		catch (GeneralSecurityException gse) {
-			logger.info(BAD_URI, gse);
+		catch (URISyntaxException | GeneralSecurityException use) {
+			this.logger.info(BAD_URI, use);
 		}
 	}
 
@@ -127,11 +169,8 @@ public abstract class AbstractConnectionFactory implements ConnectionFactory, Di
 		try {
 			this.rabbitConnectionFactory.setUri(uri);
 		}
-		catch (URISyntaxException use) {
-			logger.info(BAD_URI, use);
-		}
-		catch (GeneralSecurityException gse) {
-			logger.info(BAD_URI, gse);
+		catch (URISyntaxException | GeneralSecurityException use) {
+			this.logger.info(BAD_URI, use);
 		}
 	}
 
@@ -146,7 +185,7 @@ public abstract class AbstractConnectionFactory implements ConnectionFactory, Di
 
 	@Override
 	public String getVirtualHost() {
-		return rabbitConnectionFactory.getVirtualHost();
+		return this.rabbitConnectionFactory.getVirtualHost();
 	}
 
 	public void setPort(int port) {
@@ -179,7 +218,7 @@ public abstract class AbstractConnectionFactory implements ConnectionFactory, Di
 				return;
 			}
 		}
-		logger.info("setAddresses() called with an empty value, will be using the host+port properties for connections");
+		this.logger.info("setAddresses() called with an empty value, will be using the host+port properties for connections");
 		this.addresses = null;
 	}
 
@@ -189,7 +228,7 @@ public abstract class AbstractConnectionFactory implements ConnectionFactory, Di
 	 * @return the connection listener
 	 */
 	protected ConnectionListener getConnectionListener() {
-		return connectionListener;
+		return this.connectionListener;
 	}
 
 	/**
@@ -198,7 +237,7 @@ public abstract class AbstractConnectionFactory implements ConnectionFactory, Di
 	 * @return the channel listener
 	 */
 	protected ChannelListener getChannelListener() {
-		return channelListener;
+		return this.channelListener;
 	}
 
 	public void setConnectionListeners(List<? extends ConnectionListener> listeners) {
@@ -222,6 +261,15 @@ public abstract class AbstractConnectionFactory implements ConnectionFactory, Di
 
 	public void setChannelListeners(List<? extends ChannelListener> listeners) {
 		this.channelListener.setDelegates(listeners);
+	}
+
+	/**
+	 * Set a {@link RecoveryListener} that will be added to each connection created.
+	 * @param recoveryListener the listener.
+	 * @since 2.0
+	 */
+	public void setRecoveryListener(RecoveryListener recoveryListener) {
+		this.recoveryListener = recoveryListener;
 	}
 
 	public void addChannelListener(ChannelListener listener) {
@@ -248,13 +296,12 @@ public abstract class AbstractConnectionFactory implements ConnectionFactory, Di
 	}
 
 	protected ExecutorService getExecutorService() {
-		return executorService;
+		return this.executorService;
 	}
 
 	/**
 	 * How long to wait (milliseconds) for a response to a connection close
 	 * operation from the broker; default 30000 (30 seconds).
-	 *
 	 * @param closeTimeout the closeTimeout to set.
 	 */
 	public void setCloseTimeout(int closeTimeout) {
@@ -262,7 +309,17 @@ public abstract class AbstractConnectionFactory implements ConnectionFactory, Di
 	}
 
 	public int getCloseTimeout() {
-		return closeTimeout;
+		return this.closeTimeout;
+	}
+
+	/**
+	 * Provide a {@link ConnectionNameStrategy} to build the name for the target RabbitMQ connection.
+	 * The {@link #beanName} together with a counter is used by default.
+	 * @param connectionNameStrategy the {@link ConnectionNameStrategy} to use.
+	 * @since 2.0
+	 */
+	public void setConnectionNameStrategy(ConnectionNameStrategy connectionNameStrategy) {
+		this.connectionNameStrategy = connectionNameStrategy;
 	}
 
 	@Override
@@ -272,36 +329,41 @@ public abstract class AbstractConnectionFactory implements ConnectionFactory, Di
 
 	protected final Connection createBareConnection() {
 		try {
-			Connection connection = null;
+			String connectionName = this.connectionNameStrategy.obtainNewConnectionName(this);
+
+			com.rabbitmq.client.Connection rabbitConnection;
 			if (this.addresses != null) {
-				connection = new SimpleConnection(this.rabbitConnectionFactory.newConnection(this.executorService, this.addresses),
-									this.closeTimeout);
+				rabbitConnection = this.rabbitConnectionFactory.newConnection(this.executorService, this.addresses,
+						connectionName);
+
 			}
 			else {
-				connection = new SimpleConnection(this.rabbitConnectionFactory.newConnection(this.executorService),
-									this.closeTimeout);
+				rabbitConnection = this.rabbitConnectionFactory.newConnection(this.executorService, connectionName);
 			}
-			if (logger.isInfoEnabled()) {
-				logger.info("Created new connection: " + connection);
+
+			Connection connection = new SimpleConnection(rabbitConnection, this.closeTimeout);
+			if (this.logger.isInfoEnabled()) {
+				this.logger.info("Created new connection: " + connection);
+			}
+			if (this.recoveryListener != null && connection instanceof AutorecoveringConnection) {
+				((AutorecoveringConnection) connection).addRecoveryListener(this.recoveryListener);
 			}
 			return connection;
 		}
-		catch (IOException e) {
-			throw RabbitExceptionTranslator.convertRabbitAccessException(e);
-		}
-		catch (TimeoutException e) {
+		catch (IOException | TimeoutException e) {
 			throw RabbitExceptionTranslator.convertRabbitAccessException(e);
 		}
 	}
 
-	protected final  String getDefaultHostName() {
+	protected final String getDefaultHostName() {
 		String temp;
 		try {
 			InetAddress localMachine = InetAddress.getLocalHost();
 			temp = localMachine.getHostName();
-			logger.debug("Using hostname [" + temp + "] for hostname.");
-		} catch (UnknownHostException e) {
-			logger.warn("Could not get host name, using 'localhost' as default value", e);
+			this.logger.debug("Using hostname [" + temp + "] for hostname.");
+		}
+		catch (UnknownHostException e) {
+			this.logger.warn("Could not get host name, using 'localhost' as default value", e);
 			temp = "localhost";
 		}
 		return temp;

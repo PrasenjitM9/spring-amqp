@@ -18,25 +18,23 @@ package org.springframework.amqp.rabbit.core;
 
 import static org.junit.Assert.assertEquals;
 
-import org.apache.log4j.Level;
+import org.apache.logging.log4j.Level;
 import org.junit.After;
 import org.junit.Before;
 import org.junit.Rule;
 import org.junit.Test;
 
 import org.springframework.amqp.rabbit.connection.CachingConnectionFactory;
-import org.springframework.amqp.rabbit.test.BrokerRunning;
-import org.springframework.amqp.rabbit.test.BrokerTestUtils;
-import org.springframework.amqp.rabbit.test.Log4jLevelAdjuster;
-import org.springframework.amqp.rabbit.test.LongRunningIntegrationTest;
+import org.springframework.amqp.rabbit.junit.BrokerRunning;
+import org.springframework.amqp.rabbit.junit.BrokerTestUtils;
+import org.springframework.amqp.rabbit.junit.LongRunningIntegrationTest;
+import org.springframework.amqp.rabbit.test.LogLevelAdjuster;
 import org.springframework.amqp.rabbit.test.RepeatProcessor;
 import org.springframework.test.annotation.Repeat;
 import org.springframework.transaction.TransactionDefinition;
 import org.springframework.transaction.TransactionException;
-import org.springframework.transaction.TransactionStatus;
 import org.springframework.transaction.support.AbstractPlatformTransactionManager;
 import org.springframework.transaction.support.DefaultTransactionStatus;
-import org.springframework.transaction.support.TransactionCallback;
 import org.springframework.transaction.support.TransactionTemplate;
 
 /**
@@ -60,7 +58,7 @@ public class RabbitTemplatePerformanceIntegrationTests {
 
 	@Rule
 	// After the repeat processor, so it only runs once
-	public Log4jLevelAdjuster logLevels = new Log4jLevelAdjuster(Level.ERROR, RabbitTemplate.class);
+	public LogLevelAdjuster logLevels = new LogLevelAdjuster(Level.ERROR, RabbitTemplate.class);
 
 	@Rule
 	// After the repeat processor, so it only runs once
@@ -121,12 +119,9 @@ public class RabbitTemplatePerformanceIntegrationTests {
 	@Repeat(200)
 	public void testSendAndReceiveExternalTransacted() throws Exception {
 		template.setChannelTransacted(true);
-		new TransactionTemplate(new TestTransactionManager()).execute(new TransactionCallback<Void>() {
-			@Override
-			public Void doInTransaction(TransactionStatus status) {
-				template.convertAndSend(ROUTE, "message");
-				return null;
-			}
+		new TransactionTemplate(new TestTransactionManager()).execute(status -> {
+			template.convertAndSend(ROUTE, "message");
+			return null;
 		});
 		template.convertAndSend(ROUTE, "message");
 		String result = (String) template.receiveAndConvert(ROUTE);
@@ -135,6 +130,10 @@ public class RabbitTemplatePerformanceIntegrationTests {
 
 	@SuppressWarnings("serial")
 	private class TestTransactionManager extends AbstractPlatformTransactionManager {
+
+		TestTransactionManager() {
+			super();
+		}
 
 		@Override
 		protected void doBegin(Object transaction, TransactionDefinition definition) throws TransactionException {

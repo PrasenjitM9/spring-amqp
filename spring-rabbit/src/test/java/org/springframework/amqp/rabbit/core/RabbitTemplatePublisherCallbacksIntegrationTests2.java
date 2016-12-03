@@ -29,11 +29,10 @@ import org.junit.Rule;
 import org.junit.Test;
 
 import org.springframework.amqp.rabbit.connection.CachingConnectionFactory;
-import org.springframework.amqp.rabbit.test.BrokerRunning;
-import org.springframework.amqp.rabbit.test.BrokerTestUtils;
+import org.springframework.amqp.rabbit.junit.BrokerRunning;
+import org.springframework.amqp.rabbit.junit.BrokerTestUtils;
 
 import com.rabbitmq.client.AMQP.BasicProperties;
-import com.rabbitmq.client.Channel;
 import com.rabbitmq.client.DefaultConsumer;
 import com.rabbitmq.client.Envelope;
 
@@ -78,42 +77,35 @@ public class RabbitTemplatePublisherCallbacksIntegrationTests2 {
 		this.templateWithConfirmsEnabled.convertAndSend(ROUTE, "foo");
 		this.templateWithConfirmsEnabled.convertAndSend(ROUTE, "foo");
 		assertMessageCountEquals(2L);
-		assertEquals(Long.valueOf(1), this.templateWithConfirmsEnabled.execute(new ChannelCallback<Long>() {
-
-			@Override
-			public Long doInRabbit(Channel channel) throws Exception {
-				final CountDownLatch latch = new CountDownLatch(2);
-				String consumerTag = channel.basicConsume(ROUTE, new DefaultConsumer(channel) {
-					@Override
-					public void handleDelivery(String consumerTag, Envelope envelope, BasicProperties properties,
-							byte[] body) throws IOException {
-						latch.countDown();
-					}
-				});
-				long consumerCount = channel.consumerCount(ROUTE);
-				assertTrue(latch.await(10, TimeUnit.SECONDS));
-				channel.basicCancel(consumerTag);
-				return consumerCount;
-			}
-
+		assertEquals(Long.valueOf(1), this.templateWithConfirmsEnabled.execute(channel -> {
+			final CountDownLatch latch = new CountDownLatch(2);
+			String consumerTag = channel.basicConsume(ROUTE, new DefaultConsumer(channel) {
+				@Override
+				public void handleDelivery(String consumerTag, Envelope envelope, BasicProperties properties,
+						byte[] body) throws IOException {
+					latch.countDown();
+				}
+			});
+			long consumerCount = channel.consumerCount(ROUTE);
+			assertTrue(latch.await(10, TimeUnit.SECONDS));
+			channel.basicCancel(consumerTag);
+			return consumerCount;
 		}));
 		assertMessageCountEquals(0L);
 	}
 
 	private void assertMessageCountEquals(long wanted) throws InterruptedException {
-		long messageCount;
+		long messageCount = determineMessageCount();
 		int n = 0;
-		while ((messageCount = this.templateWithConfirmsEnabled.execute(new ChannelCallback<Long>() {
-
-			@Override
-			public Long doInRabbit(Channel channel) throws Exception {
-				return channel.messageCount(ROUTE);
-			}
-
-		})) < wanted && n++ < 100) {
+		while (messageCount < wanted && n++ < 100) {
 			Thread.sleep(100);
-		};
+			messageCount = determineMessageCount();
+		}
 		assertEquals(wanted, messageCount);
+	}
+
+	private Long determineMessageCount() {
+		return this.templateWithConfirmsEnabled.execute(channel -> channel.messageCount(ROUTE));
 	}
 
 }

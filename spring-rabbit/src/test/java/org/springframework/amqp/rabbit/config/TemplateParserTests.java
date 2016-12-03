@@ -65,6 +65,7 @@ public final class TemplateParserTests {
 		assertEquals(Boolean.FALSE, TestUtils.getPropertyValue(template, "mandatoryExpression.value"));
 		assertNull(TestUtils.getPropertyValue(template, "returnCallback"));
 		assertNull(TestUtils.getPropertyValue(template, "confirmCallback"));
+		assertTrue(TestUtils.getPropertyValue(template, "useDirectReplyToContainer", Boolean.class));
 	}
 
 	@Test
@@ -74,6 +75,7 @@ public final class TemplateParserTests {
 		assertEquals("true", TestUtils.getPropertyValue(template, "mandatoryExpression.literalValue"));
 		assertNotNull(TestUtils.getPropertyValue(template, "returnCallback"));
 		assertNotNull(TestUtils.getPropertyValue(template, "confirmCallback"));
+		assertFalse(TestUtils.getPropertyValue(template, "useDirectReplyToContainer", Boolean.class));
 	}
 
 	@Test
@@ -103,6 +105,8 @@ public final class TemplateParserTests {
 		assertEquals("bar", accessor.getPropertyValue("queue"));
 		assertEquals("spam", accessor.getPropertyValue("routingKey"));
 		assertTrue(TestUtils.getPropertyValue(template, "useTemporaryReplyQueues", Boolean.class));
+		assertEquals("@connectionFactory.username",
+				TestUtils.getPropertyValue(template, "userIdExpression.expression"));
 	}
 
 	@Test

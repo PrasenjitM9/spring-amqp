@@ -18,23 +18,28 @@ package org.springframework.amqp.rabbit.listener;
 
 import static org.hamcrest.Matchers.contains;
 import static org.hamcrest.Matchers.containsString;
+import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.instanceOf;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNull;
+import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertThat;
 import static org.junit.Assert.assertTrue;
 import static org.mockito.Matchers.any;
 import static org.mockito.Matchers.anyBoolean;
 import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.doReturn;
-import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import java.io.IOException;
+import java.io.Serializable;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Map;
+import java.util.NoSuchElementException;
 import java.util.Set;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
@@ -49,29 +54,30 @@ import org.junit.Before;
 import org.junit.Rule;
 import org.junit.Test;
 import org.mockito.ArgumentCaptor;
-import org.mockito.invocation.InvocationOnMock;
-import org.mockito.stubbing.Answer;
 
 import org.springframework.amqp.AmqpIOException;
 import org.springframework.amqp.core.AnonymousQueue;
 import org.springframework.amqp.core.Message;
 import org.springframework.amqp.core.MessageListener;
 import org.springframework.amqp.core.Queue;
+import org.springframework.amqp.event.AmqpEvent;
 import org.springframework.amqp.rabbit.connection.CachingConnectionFactory;
 import org.springframework.amqp.rabbit.connection.Connection;
 import org.springframework.amqp.rabbit.connection.ConnectionFactory;
 import org.springframework.amqp.rabbit.connection.SingleConnectionFactory;
 import org.springframework.amqp.rabbit.core.RabbitAdmin;
 import org.springframework.amqp.rabbit.core.RabbitTemplate;
+import org.springframework.amqp.rabbit.junit.BrokerRunning;
+import org.springframework.amqp.rabbit.junit.BrokerTestUtils;
+import org.springframework.amqp.rabbit.junit.LongRunningIntegrationTest;
 import org.springframework.amqp.rabbit.listener.adapter.MessageListenerAdapter;
+import org.springframework.amqp.rabbit.listener.adapter.ReplyingMessageListener;
 import org.springframework.amqp.rabbit.support.ConsumerCancelledException;
 import org.springframework.amqp.rabbit.support.PublisherCallbackChannelImpl;
-import org.springframework.amqp.rabbit.test.BrokerRunning;
-import org.springframework.amqp.rabbit.test.BrokerTestUtils;
-import org.springframework.amqp.rabbit.test.LongRunningIntegrationTest;
 import org.springframework.amqp.utils.test.TestUtils;
 import org.springframework.beans.DirectFieldAccessor;
 import org.springframework.beans.factory.DisposableBean;
+import org.springframework.context.ApplicationEvent;
 import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.context.support.GenericApplicationContext;
 
@@ -99,7 +105,7 @@ public class SimpleMessageListenerContainerIntegration2Tests {
 	private RabbitAdmin admin;
 
 	@Rule
-	public BrokerRunning brokerIsRunning = BrokerRunning.isRunningWithEmptyQueues(queue, queue1);
+	public BrokerRunning brokerIsRunning = BrokerRunning.isRunningWithEmptyQueues(queue.getName(), queue1.getName());
 
 	@Rule
 	public LongRunningIntegrationTest longRunningIntegrationTest = new LongRunningIntegrationTest();
@@ -151,19 +157,65 @@ public class SimpleMessageListenerContainerIntegration2Tests {
 	}
 
 	@Test
+	public void testNoQueues() throws Exception {
+		CountDownLatch latch1 = new CountDownLatch(20);
+		container = createContainer(new MessageListenerAdapter(new PojoListener(latch1)), (String[]) null);
+		container.addQueueNames(queue.getName(), queue1.getName());
+		for (int i = 0; i < 10; i++) {
+			template.convertAndSend(queue.getName(), i + "foo");
+			template.convertAndSend(queue1.getName(), i + "foo");
+		}
+		boolean waited = latch1.await(10, TimeUnit.SECONDS);
+		assertTrue("Timed out waiting for message", waited);
+		assertNull(template.receiveAndConvert(queue.getName()));
+		assertNull(template.receiveAndConvert(queue1.getName()));
+		final AtomicReference<Object> newConsumer = new AtomicReference<Object>();
+		final CountDownLatch latch2 = new CountDownLatch(1);
+		container.setApplicationEventPublisher(new ApplicationEventPublisher() {
+
+			@Override
+			public void publishEvent(Object event) {
+				// NOSONAR
+			}
+
+			@Override
+			public void publishEvent(ApplicationEvent event) {
+				if (event instanceof AsyncConsumerStartedEvent) {
+					newConsumer.set(((AsyncConsumerStartedEvent) event).getConsumer());
+					latch2.countDown();
+				}
+			}
+		});
+		container.removeQueueNames(queue.getName(), queue1.getName());
+		assertTrue(latch2.await(10, TimeUnit.SECONDS));
+		assertEquals(0, TestUtils.getPropertyValue(newConsumer.get(), "queues", String[].class).length);
+	}
+
+	@Test
 	public void testDeleteOneQueue() throws Exception {
 		CountDownLatch latch = new CountDownLatch(20);
-		container = createContainer(new MessageListenerAdapter(new PojoListener(latch)), queue.getName(), queue1.getName());
-		ApplicationEventPublisher publisher = mock(ApplicationEventPublisher.class);
-		container.setApplicationEventPublisher(publisher);
+		container = createContainer(new MessageListenerAdapter(new PojoListener(latch)), false,
+				queue.getName(), queue1.getName());
+		container.setFailedDeclarationRetryInterval(100);
+		final List<AmqpEvent> events = new ArrayList<>();
+		final AtomicReference<ListenerContainerConsumerFailedEvent> eventRef = new AtomicReference<>();
+		final CountDownLatch eventLatch = new CountDownLatch(4);
+		container.setApplicationEventPublisher(event -> {
+			if (event instanceof ListenerContainerConsumerFailedEvent) {
+				eventRef.set((ListenerContainerConsumerFailedEvent) event);
+			}
+			events.add((AmqpEvent) event);
+			eventLatch.countDown();
+		});
+		container.start();
 		for (int i = 0; i < 10; i++) {
 			template.convertAndSend(queue.getName(), i + "foo");
 			template.convertAndSend(queue1.getName(), i + "foo");
 		}
 		boolean waited = latch.await(10, TimeUnit.SECONDS);
 		assertTrue("Timed out waiting for message", waited);
-		BlockingQueueConsumer consumer = (BlockingQueueConsumer) TestUtils
-				.getPropertyValue(container, "consumers", Map.class).keySet().iterator().next();
+		Map<?, ?> consumers = TestUtils.getPropertyValue(container, "consumers", Map.class);
+		BlockingQueueConsumer consumer = (BlockingQueueConsumer) consumers.keySet().iterator().next();
 		admin.deleteQueue(queue1.getName());
 		latch = new CountDownLatch(10);
 		container.setMessageListener(new MessageListenerAdapter(new PojoListener(latch)));
@@ -172,13 +224,19 @@ public class SimpleMessageListenerContainerIntegration2Tests {
 		}
 		waited = latch.await(10, TimeUnit.SECONDS);
 		assertTrue("Timed out waiting for message", waited);
-		BlockingQueueConsumer newConsumer = (BlockingQueueConsumer) TestUtils
-				.getPropertyValue(container, "consumers", Map.class).keySet().iterator().next();
+		BlockingQueueConsumer newConsumer = consumer;
 		int n = 0;
 		while (n++ < 100 && newConsumer == consumer) {
+			try {
+				newConsumer = (BlockingQueueConsumer) consumers.keySet().iterator().next();
+				if (newConsumer == consumer) {
+					break;
+				}
+			}
+			catch (NoSuchElementException e) {
+				// race; hasNext() won't help
+			}
 			Thread.sleep(100);
-			newConsumer = (BlockingQueueConsumer) TestUtils
-					.getPropertyValue(container, "consumers", Map.class).keySet().iterator().next();
 		}
 		assertTrue("Failed to restart consumer", n < 100);
 		Set<?> missingQueues = TestUtils.getPropertyValue(newConsumer, "missingQueues", Set.class);
@@ -187,12 +245,8 @@ public class SimpleMessageListenerContainerIntegration2Tests {
 			Thread.sleep(200);
 		}
 		assertTrue("Failed to detect missing queue", n < 100);
-		ArgumentCaptor<ListenerContainerConsumerFailedEvent> captor = ArgumentCaptor
-				.forClass(ListenerContainerConsumerFailedEvent.class);
-		verify(publisher).publishEvent(captor.capture());
-		ListenerContainerConsumerFailedEvent event = captor.getValue();
-		assertThat(event.getThrowable(), instanceOf(ConsumerCancelledException.class));
-		assertFalse(event.isFatal());
+		assertThat(eventRef.get().getThrowable(), instanceOf(ConsumerCancelledException.class));
+		assertFalse(eventRef.get().isFatal());
 		DirectFieldAccessor dfa = new DirectFieldAccessor(newConsumer);
 		dfa.setPropertyValue("lastRetryDeclaration", 0);
 		dfa.setPropertyValue("retryDeclarationInterval", 100);
@@ -211,6 +265,13 @@ public class SimpleMessageListenerContainerIntegration2Tests {
 		waited = latch.await(10, TimeUnit.SECONDS);
 		assertTrue("Timed out waiting for message", waited);
 		assertNull(template.receiveAndConvert(queue.getName()));
+		container.stop();
+		assertTrue(eventLatch.await(10, TimeUnit.SECONDS));
+		assertThat(events.size(), equalTo(4));
+		assertThat(events.get(0), instanceOf(AsyncConsumerStartedEvent.class));
+		assertSame(events.get(1), eventRef.get());
+		assertThat(events.get(2), instanceOf(AsyncConsumerRestartedEvent.class));
+		assertThat(events.get(3), instanceOf(AsyncConsumerStoppedEvent.class));
 	}
 
 	@Test
@@ -273,8 +334,22 @@ public class SimpleMessageListenerContainerIntegration2Tests {
 		container2.setApplicationContext(context);
 		container2.setRecoveryInterval(1000);
 		container2.setExclusive(true); // not really necessary, but likely people will make all consumers exclusive.
-		ApplicationEventPublisher publisher = mock(ApplicationEventPublisher.class);
-		container2.setApplicationEventPublisher(publisher);
+		final AtomicReference<ListenerContainerConsumerFailedEvent> eventRef = new AtomicReference<>();
+		container2.setApplicationEventPublisher(new ApplicationEventPublisher() {
+
+			@Override
+			public void publishEvent(Object event) {
+				//NOSONAR
+			}
+
+			@Override
+			public void publishEvent(ApplicationEvent event) {
+				if (event instanceof ListenerContainerConsumerFailedEvent) {
+					eventRef.set((ListenerContainerConsumerFailedEvent) event);
+				}
+			}
+
+		});
 		container2.afterPropertiesSet();
 		Log containerLogger = spy(TestUtils.getPropertyValue(container2, "logger", Log.class));
 		doReturn(true).when(containerLogger).isWarnEnabled();
@@ -295,23 +370,10 @@ public class SimpleMessageListenerContainerIntegration2Tests {
 		ArgumentCaptor<String> captor = ArgumentCaptor.forClass(String.class);
 		verify(logger, atLeastOnce()).info(captor.capture());
 		assertThat(captor.getAllValues(), contains(containsString("exclusive")));
-		ArgumentCaptor<ListenerContainerConsumerFailedEvent> eventCaptor = ArgumentCaptor
-				.forClass(ListenerContainerConsumerFailedEvent.class);
-		verify(publisher).publishEvent(eventCaptor.capture());
-		ListenerContainerConsumerFailedEvent event = eventCaptor.getValue();
-		assertEquals("Consumer raised exception, attempting restart", event.getReason());
-		assertFalse(event.isFatal());
-		assertThat(event.getThrowable(), instanceOf(AmqpIOException.class));
+		assertEquals("Consumer raised exception, attempting restart", eventRef.get().getReason());
+		assertFalse(eventRef.get().isFatal());
+		assertThat(eventRef.get().getThrowable(), instanceOf(AmqpIOException.class));
 		verify(containerLogger).warn(any());
-	}
-
-	@Test
-	public void testInvalidListener() throws Exception {
-		PojoListener delegate = new PojoListener(null);
-		MessageListenerAdapter messageListenerAdapter = new MessageListenerAdapter(delegate);
-		messageListenerAdapter.setDefaultListenerMethod("foo");
-		this.container = createContainer(messageListenerAdapter, queue.getName());
-		assertTrue(containerStoppedForAbortWithBadListener());
 	}
 
 	@Test
@@ -330,7 +392,7 @@ public class SimpleMessageListenerContainerIntegration2Tests {
 
 		class MockChannel extends PublisherCallbackChannelImpl {
 
-			public MockChannel(Channel delegate) {
+			MockChannel(Channel delegate) {
 				super(delegate);
 			}
 
@@ -345,14 +407,8 @@ public class SimpleMessageListenerContainerIntegration2Tests {
 		}
 
 		Connection connection = spy(connectionFactory.createConnection());
-		when(connection.createChannel(anyBoolean())).then(new Answer<Channel>() {
-
-			@Override
-			public Channel answer(InvocationOnMock invocation) throws Throwable {
-				return new MockChannel((Channel) invocation.callRealMethod());
-			}
-
-		});
+		when(connection.createChannel(anyBoolean()))
+			.then(invocation -> new MockChannel((Channel) invocation.callRealMethod()));
 
 		DirectFieldAccessor dfa = new DirectFieldAccessor(connectionFactory);
 		dfa.setPropertyValue("connection", connection);
@@ -376,13 +432,16 @@ public class SimpleMessageListenerContainerIntegration2Tests {
 	public void testRestartConsumerOnConnectionLossDuringQueueDeclare() throws Exception {
 		this.template.convertAndSend(queue.getName(), "foo");
 
-		ConnectionFactory connectionFactory = new CachingConnectionFactory("localhost", BrokerTestUtils.getPort());
+		CachingConnectionFactory connectionFactory = new CachingConnectionFactory("localhost",
+				BrokerTestUtils.getPort());
+		// this test closes the underlying connection normally; it will never be recovered
+		connectionFactory.getRabbitConnectionFactory().setAutomaticRecoveryEnabled(false);
 
 		final AtomicBoolean networkGlitch = new AtomicBoolean();
 
 		class MockChannel extends PublisherCallbackChannelImpl {
 
-			public MockChannel(Channel delegate) {
+			MockChannel(Channel delegate) {
 				super(delegate);
 			}
 
@@ -398,14 +457,8 @@ public class SimpleMessageListenerContainerIntegration2Tests {
 		}
 
 		Connection connection = spy(connectionFactory.createConnection());
-		when(connection.createChannel(anyBoolean())).then(new Answer<Channel>() {
-
-			@Override
-			public Channel answer(InvocationOnMock invocation) throws Throwable {
-				return new MockChannel((Channel) invocation.callRealMethod());
-			}
-
-		});
+		when(connection.createChannel(anyBoolean()))
+			.then(invocation -> new MockChannel((Channel) invocation.callRealMethod()));
 
 		DirectFieldAccessor dfa = new DirectFieldAccessor(connectionFactory);
 		dfa.setPropertyValue("connection", connection);
@@ -488,6 +541,34 @@ public class SimpleMessageListenerContainerIntegration2Tests {
 		container.get().stop();
 	}
 
+	@Test
+	public void testTransientBadMessageDoesntStopContainer() throws Exception {
+		CountDownLatch latch = new CountDownLatch(3);
+		this.container = createContainer(new MessageListenerAdapter(new PojoListener(latch, false)), this.queue.getName());
+		this.template.convertAndSend(this.queue.getName(), "foo");
+		this.template.convertAndSend(this.queue.getName(), new Foo());
+		this.template.convertAndSend(this.queue.getName(), new Bar());
+		this.template.convertAndSend(this.queue.getName(), "foo");
+		assertTrue(latch.await(10, TimeUnit.SECONDS));
+		assertTrue(this.container.isRunning());
+		this.container.stop();
+	}
+
+	@Test
+	public void testTransientBadMessageDoesntStopContainerLambda() throws Exception {
+		final CountDownLatch latch = new CountDownLatch(2);
+		this.container = createContainer(new MessageListenerAdapter((ReplyingMessageListener<String, Void>) m -> {
+			latch.countDown();
+			return null;
+		}), this.queue.getName());
+		this.template.convertAndSend(this.queue.getName(), "foo");
+		this.template.convertAndSend(this.queue.getName(), new Foo());
+		this.template.convertAndSend(this.queue.getName(), "foo");
+		assertTrue(latch.await(10, TimeUnit.SECONDS));
+		assertTrue(this.container.isRunning());
+		this.container.stop();
+	}
+
 	private boolean containerStoppedForAbortWithBadListener() throws InterruptedException {
 		Log logger = spy(TestUtils.getPropertyValue(container, "logger", Log.class));
 		new DirectFieldAccessor(container).setPropertyValue("logger", logger);
@@ -503,13 +584,21 @@ public class SimpleMessageListenerContainerIntegration2Tests {
 	}
 
 	private SimpleMessageListenerContainer createContainer(Object listener, String... queueNames) {
+		return createContainer(listener, true, queueNames);
+	}
+
+	private SimpleMessageListenerContainer createContainer(Object listener, boolean start, String... queueNames) {
 		SimpleMessageListenerContainer container = new SimpleMessageListenerContainer(template.getConnectionFactory());
 		if (listener != null) {
 			container.setMessageListener(listener);
 		}
-		container.setQueueNames(queueNames);
+		if (queueNames != null) {
+			container.setQueueNames(queueNames);
+		}
 		container.afterPropertiesSet();
-		container.start();
+		if (start) {
+			container.start();
+		}
 		return container;
 	}
 
@@ -539,10 +628,45 @@ public class SimpleMessageListenerContainerIntegration2Tests {
 				if (fail) {
 					throw new RuntimeException("Planned failure");
 				}
-			} finally {
+			}
+			finally {
 				latch.countDown();
 			}
 		}
+
+		public void handleMessage(Foo value) {
+			try {
+				int counter = count.getAndIncrement();
+				if (logger.isDebugEnabled() && counter % 100 == 0) {
+					logger.debug("Handling: " + value + ":" + counter + " - " + latch);
+				}
+				if (fail) {
+					throw new RuntimeException("Planned failure");
+				}
+			}
+			finally {
+				latch.countDown();
+			}
+		}
+
+	}
+
+	@SuppressWarnings("serial")
+	private static final class Foo implements Serializable {
+
+		Foo() {
+			super();
+		}
+
+	}
+
+	@SuppressWarnings("serial")
+	private static final class Bar implements Serializable {
+
+		Bar() {
+			super();
+		}
+
 	}
 
 }
