@@ -20,6 +20,7 @@ import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
+import java.util.Date;
 import java.util.LinkedList;
 import java.util.List;
 import java.util.Properties;
@@ -32,9 +33,11 @@ import java.util.stream.Stream;
 
 import org.apache.commons.logging.Log;
 
+import org.springframework.amqp.AmqpApplicationContextClosedException;
 import org.springframework.amqp.AmqpConnectException;
 import org.springframework.amqp.AmqpException;
 import org.springframework.amqp.AmqpIOException;
+import org.springframework.amqp.ImmediateAcknowledgeAmqpException;
 import org.springframework.amqp.core.Message;
 import org.springframework.amqp.core.MessageProperties;
 import org.springframework.amqp.core.Queue;
@@ -71,6 +74,7 @@ import com.rabbitmq.client.ShutdownSignalException;
  * each message is acked (or nacked) individually.
  *
  * @author Gary Russell
+ * @author Artem Bilan
  *
  * @since 2.0
  *
@@ -366,9 +370,19 @@ public class DirectMessageListenerContainer extends AbstractMessageListenerConta
 						}
 						for (SimpleConsumer consumer : restartableConsumers) {
 							if (this.logger.isDebugEnabled() && restartableConsumers.size() > 0) {
-								logger.debug("Attempting to restart consumer " + consumer);
+								this.logger.debug("Attempting to restart consumer " + consumer);
 							}
-							doConsumeFromQueue(consumer.getQueue());
+							try {
+								doConsumeFromQueue(consumer.getQueue());
+							}
+							catch (AmqpConnectException | AmqpIOException e) {
+								this.logger.error("Cannot connect to server", e);
+								if (e.getCause() instanceof AmqpApplicationContextClosedException) {
+									this.logger.error("Application context is closed, terminating");
+									this.taskScheduler.schedule(this::stop, new Date());
+								}
+								break;
+							}
 						}
 						this.lastRestartAttempt = now;
 					}
@@ -400,12 +414,14 @@ public class DirectMessageListenerContainer extends AbstractMessageListenerConta
 									consumeFromQueue(queue);
 								}
 							}
-							catch (AmqpConnectException e) {
+							catch (AmqpConnectException | AmqpIOException e) {
 								long nextBackOff = backOffExecution.nextBackOff();
-								if (nextBackOff < 0) {
+								if (nextBackOff < 0 || e.getCause() instanceof AmqpApplicationContextClosedException) {
 									DirectMessageListenerContainer.this.aborted = true;
 									shutdown();
-									this.logger.error("Failed to start container - backOffs exhausted", e);
+									this.logger.error("Failed to start container - fatal error or backOffs exhausted",
+											e);
+									this.taskScheduler.schedule(this::stop, new Date());
 									break;
 								}
 								this.logger.error("Error creating consumer; retrying in " + nextBackOff, e);
@@ -498,6 +514,9 @@ public class DirectMessageListenerContainer extends AbstractMessageListenerConta
 							? getConsumerTagStrategy().createConsumerTag(queue) : ""),
 					false, isExclusive(), getConsumerArguments(), consumer);
 		}
+		catch (AmqpApplicationContextClosedException e) {
+			throw new AmqpConnectException(e);
+		}
 		catch (IOException e) {
 			RabbitUtils.closeChannel(channel);
 			RabbitUtils.closeConnection(connection);
@@ -563,12 +582,12 @@ public class DirectMessageListenerContainer extends AbstractMessageListenerConta
 	 */
 	private void actualShutDown() {
 		Assert.state(getTaskExecutor() != null, "Cannot shut down if not initialized");
-		logger.debug("Shutting down");
+		this.logger.debug("Shutting down");
 		// Copy in the same order to avoid ConcurrentModificationException during remove in the cancelConsumer().
 		new LinkedList<>(this.consumers).forEach(this::cancelConsumer);
 		this.consumers.clear();
 		this.consumersByQueue.clear();
-		logger.debug("All consumers canceled");
+		this.logger.debug("All consumers canceled");
 		if (this.consumerMonitorTask != null) {
 			this.consumerMonitorTask.cancel(true);
 			this.consumerMonitorTask = null;
@@ -621,6 +640,8 @@ public class DirectMessageListenerContainer extends AbstractMessageListenerConta
 
 		private volatile int epoch;
 
+		private volatile TransactionTemplate transactionTemplate;
+
 		private SimpleConsumer(Connection connection, Channel channel, String queue) {
 			super(channel);
 			this.connection = connection;
@@ -672,12 +693,34 @@ public class DirectMessageListenerContainer extends AbstractMessageListenerConta
 					if (this.isRabbitTxManager) {
 						ConsumerChannelRegistry.registerConsumerChannel(getChannel(), this.connectionFactory);
 					}
-					new TransactionTemplate(this.transactionManager, this.transactionAttribute).execute(s -> {
-						ConnectionFactoryUtils.bindResourceToTransaction(new RabbitResourceHolder(getChannel(), false),
+					if (this.transactionTemplate == null) {
+						this.transactionTemplate =
+								new TransactionTemplate(this.transactionManager, this.transactionAttribute);
+					}
+					this.transactionTemplate.execute(s -> {
+						RabbitResourceHolder resourceHolder = new RabbitResourceHolder(getChannel(), false);
+						resourceHolder.addDeliveryTag(getChannel(), deliveryTag);
+						ConnectionFactoryUtils.bindResourceToTransaction(resourceHolder,
 								this.connectionFactory, true);
-						callExecuteListener(message, deliveryTag);
+						// unbound in ResourceHolderSynchronization.beforeCompletion()
+						try {
+							callExecuteListener(message, deliveryTag);
+						}
+						catch (RuntimeException e1) {
+							throw e1;
+						}
+						catch (Throwable e2) { //NOSONAR ok to catch Throwable here because we re-throw it below
+							throw new WrappedTransactionException(e2);
+						}
 						return null;
 					});
+				}
+				catch (Throwable e) {
+					if (e instanceof WrappedTransactionException) {
+						if (e.getCause() instanceof Error) {
+							throw (Error) e.getCause();
+						}
+					}
 				}
 				finally {
 					if (this.isRabbitTxManager) {
@@ -686,23 +729,58 @@ public class DirectMessageListenerContainer extends AbstractMessageListenerConta
 				}
 			}
 			else {
-				callExecuteListener(message, deliveryTag);
+				try {
+					callExecuteListener(message, deliveryTag);
+				}
+				catch (Exception e) {
+					// NOSONAR
+				}
 			}
 		}
 
-		private void callExecuteListener(Message message, long deliveryTag) {
+		private void callExecuteListener(Message message, long deliveryTag) throws Exception {
+			boolean channelLocallyTransacted = isChannelLocallyTransacted();
 			try {
 				executeListener(getChannel(), message);
-				boolean channelLocallyTransacted = isChannelLocallyTransacted();
-				if (this.ackRequired) {
-					if (isChannelTransacted() && !channelLocallyTransacted) {
-
-						// Not locally transacted but it is transacted so it
-						// could be synchronized with an external transaction
-						ConnectionFactoryUtils.registerDeliveryTag(this.connectionFactory, getChannel(), deliveryTag);
-
+				handleAck(deliveryTag, channelLocallyTransacted);
+			}
+			catch (ImmediateAcknowledgeAmqpException e) {
+				if (this.logger.isDebugEnabled()) {
+					this.logger.debug("User requested ack for failed delivery: " + deliveryTag);
+				}
+				handleAck(deliveryTag, channelLocallyTransacted);
+			}
+			catch (Exception e) {
+				if (causeChainHasImmediateAcknowledgeAmqpException(e)) {
+					if (this.logger.isDebugEnabled()) {
+						this.logger.debug("User requested ack for failed delivery: " + deliveryTag);
+					}
+					handleAck(deliveryTag, channelLocallyTransacted);
+				}
+				else {
+					this.logger.error("Failed to invoke listener", e);
+					if (this.transactionManager != null) {
+						if (this.transactionAttribute.rollbackOn(e)) {
+							throw e; // encompassing transaction will handle the rollback.
+						}
+						else {
+							if (this.logger.isDebugEnabled()) {
+								this.logger.debug("No rollback for " + e);
+							}
+						}
 					}
 					else {
+						rollback(deliveryTag, e);
+						// no need to rethrow e - we'd ignore it anyway, not throw to client
+					}
+				}
+			}
+		}
+
+		private void handleAck(long deliveryTag, boolean channelLocallyTransacted) throws IOException {
+			try {
+				if (this.ackRequired) {
+					if (!isChannelTransacted() || channelLocallyTransacted) {
 						getChannel().basicAck(deliveryTag, false);
 					}
 				}
@@ -711,8 +789,7 @@ public class DirectMessageListenerContainer extends AbstractMessageListenerConta
 				}
 			}
 			catch (Exception e) {
-				this.logger.error("Failed to invoke listener", e);
-				rollback(deliveryTag, e);
+				this.logger.error("Error acking", e);
 			}
 		}
 
@@ -722,7 +799,7 @@ public class DirectMessageListenerContainer extends AbstractMessageListenerConta
 			}
 			if (this.ackRequired) {
 				try {
-					getChannel().basicReject(deliveryTag,
+					getChannel().basicNack(deliveryTag, true,
 							RabbitUtils.shouldRequeue(isDefaultRequeueRejected(), e, this.logger));
 				}
 				catch (IOException e1) {

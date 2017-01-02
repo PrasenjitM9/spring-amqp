@@ -19,11 +19,8 @@ package org.springframework.amqp.rabbit.listener;
 import java.io.IOException;
 import java.util.Arrays;
 import java.util.Collection;
-import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Iterator;
-import java.util.Map;
-import java.util.Map.Entry;
 import java.util.Properties;
 import java.util.Set;
 import java.util.concurrent.CountDownLatch;
@@ -105,14 +102,15 @@ public class SimpleMessageListenerContainer extends AbstractMessageListenerConta
 
 	private long receiveTimeout = DEFAULT_RECEIVE_TIMEOUT;
 
-	// Map entry value, when false, signals the consumer to terminate
-	private Map<BlockingQueueConsumer, Boolean> consumers;
+	private Set<BlockingQueueConsumer> consumers;
 
 	private final ActiveObjectCounter<BlockingQueueConsumer> cancellationLock = new ActiveObjectCounter<>();
 
 	private Integer declarationRetries;
 
 	private Long retryDeclarationInterval;
+
+	private TransactionTemplate transactionTemplate;
 
 	/**
 	 * Default constructor for convenient dependency injection via setters.
@@ -154,18 +152,13 @@ public class SimpleMessageListenerContainer extends AbstractMessageListenerConta
 			this.concurrentConsumers = concurrentConsumers;
 			if (isActive() && this.consumers != null) {
 				if (delta > 0) {
-					Iterator<Entry<BlockingQueueConsumer, Boolean>> entryIterator = this.consumers.entrySet()
-							.iterator();
-					while (entryIterator.hasNext() && delta > 0) {
-						Entry<BlockingQueueConsumer, Boolean> entry = entryIterator.next();
-						if (entry.getValue()) {
-							BlockingQueueConsumer consumer = entry.getKey();
-							consumer.basicCancel();
-							this.consumers.put(consumer, false);
-							delta--;
-						}
+					Iterator<BlockingQueueConsumer> consumerIterator = this.consumers.iterator();
+					while (consumerIterator.hasNext() && delta > 0) {
+						BlockingQueueConsumer consumer = consumerIterator.next();
+						consumer.basicCancel();
+						consumerIterator.remove();
+						delta--;
 					}
-
 				}
 				else {
 					addAndStartConsumers(-delta);
@@ -462,7 +455,7 @@ public class SimpleMessageListenerContainer extends AbstractMessageListenerConta
 						break;
 					}
 				}
-				Assert.state(found, "Listener expects us to be listening on '" + expectedQueueNames + "'; our queues: "
+				Assert.state(found, () -> "Listener expects us to be listening on '" + expectedQueueNames + "'; our queues: "
 						+ Arrays.asList(queueNames));
 			}
 		}
@@ -483,7 +476,7 @@ public class SimpleMessageListenerContainer extends AbstractMessageListenerConta
 				return;
 			}
 			Set<AsyncMessageProcessingConsumer> processors = new HashSet<AsyncMessageProcessingConsumer>();
-			for (BlockingQueueConsumer consumer : this.consumers.keySet()) {
+			for (BlockingQueueConsumer consumer : this.consumers) {
 				AsyncMessageProcessingConsumer processor = new AsyncMessageProcessingConsumer(consumer);
 				processors.add(processor);
 				getTaskExecutor().execute(processor);
@@ -510,8 +503,11 @@ public class SimpleMessageListenerContainer extends AbstractMessageListenerConta
 		try {
 			synchronized (this.consumersMonitor) {
 				if (this.consumers != null) {
-					for (BlockingQueueConsumer consumer : this.consumers.keySet()) {
+					Iterator<BlockingQueueConsumer> consumerIterator = this.consumers.iterator();
+					while (consumerIterator.hasNext()) {
+						BlockingQueueConsumer consumer = consumerIterator.next();
 						consumer.basicCancel();
+						consumerIterator.remove();
 					}
 				}
 			}
@@ -536,15 +532,9 @@ public class SimpleMessageListenerContainer extends AbstractMessageListenerConta
 	}
 
 	private boolean isActive(BlockingQueueConsumer consumer) {
-		Boolean consumerActive;
+		boolean consumerActive;
 		synchronized (this.consumersMonitor) {
-			if (this.consumers != null) {
-				Boolean active = this.consumers.get(consumer);
-				consumerActive = active != null && active;
-			}
-			else {
-				consumerActive = false;
-			}
+			consumerActive = this.consumers != null && this.consumers.contains(consumer);
 		}
 		return consumerActive && this.isActive();
 	}
@@ -554,10 +544,10 @@ public class SimpleMessageListenerContainer extends AbstractMessageListenerConta
 		synchronized (this.consumersMonitor) {
 			if (this.consumers == null) {
 				this.cancellationLock.reset();
-				this.consumers = new HashMap<BlockingQueueConsumer, Boolean>(this.concurrentConsumers);
+				this.consumers = new HashSet<BlockingQueueConsumer>(this.concurrentConsumers);
 				for (int i = 0; i < this.concurrentConsumers; i++) {
 					BlockingQueueConsumer consumer = createBlockingQueueConsumer();
-					this.consumers.put(consumer, true);
+					this.consumers.add(consumer);
 					count++;
 				}
 			}
@@ -590,7 +580,7 @@ public class SimpleMessageListenerContainer extends AbstractMessageListenerConta
 			if (this.consumers != null) {
 				for (int i = 0; i < delta; i++) {
 					BlockingQueueConsumer consumer = createBlockingQueueConsumer();
-					this.consumers.put(consumer, true);
+					this.consumers.add(consumer);
 					AsyncMessageProcessingConsumer processor = new AsyncMessageProcessingConsumer(consumer);
 					if (logger.isDebugEnabled()) {
 						logger.debug("Starting a new consumer: " + consumer);
@@ -633,13 +623,15 @@ public class SimpleMessageListenerContainer extends AbstractMessageListenerConta
 		}
 	}
 
+
+
 	private void considerStoppingAConsumer(BlockingQueueConsumer consumer) {
 		synchronized (this.consumersMonitor) {
 			if (this.consumers != null && this.consumers.size() > this.concurrentConsumers) {
 				long now = System.currentTimeMillis();
 				if (this.lastConsumerStopped + this.stopConsumerMinInterval < now) {
 					consumer.basicCancel();
-					this.consumers.put(consumer, false);
+					this.consumers.remove(consumer);
 					if (logger.isDebugEnabled()) {
 						logger.debug("Idle consumer terminating: " + consumer);
 					}
@@ -653,15 +645,15 @@ public class SimpleMessageListenerContainer extends AbstractMessageListenerConta
 		synchronized (this.consumersMonitor) {
 			if (this.consumers != null) {
 				int count = 0;
-				for (Entry<BlockingQueueConsumer, Boolean> consumer : this.consumers.entrySet()) {
-					if (consumer.getValue()) {
-						if (logger.isDebugEnabled()) {
-							logger.debug("Queues changed; stopping consumer: " + consumer.getKey());
-						}
-						consumer.getKey().basicCancel();
-						consumer.setValue(false);
-						count++;
+				Iterator<BlockingQueueConsumer> consumerIterator = this.consumers.iterator();
+				while (consumerIterator.hasNext()) {
+					BlockingQueueConsumer consumer = consumerIterator.next();
+					if (logger.isDebugEnabled()) {
+						logger.debug("Queues changed; stopping consumer: " + consumer);
 					}
+					consumer.basicCancel();
+					consumerIterator.remove();
+					count++;
 				}
 				this.addAndStartConsumers(count);
 			}
@@ -709,7 +701,7 @@ public class SimpleMessageListenerContainer extends AbstractMessageListenerConta
 					BlockingQueueConsumer newConsumer = createBlockingQueueConsumer();
 					newConsumer.setBackOffExecution(consumer.getBackOffExecution());
 					consumer = newConsumer;
-					this.consumers.put(consumer, true);
+					this.consumers.add(consumer);
 					if (getApplicationEventPublisher() != null) {
 						getApplicationEventPublisher()
 								.publishEvent(new AsyncConsumerRestartedEvent(this, oldConsumer, newConsumer));
@@ -729,11 +721,16 @@ public class SimpleMessageListenerContainer extends AbstractMessageListenerConta
 
 		if (getTransactionManager() != null) {
 			try {
-				return new TransactionTemplate(getTransactionManager(), getTransactionAttribute())
+				if (this.transactionTemplate == null) {
+					this.transactionTemplate =
+							new TransactionTemplate(getTransactionManager(), getTransactionAttribute());
+				}
+				return this.transactionTemplate
 						.execute(status -> {
 							ConnectionFactoryUtils.bindResourceToTransaction(
 									new RabbitResourceHolder(consumer.getChannel(), false),
 									getConnectionFactory(), true);
+							// unbound in ResourceHolderSynchronization.beforeCompletion()
 							try {
 								return doReceiveAndExecute(consumer);
 							}
@@ -755,7 +752,7 @@ public class SimpleMessageListenerContainer extends AbstractMessageListenerConta
 
 	}
 
-	private boolean doReceiveAndExecute(BlockingQueueConsumer consumer) throws Throwable {
+	private boolean doReceiveAndExecute(BlockingQueueConsumer consumer) throws Throwable { //NOSONAR
 
 		Channel channel = consumer.getChannel();
 
@@ -770,13 +767,37 @@ public class SimpleMessageListenerContainer extends AbstractMessageListenerConta
 				executeListener(channel, message);
 			}
 			catch (ImmediateAcknowledgeAmqpException e) {
+				if (this.logger.isDebugEnabled()) {
+					this.logger.debug("User requested ack for failed delivery: "
+							+ message.getMessageProperties().getDeliveryTag());
+				}
 				break;
 			}
 			catch (Throwable ex) { //NOSONAR
-				consumer.rollbackOnExceptionIfNecessary(ex);
-				throw ex;
+				if (causeChainHasImmediateAcknowledgeAmqpException(ex)) {
+					if (this.logger.isDebugEnabled()) {
+						this.logger.debug("User requested ack for failed delivery: "
+								+ message.getMessageProperties().getDeliveryTag());
+					}
+					break;
+				}
+				if (getTransactionManager() != null) {
+					if (getTransactionAttribute().rollbackOn(ex)) {
+						consumer.clearDeliveryTags();
+						throw ex; // encompassing transaction will handle the rollback.
+					}
+					else {
+						if (this.logger.isDebugEnabled()) {
+							this.logger.debug("No rollback for " + ex);
+						}
+						break;
+					}
+				}
+				else {
+					consumer.rollbackOnExceptionIfNecessary(ex);
+					throw ex;
+				}
 			}
-
 		}
 
 		return consumer.commitIfNecessary(isChannelLocallyTransacted());
@@ -860,6 +881,8 @@ public class SimpleMessageListenerContainer extends AbstractMessageListenerConta
 			int consecutiveIdles = 0;
 
 			int consecutiveMessages = 0;
+
+			this.consumer.setLocallyTransacted(isChannelLocallyTransacted());
 
 			if (this.consumer.getQueueCount() < 1) {
 				if (logger.isDebugEnabled()) {
@@ -1037,11 +1060,6 @@ public class SimpleMessageListenerContainer extends AbstractMessageListenerConta
 				try {
 					this.consumer.stop();
 					SimpleMessageListenerContainer.this.cancellationLock.release(this.consumer);
-					synchronized (SimpleMessageListenerContainer.this.consumersMonitor) {
-						if (SimpleMessageListenerContainer.this.consumers != null) {
-							SimpleMessageListenerContainer.this.consumers.remove(this.consumer);
-						}
-					}
 					if (getApplicationEventPublisher() != null) {
 						getApplicationEventPublisher().publishEvent(
 								new AsyncConsumerStoppedEvent(SimpleMessageListenerContainer.this, this.consumer));

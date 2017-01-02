@@ -32,10 +32,11 @@ import org.junit.Test;
 
 import org.springframework.amqp.core.Address;
 import org.springframework.amqp.rabbit.connection.CachingConnectionFactory;
-import org.springframework.amqp.rabbit.connection.ConnectionFactory;
+import org.springframework.amqp.rabbit.core.ChannelAwareMessageListener;
 import org.springframework.amqp.rabbit.junit.BrokerRunning;
 import org.springframework.amqp.rabbit.listener.DirectReplyToMessageListenerContainer.ChannelHolder;
 import org.springframework.amqp.utils.test.TestUtils;
+import org.springframework.beans.DirectFieldAccessor;
 
 import com.rabbitmq.client.AMQP.BasicProperties;
 import com.rabbitmq.client.Channel;
@@ -62,10 +63,34 @@ public class DirectReplyToMessageListenerContainerTests {
 
 	@Test
 	public void testReleaseConsumerRace() throws Exception {
-		ConnectionFactory connectionFactory = new CachingConnectionFactory("localhost");
+		CachingConnectionFactory connectionFactory = new CachingConnectionFactory("localhost");
 		DirectReplyToMessageListenerContainer container = new DirectReplyToMessageListenerContainer(connectionFactory);
 		final CountDownLatch latch = new CountDownLatch(1);
-		container.setMessageListener(m -> latch.countDown());
+
+		// Populate void MessageListener for wrapping in the DirectReplyToMessageListenerContainer
+		container.setMessageListener(m -> { });
+
+		// Extract actual ChannelAwareMessageListener from container
+		// with the inUseConsumerChannels.remove(channel); operation
+		final ChannelAwareMessageListener messageListener =
+				TestUtils.getPropertyValue(container, "messageListener",
+						ChannelAwareMessageListener.class);
+
+		// Wrap actual listener for latch barrier exactly after inUseConsumerChannels.remove(channel);
+		ChannelAwareMessageListener mockMessageListener =
+				(message, channel) -> {
+					try {
+						messageListener.onMessage(message, channel);
+					}
+					finally {
+						latch.countDown();
+					}
+				};
+
+		// Populated mocked listener via reflection
+		new DirectFieldAccessor(container)
+				.setPropertyValue("messageListener", mockMessageListener);
+
 		container.start();
 		ChannelHolder channel1 = container.getChannelHolder();
 		BasicProperties props = new BasicProperties().builder().replyTo(Address.AMQ_RABBITMQ_REPLY_TO).build();
@@ -89,6 +114,8 @@ public class DirectReplyToMessageListenerContainerTests {
 		assertThat(inUse.size(), equalTo(1));
 		container.releaseConsumerFor(channel2, false, null);
 		assertThat(inUse.size(), equalTo(0));
+		container.stop();
+		connectionFactory.destroy();
 	}
 
 }

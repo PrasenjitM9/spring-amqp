@@ -1183,6 +1183,9 @@ Message receiveAndConvert(long timeoutMillis) throws AmqpException;
 Message receiveAndConvert(String queueName, long timeoutMillis) throws AmqpException;
 ----
 
+Starting with __version 2.0__, there are variants of these methods that take an additional `ParameterizedTypeReference` argument to convert complex types.
+The template must be configured with a `SmartMessageConverter`; see <<json-complex>> for more information.
+
 Similar to `sendAndReceive` methods, beginning with _version 1.3_, the `AmqpTemplate` has several convenience `receiveAndReply` methods for synchronously receiving, processing and replying to messages:
 [source,java]
 ----
@@ -2537,6 +2540,20 @@ For this reason, the infrastructure provides the `targetObject` message property
 converter to determine the type.
 ====
 
+[[json-complex]]
+====== Converting From a Message With RabbitTemplate
+
+As mentioned above, type information is conveyed in message headers to assist the converter when converting from a message.
+This works fine in most cases, but when using generic types, it can only convert simple objects and known "container" objects (lists, arrays, maps).
+Starting with __version 2.0__, the `Jackson2JsonMessageConverter` implements `SmartMessageConverter` which allows it to be used with the new `RabbitTemplate` methods that take a `ParameterizedTypeReference` argument; this allows conversion of complex generic types.
+For example:
+
+[source, java]
+----
+Foo<Bar<Baz, Qux>> foo =
+    rabbitTemplate.receiveAndConvert(new ParameterizedTypeReference<Foo<Bar<Baz, Qux>>>() { });
+----
+
 ===== MarshallingMessageConverter
 
 Yet another option is the `MarshallingMessageConverter`.
@@ -2699,7 +2716,11 @@ See the Javadoc of `AmqpTemplate` for more detail.
 
 Starting with _version 1.5.0_, each of the `sendAndReceive` method variants has an overloaded version that takes `CorrelationData`.
 Together with a properly configured connection factory, this enables the receipt of publisher confirms for the send side of the operation.
-See <<template-confirms>> for more information.
+See <<template-confirms>> and the javadoc for `RabbitOperations` for more information.
+
+Starting with __version 2.0__, there are variants of these methods (`convertSendAndReceiveAsType`) that take an additional `ParameterizedTypeReference` argument to convert complex returned types.
+The template must be configured with a `SmartMessageConverter`; see <<json-complex>> for more information.
+
 
 [[reply-timeout]]
 ===== Reply Timeout
@@ -2960,6 +2981,9 @@ public AsyncRabbitTemplate(RabbitTemplate template)
 ----
 
 See <<direct-reply-to>> to use Direct reply-to with the synchronous `RabbitTemplate`.
+
+Starting with __version 2.0__, there are variants of these methods (`convertSendAndReceiveAsType`) that take an additional `ParameterizedTypeReference` argument to convert complex returned types.
+The underlying `RabbitTemplate` must be configured with a `SmartMessageConverter`; see <<json-complex>> for more information.
 
 [[remoting]]
 ===== Spring Remoting with AMQP
@@ -3285,7 +3309,7 @@ public abstract class AbstractStockAppRabbitConfiguration {
 
     @Bean
     public MessageConverter jsonMessageConverter() {
-        return new JsonMessageConverter();
+        return new Jackson2JsonMessageConverter();
     }
 
     @Bean
@@ -3833,6 +3857,34 @@ Significantly, if the transaction fails to commit (e.g.
 a database constraint error, or connectivity problem), then the AMQP transaction will also be rolled back, and the message will be returned to the broker.
 This is sometimes known as a Best Efforts 1 Phase Commit, and is a very powerful pattern for reliable messaging.
 If the `channelTransacted` flag was set to false in the example above, which is the default, then the external transaction would still be provided for the listener, but all messaging operations would be auto-acked, so the effect is to commit the messaging operations even on a rollback of the business operation.
+
+[[conditional-rollback]]
+===== Conditional Rollback
+
+Prior to _version 1.6.6_, adding a rollback rule to a container's `transactionAttribute`, when using an external transaction manager (e.g. JDBC) had no effect; exceptions always rolled back the transaction.
+
+Also, when using a http://docs.spring.io/spring-framework/docs/current/spring-framework-reference/html/transaction.html#transaction-declarative[transaction advice] in the container's advice chain, conditional rollback was not very useful because all listener exceptions are wrapped in a `ListenerExecutionFailedException`.
+
+The first problem has been corrected and the rules are now applied properly.
+Further, the `ListenerFailedRuleBasedTransactionAttribute` is now provided; it is a subclass of `RuleBasedTransactionAttribute`, with the only difference being that it is aware of the `ListenerExecutionFailedException` and uses the cause of such exceptions for the rule.
+This transaction attribute can be used directly in the container, or via a transaction advice.
+
+An example of using this rule follows:
+
+[source, java]
+----
+@Bean
+public AbstractMessageListenerContainer container() {
+    ...
+    container.setTransactionManager(transactionManager);
+    RuleBasedTransactionAttribute transactionAttribute =
+        new ListenerFailedRuleBasedTransactionAttribute();
+    transactionAttribute.setRollbackRules(Collections.singletonList(
+        new NoRollbackRuleAttribute(DontRollBackException.class)));
+    container.setTransactionAttribute(transactionAttribute);
+    ...
+}
+----
 
 ===== A note on Rollback of Received Messages
 

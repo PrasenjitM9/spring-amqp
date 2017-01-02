@@ -63,6 +63,7 @@ import org.junit.After;
 import org.junit.Before;
 import org.junit.Rule;
 import org.junit.Test;
+import org.junit.rules.TestName;
 import org.junit.runner.RunWith;
 import org.mockito.ArgumentCaptor;
 import org.mockito.Matchers;
@@ -159,6 +160,9 @@ public class RabbitTemplateIntegrationTests {
 	public LogLevelAdjuster logAdjuster = new LogLevelAdjuster(Level.DEBUG, RabbitTemplate.class,
 			RabbitAdmin.class, RabbitTemplateIntegrationTests.class, BrokerRunning.class);
 
+	@Rule
+	public TestName testName = new TestName();
+
 	private CachingConnectionFactory connectionFactory;
 
 	private RabbitTemplate template;
@@ -185,10 +189,12 @@ public class RabbitTemplateIntegrationTests {
 		when(cf.getUsername()).thenReturn("guest");
 		when(bf.getBean("cf")).thenReturn(cf);
 		this.template.setBeanFactory(bf);
+		template.setBeanName(this.testName.getMethodName() + "RabbitTemplate");
 	}
 
 	@After
 	public void cleanup() throws Exception {
+		this.template.stop();
 		((DisposableBean) template.getConnectionFactory()).destroy();
 		this.brokerIsRunning.removeTestQueues();
 	}
@@ -302,7 +308,12 @@ public class RabbitTemplateIntegrationTests {
 		assertNotNull(out);
 		assertEquals("blockNoTO", out);
 		this.template.setReceiveTimeout(1); // test the no message after timeout path
-		assertNull(this.template.receive(ROUTE));
+		try {
+			assertNull(this.template.receive(ROUTE));
+		}
+		catch (ConsumeOkNotReceivedException e) {
+			// we're expecting no result, this could happen, depending on timing.
+		}
 	}
 
 	@Test
@@ -585,6 +596,7 @@ public class RabbitTemplateIntegrationTests {
 		// Message was consumed so nothing left on queue
 		reply = template.receive();
 		assertEquals(null, reply);
+		template.stop();
 		cachingConnectionFactory.destroy();
 	}
 
@@ -643,6 +655,7 @@ public class RabbitTemplateIntegrationTests {
 		assertEquals(null, reply);
 
 		assertTrue(execConfiguredOk.get());
+		template.stop();
 		connectionFactory.destroy();
 	}
 
@@ -674,6 +687,7 @@ public class RabbitTemplateIntegrationTests {
 		// Message was consumed so nothing left on queue
 		reply = template.receive(ROUTE);
 		assertEquals(null, reply);
+		template.stop();
 		cachingConnectionFactory.destroy();
 	}
 
@@ -705,6 +719,7 @@ public class RabbitTemplateIntegrationTests {
 		// Message was consumed so nothing left on queue
 		reply = template.receive(ROUTE);
 		assertEquals(null, reply);
+		template.stop();
 		cachingConnectionFactory.destroy();
 	}
 
@@ -736,6 +751,7 @@ public class RabbitTemplateIntegrationTests {
 		// Message was consumed so nothing left on queue
 		result = (String) template.receiveAndConvert();
 		assertEquals(null, result);
+		template.stop();
 		cachingConnectionFactory.destroy();
 	}
 
@@ -763,6 +779,7 @@ public class RabbitTemplateIntegrationTests {
 		// Message was consumed so nothing left on queue
 		result = (String) template.receiveAndConvert(ROUTE);
 		assertEquals(null, result);
+		template.stop();
 	}
 
 	@Test
@@ -789,6 +806,7 @@ public class RabbitTemplateIntegrationTests {
 		// Message was consumed so nothing left on queue
 		result = (String) template.receiveAndConvert(ROUTE);
 		assertEquals(null, result);
+		template.stop();
 	}
 
 	@Test
@@ -827,6 +845,7 @@ public class RabbitTemplateIntegrationTests {
 		// Message was consumed so nothing left on queue
 		result = (String) template.receiveAndConvert();
 		assertEquals(null, result);
+		template.stop();
 		cachingConnectionFactory.destroy();
 	}
 
@@ -862,6 +881,7 @@ public class RabbitTemplateIntegrationTests {
 		// Message was consumed so nothing left on queue
 		result = (String) template.receiveAndConvert(ROUTE);
 		assertEquals(null, result);
+		template.stop();
 	}
 
 	@Test
@@ -897,6 +917,7 @@ public class RabbitTemplateIntegrationTests {
 		// Message was consumed so nothing left on queue
 		result = (String) template.receiveAndConvert(ROUTE);
 		assertEquals(null, result);
+		template.stop();
 	}
 
 	@Test
@@ -1140,6 +1161,7 @@ public class RabbitTemplateIntegrationTests {
 		assertNotNull(result);
 		assertEquals("TEST", new String(result.getBody()));
 		assertEquals(messageId, result.getMessageProperties().getCorrelationId());
+		template.stop();
 	}
 
 	@Test
@@ -1163,8 +1185,8 @@ public class RabbitTemplateIntegrationTests {
 	}
 
 	private void sendAndReceiveFastGuts(boolean tempQueue, boolean setDirectReplyToExplicitly, boolean expectUsedTemp) {
+		RabbitTemplate template = createSendAndReceiveRabbitTemplate(this.connectionFactory);
 		try {
-			RabbitTemplate template = createSendAndReceiveRabbitTemplate(this.connectionFactory);
 			template.execute(channel -> {
 				channel.queueDeclarePassive(Address.AMQ_RABBITMQ_REPLY_TO);
 				return null;
@@ -1205,6 +1227,9 @@ public class RabbitTemplateIntegrationTests {
 			assertThat(e.getCause().getCause().getMessage(), containsString("404"));
 			logger.info("Broker does not support fast replies; test skipped " + e.getMessage());
 		}
+		finally {
+			template.stop();
+		}
 	}
 
 	@Test
@@ -1224,8 +1249,8 @@ public class RabbitTemplateIntegrationTests {
 		container.setReceiveTimeout(100);
 		container.afterPropertiesSet();
 		container.start();
+		RabbitTemplate template = createSendAndReceiveRabbitTemplate(this.template.getConnectionFactory());
 		try {
-			RabbitTemplate template = createSendAndReceiveRabbitTemplate(this.template.getConnectionFactory());
 			MessageProperties props = new MessageProperties();
 			props.setContentType("text/plain");
 			Message message = new Message("foo".getBytes(), props);
@@ -1237,6 +1262,7 @@ public class RabbitTemplateIntegrationTests {
 			assertEquals("FOO", new String(reply.getBody()));
 		}
 		finally {
+			template.stop();
 			container.stop();
 		}
 	}

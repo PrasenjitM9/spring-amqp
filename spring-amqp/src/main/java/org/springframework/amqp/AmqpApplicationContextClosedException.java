@@ -1,5 +1,5 @@
 /*
- * Copyright 2002-2016 the original author or authors.
+ * Copyright 2016 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -17,27 +17,18 @@
 package org.springframework.amqp;
 
 /**
- * Special exception for listener implementations that want to signal that the current
- * batch of messages should be acknowledged immediately (i.e. as soon as possible) without
- * rollback, and without consuming any more messages within the current transaction.
+ * Thrown when the connection factory has been destroyed during
+ * context close; the factory can no longer open connections.
  *
- * @author Dave Syer
  * @author Gary Russell
+ * @since 2.0
  *
  */
 @SuppressWarnings("serial")
-public class ImmediateAcknowledgeAmqpException extends AmqpException {
+public class AmqpApplicationContextClosedException extends AmqpException {
 
-	public ImmediateAcknowledgeAmqpException(String message) {
+	public AmqpApplicationContextClosedException(String message) {
 		super(message);
-	}
-
-	public ImmediateAcknowledgeAmqpException(Throwable cause) {
-		super(cause);
-	}
-
-	public ImmediateAcknowledgeAmqpException(String message, Throwable cause) {
-		super(message, cause);
 	}
 
 }
