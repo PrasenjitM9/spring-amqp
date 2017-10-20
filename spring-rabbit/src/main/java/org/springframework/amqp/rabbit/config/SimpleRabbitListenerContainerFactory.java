@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2016 the original author or authors.
+ * Copyright 2014-2017 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -17,6 +17,7 @@
 package org.springframework.amqp.rabbit.config;
 
 import org.springframework.amqp.rabbit.listener.RabbitListenerContainerFactory;
+import org.springframework.amqp.rabbit.listener.RabbitListenerEndpoint;
 import org.springframework.amqp.rabbit.listener.SimpleMessageListenerContainer;
 
 /**
@@ -29,6 +30,8 @@ import org.springframework.amqp.rabbit.listener.SimpleMessageListenerContainer;
  * @author Stephane Nicoll
  * @author Gary Russell
  * @author Artem Bilan
+ * @author Dustin Schultz
+ *
  * @since 1.4
  */
 public class SimpleRabbitListenerContainerFactory
@@ -49,6 +52,8 @@ public class SimpleRabbitListenerContainerFactory
 	private Integer consecutiveIdleTrigger;
 
 	private Long receiveTimeout;
+
+	private Boolean deBatchingEnabled;
 
 	/**
 	 * @param txSize the transaction size.
@@ -114,22 +119,36 @@ public class SimpleRabbitListenerContainerFactory
 		this.receiveTimeout = receiveTimeout;
 	}
 
+	/**
+	 * Determine whether or not the container should de-batch batched
+	 * messages (true) or call the listener with the batch (false). Default: true.
+	 * @param deBatchingEnabled whether or not to disable de-batching of messages.
+	 * @see SimpleMessageListenerContainer#setDeBatchingEnabled(boolean)
+	 */
+	public void setDeBatchingEnabled(final Boolean deBatchingEnabled) {
+		this.deBatchingEnabled = deBatchingEnabled;
+	}
+
 	@Override
 	protected SimpleMessageListenerContainer createContainerInstance() {
 		return new SimpleMessageListenerContainer();
 	}
 
 	@Override
-	protected void initializeContainer(SimpleMessageListenerContainer instance) {
-		super.initializeContainer(instance);
+	protected void initializeContainer(SimpleMessageListenerContainer instance, RabbitListenerEndpoint endpoint) {
+		super.initializeContainer(instance, endpoint);
 
 		if (this.txSize != null) {
 			instance.setTxSize(this.txSize);
 		}
-		if (this.concurrentConsumers != null) {
+		String concurrency = endpoint.getConcurrency();
+		if (concurrency != null) {
+			instance.setConcurrency(concurrency);
+		}
+		else if (this.concurrentConsumers != null) {
 			instance.setConcurrentConsumers(this.concurrentConsumers);
 		}
-		if (this.maxConcurrentConsumers != null) {
+		if ((concurrency == null || !(concurrency.contains("-"))) && this.maxConcurrentConsumers != null) {
 			instance.setMaxConcurrentConsumers(this.maxConcurrentConsumers);
 		}
 		if (this.startConsumerMinInterval != null) {
@@ -146,6 +165,9 @@ public class SimpleRabbitListenerContainerFactory
 		}
 		if (this.receiveTimeout != null) {
 			instance.setReceiveTimeout(this.receiveTimeout);
+		}
+		if (this.deBatchingEnabled != null) {
+			instance.setDeBatchingEnabled(this.deBatchingEnabled);
 		}
 	}
 

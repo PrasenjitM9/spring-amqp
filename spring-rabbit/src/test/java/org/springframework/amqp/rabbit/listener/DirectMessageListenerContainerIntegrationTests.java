@@ -1,5 +1,5 @@
 /*
- * Copyright 2016 the original author or authors.
+ * Copyright 2016-2017 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -18,17 +18,18 @@ package org.springframework.amqp.rabbit.listener;
 
 import static org.hamcrest.Matchers.greaterThanOrEqualTo;
 import static org.hamcrest.Matchers.instanceOf;
+import static org.junit.Assert.assertArrayEquals;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertThat;
 import static org.junit.Assert.assertTrue;
+import static org.mockito.ArgumentMatchers.anyBoolean;
+import static org.mockito.ArgumentMatchers.anyMap;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.BDDMockito.given;
 import static org.mockito.BDDMockito.willAnswer;
-import static org.mockito.Matchers.anyBoolean;
-import static org.mockito.Matchers.anyMap;
-import static org.mockito.Matchers.anyString;
-import static org.mockito.Matchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
 
@@ -80,10 +81,12 @@ import com.rabbitmq.client.Consumer;
 /**
  * @author Gary Russell
  * @author Artem Bilan
+ * @author Alex Panchenko
+ *
  * @since 2.0
  *
  */
-public class DirectMessageListenerContainerTests {
+public class DirectMessageListenerContainerIntegrationTests {
 
 	private static final String Q1 = "testQ1";
 
@@ -106,7 +109,8 @@ public class DirectMessageListenerContainerTests {
 	@Rule
 	public LogLevelAdjuster adjuster = new LogLevelAdjuster(Level.DEBUG,
 			CachingConnectionFactory.class, DirectReplyToMessageListenerContainer.class,
-			DirectMessageListenerContainer.class, DirectMessageListenerContainerTests.class, BrokerRunning.class);
+			DirectMessageListenerContainer.class, DirectMessageListenerContainerIntegrationTests.class,
+			BrokerRunning.class);
 
 	@Rule
 	public TestName testName = new TestName();
@@ -210,6 +214,48 @@ public class DirectMessageListenerContainerTests {
 		assertEquals("FOO", template.convertSendAndReceive(Q1, "foo"));
 		assertEquals("BAR", template.convertSendAndReceive(Q2, "bar"));
 		container.removeQueueNames(Q1, Q2, "junk");
+		assertTrue(consumersOnQueue(Q1, 0));
+		assertTrue(consumersOnQueue(Q2, 0));
+		assertTrue(activeConsumerCount(container, 0));
+		container.stop();
+		assertTrue(consumersOnQueue(Q1, 0));
+		assertTrue(consumersOnQueue(Q2, 0));
+		assertTrue(activeConsumerCount(container, 0));
+		assertEquals(0, TestUtils.getPropertyValue(container, "consumersByQueue", MultiValueMap.class).size());
+		template.stop();
+		cf.destroy();
+	}
+
+	@Test
+	public void testQueueManagementQueueInstances() throws Exception {
+		CachingConnectionFactory cf = new CachingConnectionFactory("localhost");
+		ThreadPoolTaskExecutor executor = new ThreadPoolTaskExecutor();
+		executor.setThreadNamePrefix("client-");
+		executor.afterPropertiesSet();
+		cf.setExecutor(executor);
+		DirectMessageListenerContainer container = new DirectMessageListenerContainer(cf);
+		container.setConsumersPerQueue(2);
+		container.setMessageListener(new MessageListenerAdapter((ReplyingMessageListener<String, String>) in -> {
+			if ("foo".equals(in) || "bar".equals(in)) {
+				return in.toUpperCase();
+			}
+			else {
+				return null;
+			}
+		}));
+		container.setBeanName("qManage");
+		container.setConsumerTagStrategy(new Tag());
+		container.afterPropertiesSet();
+		container.setQueues(new Queue(Q1));
+		assertArrayEquals(new String[] { Q1 }, container.getQueueNames());
+		container.start();
+		container.addQueues(new Queue(Q2));
+		assertTrue(consumersOnQueue(Q1, 2));
+		assertTrue(consumersOnQueue(Q2, 2));
+		RabbitTemplate template = new RabbitTemplate(cf);
+		assertEquals("FOO", template.convertSendAndReceive(Q1, "foo"));
+		assertEquals("BAR", template.convertSendAndReceive(Q2, "bar"));
+		container.removeQueues(new Queue(Q1), new Queue(Q2), new Queue("junk"));
 		assertTrue(consumersOnQueue(Q1, 0));
 		assertTrue(consumersOnQueue(Q2, 0));
 		assertTrue(activeConsumerCount(container, 0));
@@ -355,7 +401,6 @@ public class DirectMessageListenerContainerTests {
 		assertFalse(container.isActive());
 	}
 
-	@SuppressWarnings("unchecked")
 	@Test
 	public void testRecoverBrokerLoss() throws Exception {
 		ConnectionFactory mockCF = mock(ConnectionFactory.class);
@@ -391,7 +436,6 @@ public class DirectMessageListenerContainerTests {
 		container.stop();
 	}
 
-	@SuppressWarnings("unchecked")
 	@Test
 	public void testCancelConsumerBeforeConsumeOk() throws Exception {
 		ConnectionFactory mockCF = mock(ConnectionFactory.class);
@@ -527,7 +571,6 @@ public class DirectMessageListenerContainerTests {
 
 		cf.addConnectionListener(connection -> {
 			cf.onApplicationEvent(new ContextClosedEvent(context));
-			cf.stop();
 			cf.destroy();
 		});
 
@@ -564,13 +607,33 @@ public class DirectMessageListenerContainerTests {
 		new RabbitTemplate(cf).convertAndSend(Q1, "foo");
 		assertTrue(latch.await(10, TimeUnit.SECONDS));
 		cf.onApplicationEvent(new ContextClosedEvent(context));
-		cf.stop();
 		cf.destroy();
 		int n = 0;
 		while (n++ < 100 && container.isRunning()) {
 			Thread.sleep(100);
 		}
 		assertFalse(container.isRunning());
+	}
+
+	@Test
+	public void testDeferredAcks() throws Exception {
+		CachingConnectionFactory cf = new CachingConnectionFactory("localhost");
+		DirectMessageListenerContainer container = new DirectMessageListenerContainer(cf);
+		final CountDownLatch latch = new CountDownLatch(2);
+		container.setMessageListener(m -> {
+			latch.countDown();
+		});
+		container.setQueueNames(Q1);
+		container.setBeanName("deferredAcks");
+		container.setMessagesPerAck(2);
+		container.afterPropertiesSet();
+		container.start();
+		RabbitTemplate rabbitTemplate = new RabbitTemplate(cf);
+		rabbitTemplate.convertAndSend(Q1, "foo");
+		rabbitTemplate.convertAndSend(Q1, "bar");
+		assertTrue(latch.await(10, TimeUnit.SECONDS));
+		container.stop();
+		cf.destroy();
 	}
 
 	private boolean consumersOnQueue(String queue, int expected) throws Exception {
@@ -610,7 +673,7 @@ public class DirectMessageListenerContainerTests {
 
 		@Override
 		public String createConsumerTag(String queue) {
-			return queue + "/" + DirectMessageListenerContainerTests.this.testName.getMethodName() + n++;
+			return queue + "/" + DirectMessageListenerContainerIntegrationTests.this.testName.getMethodName() + n++;
 		}
 
 	}

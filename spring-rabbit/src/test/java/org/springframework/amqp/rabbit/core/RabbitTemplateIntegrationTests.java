@@ -1,5 +1,5 @@
 /*
- * Copyright 2002-2016 the original author or authors.
+ * Copyright 2002-2017 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -21,6 +21,7 @@ import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.instanceOf;
 import static org.hamcrest.Matchers.not;
 import static org.hamcrest.Matchers.startsWith;
+import static org.junit.Assert.assertArrayEquals;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
@@ -29,9 +30,9 @@ import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertThat;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
-import static org.mockito.Matchers.any;
-import static org.mockito.Matchers.anyBoolean;
-import static org.mockito.Matchers.anyString;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyBoolean;
+import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.atLeast;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doReturn;
@@ -44,6 +45,8 @@ import static org.mockito.Mockito.when;
 import java.io.IOException;
 import java.io.UnsupportedEncodingException;
 import java.lang.reflect.Field;
+import java.util.Arrays;
+import java.util.Collection;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.UUID;
@@ -66,11 +69,12 @@ import org.junit.Test;
 import org.junit.rules.TestName;
 import org.junit.runner.RunWith;
 import org.mockito.ArgumentCaptor;
-import org.mockito.Matchers;
 import org.mockito.Mockito;
 
+import org.springframework.amqp.AmqpConnectException;
 import org.springframework.amqp.AmqpException;
 import org.springframework.amqp.AmqpIOException;
+import org.springframework.amqp.UncategorizedAmqpException;
 import org.springframework.amqp.core.Address;
 import org.springframework.amqp.core.AmqpMessageReturnedException;
 import org.springframework.amqp.core.Message;
@@ -126,6 +130,7 @@ import org.springframework.util.ReflectionUtils;
 
 import com.rabbitmq.client.AMQP;
 import com.rabbitmq.client.AMQP.BasicProperties;
+import com.rabbitmq.client.AlreadyClosedException;
 import com.rabbitmq.client.Channel;
 import com.rabbitmq.client.Consumer;
 import com.rabbitmq.client.Envelope;
@@ -197,6 +202,42 @@ public class RabbitTemplateIntegrationTests {
 		this.template.stop();
 		((DisposableBean) template.getConnectionFactory()).destroy();
 		this.brokerIsRunning.removeTestQueues();
+	}
+
+	@Test
+	public void testChannelCloseInTx() throws Exception {
+		this.connectionFactory.setPublisherReturns(false);
+		Channel channel = this.connectionFactory.createConnection().createChannel(true);
+		RabbitResourceHolder holder = new RabbitResourceHolder(channel, true);
+		TransactionSynchronizationManager.bindResource(this.connectionFactory, holder);
+		try {
+			this.template.setChannelTransacted(true);
+			this.template.convertAndSend(ROUTE, "foo");
+			this.template.convertAndSend(UUID.randomUUID().toString(), ROUTE, "xxx"); // force channel close
+			int n = 0;
+			while (n++ < 100 && channel.isOpen()) {
+				Thread.sleep(100);
+			}
+			assertFalse(channel.isOpen());
+			try {
+				this.template.convertAndSend(ROUTE, "bar");
+				fail("Expected Exception");
+			}
+			catch (UncategorizedAmqpException e) {
+				if (e.getCause() instanceof IllegalStateException) {
+					assertThat(e.getCause().getMessage(), equalTo("Channel closed during transaction"));
+				}
+				else {
+					fail("Expected IllegalStateException not" + e.getCause());
+				}
+			}
+			catch (AmqpConnectException e) {
+				assertThat(e.getCause(), instanceOf(AlreadyClosedException.class));
+			}
+		}
+		finally {
+			TransactionSynchronizationManager.unbindResource(this.connectionFactory);
+		}
 	}
 
 	@Test
@@ -369,9 +410,21 @@ public class RabbitTemplateIntegrationTests {
 
 	@Test
 	public void testSendAndReceiveWithPostProcessor() throws Exception {
+		final String[] strings = new String[] { "1", "2" };
 		template.convertAndSend(ROUTE, (Object) "message", message -> {
 			message.getMessageProperties().setContentType("text/other");
 			// message.getMessageProperties().setUserId("foo");
+			MessageProperties props = message.getMessageProperties();
+			props.getHeaders().put("strings", strings);
+			props.getHeaders().put("objects", new Object[] { new Foo(), new Foo() });
+			props.getHeaders().put("bytes", "abc".getBytes());
+			return message;
+		});
+		template.setAfterReceivePostProcessors(message -> {
+			assertEquals(Arrays.asList(strings), message.getMessageProperties().getHeaders().get("strings"));
+			assertEquals(Arrays.asList(new String[] { "FooAsAString", "FooAsAString" }),
+					message.getMessageProperties().getHeaders().get("objects"));
+			assertArrayEquals("abc".getBytes(), (byte[]) message.getMessageProperties().getHeaders().get("bytes"));
 			return message;
 		});
 		String result = (String) template.receiveAndConvert(ROUTE);
@@ -620,7 +673,7 @@ public class RabbitTemplateIntegrationTests {
 		final AtomicBoolean execConfiguredOk = new AtomicBoolean();
 
 		doAnswer(invocation -> {
-			String log = invocation.getArgumentAt(0, String.class);
+			String log = invocation.getArgument(0);
 			if (log.startsWith("Message received") && Thread.currentThread().getName().startsWith(execName)) {
 				execConfiguredOk.set(true);
 			}
@@ -1308,7 +1361,7 @@ public class RabbitTemplateIntegrationTests {
 			assertThat(e.getCause().getCause(), instanceOf(ShutdownSignalException.class));
 			assertThat(e.getCause().getCause().getMessage(), containsString("404"));
 		}
-		verify(logger, never()).error(org.mockito.Matchers.any());
+		verify(logger, never()).error(any());
 		ArgumentCaptor<Object> logs = ArgumentCaptor.forClass(Object.class);
 		verify(logger, atLeast(2)).debug(logs.capture());
 		boolean queue = false;
@@ -1333,7 +1386,7 @@ public class RabbitTemplateIntegrationTests {
 			message.getMessageProperties().setHeader("cfKey", "foo");
 			return message;
 		});
-		verify(channel1).basicPublish(anyString(), anyString(), Matchers.anyBoolean(), any(BasicProperties.class),
+		verify(channel1).basicPublish(anyString(), anyString(), anyBoolean(), any(BasicProperties.class),
 				any(byte[].class));
 
 		Connection connection2 = mock(Connection.class);
@@ -1344,7 +1397,7 @@ public class RabbitTemplateIntegrationTests {
 			message.getMessageProperties().setHeader("cfKey", "bar");
 			return message;
 		});
-		verify(channel1).basicPublish(anyString(), anyString(), Matchers.anyBoolean(), any(BasicProperties.class),
+		verify(channel1).basicPublish(anyString(), anyString(), anyBoolean(), any(BasicProperties.class),
 				any(byte[].class));
 	}
 
@@ -1438,6 +1491,38 @@ public class RabbitTemplateIntegrationTests {
 		assertThat(((AMQP.Connection.Close) shutdownReason).getReplyCode(), equalTo(AMQP.CONNECTION_FORCED));
 	}
 
+	@Test
+	public void testInvoke() {
+		this.template.invoke(t -> {
+			t.execute(c -> {
+				t.execute(channel -> {
+					assertSame(c, channel);
+					return null;
+				});
+				return null;
+			});
+			return null;
+		});
+		ThreadLocal<?> tl = TestUtils.getPropertyValue(this.template, "dedicatedChannels", ThreadLocal.class);
+		assertNull(tl.get());
+	}
+
+	@Test
+	public void waitForConfirms() {
+		this.connectionFactory.setPublisherConfirms(true);
+		Collection<?> messages = getMessagesToSend();
+		Boolean result = this.template.invoke(t -> {
+			messages.forEach(m -> t.convertAndSend(ROUTE, m));
+			t.waitForConfirmsOrDie(10_000);
+			return true;
+		});
+		assertTrue(result);
+	}
+
+	private Collection<String> getMessagesToSend() {
+		return Arrays.asList("foo", "bar");
+	}
+
 	@SuppressWarnings("serial")
 	private class PlannedException extends RuntimeException {
 
@@ -1483,6 +1568,19 @@ public class RabbitTemplateIntegrationTests {
 		@Bean
 		public ConnectionFactory defaultCF() {
 			return mock(ConnectionFactory.class);
+		}
+
+	}
+
+	private static class Foo {
+
+		Foo() {
+			super();
+		}
+
+		@Override
+		public String toString() {
+			return "FooAsAString";
 		}
 
 	}

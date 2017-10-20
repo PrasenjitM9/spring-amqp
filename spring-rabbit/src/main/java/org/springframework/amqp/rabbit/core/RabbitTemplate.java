@@ -1,5 +1,5 @@
 /*
- * Copyright 2002-2016 the original author or authors.
+ * Copyright 2002-2017 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -142,7 +142,7 @@ public class RabbitTemplate extends RabbitAccessor implements BeanFactoryAware, 
 
 	private static final String RETURN_CORRELATION_KEY = "spring_request_return_correlation";
 
-	/** Alias for amq.direct default exchange */
+	/** Alias for amq.direct default exchange. */
 	private static final String DEFAULT_EXCHANGE = "";
 
 	private static final String DEFAULT_ROUTING_KEY = "";
@@ -154,6 +154,13 @@ public class RabbitTemplate extends RabbitAccessor implements BeanFactoryAware, 
 	private static final String DEFAULT_ENCODING = "UTF-8";
 
 	private static final SpelExpressionParser PARSER = new SpelExpressionParser();
+
+	/*
+	 * Not static as normal since we want this TL to be scoped within the template instance.
+	 */
+	private final ThreadLocal<Channel> dedicatedChannels = new ThreadLocal<>();
+
+	private final AtomicInteger activeTemplateCallbacks = new AtomicInteger();
 
 	private final ConcurrentMap<Channel, RabbitTemplate> publisherConfirmChannels =
 			new ConcurrentHashMap<Channel, RabbitTemplate>();
@@ -222,6 +229,8 @@ public class RabbitTemplate extends RabbitAccessor implements BeanFactoryAware, 
 	private volatile Collection<MessagePostProcessor> beforePublishPostProcessors;
 
 	private volatile Collection<MessagePostProcessor> afterReceivePostProcessors;
+
+	private volatile CorrelationDataPostProcessor correlationDataPostProcessor;
 
 	private volatile boolean isListener;
 
@@ -391,6 +400,15 @@ public class RabbitTemplate extends RabbitAccessor implements BeanFactoryAware, 
 	}
 
 	/**
+	 * Return the properties converter.
+	 * @return the converter.
+	 * @since 2.0
+	 */
+	protected MessagePropertiesConverter getMessagePropertiesConverter() {
+		return this.messagePropertiesConverter;
+	}
+
+	/**
 	 * Return the message converter for this template. Useful for clients that want to take advantage of the converter
 	 * in {@link ChannelCallback} implementations.
 	 *
@@ -556,6 +574,17 @@ public class RabbitTemplate extends RabbitAccessor implements BeanFactoryAware, 
 		Assert.notNull(afterReceivePostProcessors, "'afterReceivePostProcessors' cannot be null");
 		Assert.noNullElements(afterReceivePostProcessors, "'afterReceivePostProcessors' cannot have null elements");
 		this.afterReceivePostProcessors = MessagePostProcessorUtils.sort(Arrays.asList(afterReceivePostProcessors));
+	}
+
+	/**
+	 * Set a {@link CorrelationDataPostProcessor} to be invoked before publishing a message.
+	 * Correlation data is used to correlate publisher confirms.
+	 * @param correlationDataPostProcessor the post processor.
+	 * @since 1.6.7
+	 * @see #setConfirmCallback(ConfirmCallback)
+	 */
+	public void setCorrelationDataPostProcessor(CorrelationDataPostProcessor correlationDataPostProcessor) {
+		this.correlationDataPostProcessor = correlationDataPostProcessor;
 	}
 
 	/**
@@ -895,7 +924,7 @@ public class RabbitTemplate extends RabbitAccessor implements BeanFactoryAware, 
 	public void convertAndSend(String exchange, String routingKey, final Object message,
 			final MessagePostProcessor messagePostProcessor, CorrelationData correlationData) throws AmqpException {
 		Message messageToSend = convertMessageIfNecessary(message);
-		messageToSend = messagePostProcessor.postProcessMessage(messageToSend);
+		messageToSend = messagePostProcessor.postProcessMessage(messageToSend, correlationData);
 		send(exchange, routingKey, messageToSend, correlationData);
 	}
 
@@ -1448,7 +1477,7 @@ public class RabbitTemplate extends RabbitAccessor implements BeanFactoryAware, 
 			final MessagePostProcessor messagePostProcessor, final CorrelationData correlationData) {
 		Message requestMessage = convertMessageIfNecessary(message);
 		if (messagePostProcessor != null) {
-			requestMessage = messagePostProcessor.postProcessMessage(requestMessage);
+			requestMessage = messagePostProcessor.postProcessMessage(requestMessage, correlationData);
 		}
 		Message replyMessage = doSendAndReceive(exchange, routingKey, requestMessage, correlationData);
 		return replyMessage;
@@ -1690,32 +1719,42 @@ public class RabbitTemplate extends RabbitAccessor implements BeanFactoryAware, 
 
 	private <T> T doExecute(ChannelCallback<T> action, ConnectionFactory connectionFactory) {
 		Assert.notNull(action, "Callback object must not be null");
-		Channel channel;
+		Channel channel = null;
+		boolean invokeScope = false;
+		// No need to check the thread local if we know that no invokes are in process
+		if (this.activeTemplateCallbacks.get() > 0) {
+			channel = this.dedicatedChannels.get();
+		}
 		RabbitResourceHolder resourceHolder = null;
 		Connection connection = null; // NOSONAR (close)
-		if (isChannelTransacted()) {
-			resourceHolder = ConnectionFactoryUtils.getTransactionalResourceHolder(connectionFactory, true);
-			channel = resourceHolder.getChannel();
-			if (channel == null) {
-				ConnectionFactoryUtils.releaseResources(resourceHolder);
-				throw new IllegalStateException("Resource holder returned a null channel");
+		if (channel == null) {
+			if (isChannelTransacted()) {
+				resourceHolder = ConnectionFactoryUtils.getTransactionalResourceHolder(connectionFactory, true);
+				channel = resourceHolder.getChannel();
+				if (channel == null) {
+					ConnectionFactoryUtils.releaseResources(resourceHolder);
+					throw new IllegalStateException("Resource holder returned a null channel");
+				}
+			}
+			else {
+				connection = connectionFactory.createConnection(); // NOSONAR - RabbitUtils
+				if (connection == null) {
+					throw new IllegalStateException("Connection factory returned a null connection");
+				}
+				try {
+					channel = connection.createChannel(false);
+					if (channel == null) {
+						throw new IllegalStateException("Connection returned a null channel");
+					}
+				}
+				catch (RuntimeException e) {
+					RabbitUtils.closeConnection(connection);
+					throw e;
+				}
 			}
 		}
 		else {
-			connection = connectionFactory.createConnection(); // NOSONAR - RabbitUtils
-			if (connection == null) {
-				throw new IllegalStateException("Connection factory returned a null connection");
-			}
-			try {
-				channel = connection.createChannel(false);
-				if (channel == null) {
-					throw new IllegalStateException("Connection returned a null channel");
-				}
-			}
-			catch (RuntimeException e) {
-				RabbitUtils.closeConnection(connection);
-				throw e;
-			}
+			invokeScope = true;
 		}
 		try {
 			if (this.confirmsOrReturnsCapable == null) {
@@ -1737,6 +1776,59 @@ public class RabbitTemplate extends RabbitAccessor implements BeanFactoryAware, 
 			throw convertRabbitAccessException(ex);
 		}
 		finally {
+			if (!invokeScope) {
+				if (resourceHolder != null) {
+					ConnectionFactoryUtils.releaseResources(resourceHolder);
+				}
+				else {
+					RabbitUtils.closeChannel(channel);
+					RabbitUtils.closeConnection(connection);
+				}
+			}
+		}
+	}
+
+	@Override
+	public <T> T invoke(OperationsCallback<T> action) {
+		final Channel currentChannel = this.dedicatedChannels.get();
+		Assert.state(currentChannel == null, () -> "Nested invoke() calls are not supported; channel '" + currentChannel
+				+ "' is already associated with this thread");
+		this.activeTemplateCallbacks.incrementAndGet();
+		RabbitResourceHolder resourceHolder = null;
+		Connection connection = null; // NOSONAR (close)
+		Channel channel;
+		if (isChannelTransacted()) {
+			resourceHolder = ConnectionFactoryUtils.getTransactionalResourceHolder(getConnectionFactory(), true);
+			channel = resourceHolder.getChannel();
+			if (channel == null) {
+				ConnectionFactoryUtils.releaseResources(resourceHolder);
+				throw new IllegalStateException("Resource holder returned a null channel");
+			}
+		}
+		else {
+			connection = getConnectionFactory().createConnection(); // NOSONAR - RabbitUtils
+			if (connection == null) {
+				throw new IllegalStateException("Connection factory returned a null connection");
+			}
+			try {
+				channel = connection.createChannel(false);
+				if (channel == null) {
+					throw new IllegalStateException("Connection returned a null channel");
+				}
+				RabbitUtils.setPhysicalCloseRequired(channel, true);
+				this.dedicatedChannels.set(channel);
+			}
+			catch (RuntimeException e) {
+				RabbitUtils.closeConnection(connection);
+				throw e;
+			}
+		}
+		try {
+			return action.doInRabbit(this);
+		}
+		finally {
+			this.activeTemplateCallbacks.decrementAndGet();
+			this.dedicatedChannels.remove();
 			if (resourceHolder != null) {
 				ConnectionFactoryUtils.releaseResources(resourceHolder);
 			}
@@ -1744,6 +1836,38 @@ public class RabbitTemplate extends RabbitAccessor implements BeanFactoryAware, 
 				RabbitUtils.closeChannel(channel);
 				RabbitUtils.closeConnection(connection);
 			}
+		}
+	}
+
+	@Override
+	public boolean waitForConfirms(long timeout) {
+		Channel channel = this.dedicatedChannels.get();
+		Assert.state(channel != null, "This operation is only available within the scope of an invoke operation");
+		try {
+			return channel.waitForConfirms(timeout);
+		}
+		catch (TimeoutException e) {
+			throw RabbitExceptionTranslator.convertRabbitAccessException(e);
+		}
+		catch (InterruptedException e) {
+			Thread.currentThread().interrupt();
+			throw RabbitExceptionTranslator.convertRabbitAccessException(e);
+		}
+	}
+
+	@Override
+	public void waitForConfirmsOrDie(long timeout) {
+		Channel channel = this.dedicatedChannels.get();
+		Assert.state(channel != null, "This operation is only available within the scope of an invoke operation");
+		try {
+			channel.waitForConfirmsOrDie(timeout);
+		}
+		catch (IOException | TimeoutException e) {
+			throw RabbitExceptionTranslator.convertRabbitAccessException(e);
+		}
+		catch (InterruptedException e) {
+			Thread.currentThread().interrupt();
+			throw RabbitExceptionTranslator.convertRabbitAccessException(e);
 		}
 	}
 
@@ -1767,7 +1891,7 @@ public class RabbitTemplate extends RabbitAccessor implements BeanFactoryAware, 
 	 * @param message The Message to send.
 	 * @param mandatory The mandatory flag.
 	 * @param correlationData The correlation data.
-	 * @throws IOException If thrown by RabbitMQ API methods
+	 * @throws Exception If thrown by RabbitMQ API methods
 	 */
 	public void doSend(Channel channel, String exchange, String routingKey, Message message,
 			boolean mandatory, CorrelationData correlationData) throws Exception {
@@ -1784,7 +1908,6 @@ public class RabbitTemplate extends RabbitAccessor implements BeanFactoryAware, 
 					+ "on exchange [" + exchange + "], routingKey = [" + routingKey + "]");
 		}
 
-		setupConfirm(channel, correlationData);
 		Message messageToUse = message;
 		MessageProperties messageProperties = messageToUse.getMessageProperties();
 		if (mandatory) {
@@ -1792,18 +1915,17 @@ public class RabbitTemplate extends RabbitAccessor implements BeanFactoryAware, 
 		}
 		if (this.beforePublishPostProcessors != null) {
 			for (MessagePostProcessor processor : this.beforePublishPostProcessors) {
-				messageToUse = processor.postProcessMessage(messageToUse);
+				messageToUse = processor.postProcessMessage(messageToUse, correlationData);
 			}
 		}
+		setupConfirm(channel, messageToUse, correlationData);
 		if (this.userIdExpression != null && messageProperties.getUserId() == null) {
 			String userId = this.userIdExpression.getValue(this.evaluationContext, messageToUse, String.class);
 			if (userId != null) {
 				messageProperties.setUserId(userId);
 			}
 		}
-		BasicProperties convertedMessageProperties = this.messagePropertiesConverter
-				.fromMessageProperties(messageProperties, this.encoding);
-		channel.basicPublish(exchange, routingKey, mandatory, convertedMessageProperties, messageToUse.getBody());
+		sendToRabbit(channel, exchange, routingKey, mandatory, messageToUse);
 		// Check if commit needed
 		if (isChannelLocallyTransacted(channel)) {
 			// Transacted channel created by this template -> commit.
@@ -1811,9 +1933,19 @@ public class RabbitTemplate extends RabbitAccessor implements BeanFactoryAware, 
 		}
 	}
 
-	private void setupConfirm(Channel channel, CorrelationData correlationData) {
+	protected void sendToRabbit(Channel channel, String exchange, String routingKey, boolean mandatory,
+			Message message) throws IOException {
+		BasicProperties convertedMessageProperties = this.messagePropertiesConverter
+				.fromMessageProperties(message.getMessageProperties(), this.encoding);
+		channel.basicPublish(exchange, routingKey, mandatory, convertedMessageProperties, message.getBody());
+	}
+
+	private void setupConfirm(Channel channel, Message message, CorrelationData correlationData) {
 		if (this.confirmCallback != null && channel instanceof PublisherCallbackChannel) {
 			PublisherCallbackChannel publisherCallbackChannel = (PublisherCallbackChannel) channel;
+			correlationData = this.correlationDataPostProcessor != null
+					? this.correlationDataPostProcessor.postProcess(message, correlationData)
+					: correlationData;
 			publisherCallbackChannel.addPendingConfirm(this, channel.getNextPublishSeqNo(),
 					new PendingConfirm(correlationData, System.currentTimeMillis()));
 		}
@@ -1822,7 +1954,6 @@ public class RabbitTemplate extends RabbitAccessor implements BeanFactoryAware, 
 	/**
 	 * Check whether the given Channel is locally transacted, that is, whether its transaction is managed by this
 	 * template's Channel handling and not by an external transaction coordinator.
-	 *
 	 * @param channel the Channel to check
 	 * @return whether the given Channel is locally transacted
 	 * @see ConnectionFactoryUtils#isChannelTransactional

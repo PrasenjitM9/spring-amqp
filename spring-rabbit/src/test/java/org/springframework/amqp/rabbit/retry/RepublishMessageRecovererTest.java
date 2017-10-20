@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2016 the original author or authors.
+ * Copyright 2014-2017 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -21,20 +21,24 @@ import static org.mockito.Mockito.verify;
 
 import java.io.ByteArrayOutputStream;
 import java.io.PrintStream;
+import java.util.Map;
 
 import org.junit.Before;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.mockito.Mock;
-import org.mockito.runners.MockitoJUnitRunner;
+import org.mockito.junit.MockitoJUnitRunner;
 
 import org.springframework.amqp.core.AmqpTemplate;
 import org.springframework.amqp.core.Message;
+import org.springframework.amqp.core.MessageDeliveryMode;
 import org.springframework.amqp.core.MessageProperties;
 
 /**
  * @author James Carr
  * @author Gary Russell
+ * @author Artem Bilan
+ *
  * @since 1.3
  */
 @RunWith(MockitoJUnitRunner.class)
@@ -44,9 +48,8 @@ public class RepublishMessageRecovererTest {
 
 	private final Throwable cause = new Exception(new Exception("I am Error. When all else fails use fire."));
 
-	private
 	@Mock
-	AmqpTemplate amqpTemplate;
+	private AmqpTemplate amqpTemplate;
 
 	private RepublishMessageRecoverer recoverer;
 
@@ -110,6 +113,35 @@ public class RepublishMessageRecovererTest {
 
 		assertEquals("the.original.exchange",
 				message.getMessageProperties().getHeaders().get("x-original-exchange"));
+	}
+
+	@Test
+	public void shouldRemapDeliveryMode() {
+		message.getMessageProperties().setDeliveryMode(null);
+		message.getMessageProperties().setReceivedDeliveryMode(MessageDeliveryMode.PERSISTENT);
+		recoverer = new RepublishMessageRecoverer(amqpTemplate, "error") {
+
+			protected Map<? extends String, ? extends Object> additionalHeaders(Message message, Throwable cause) {
+				message.getMessageProperties().setDeliveryMode(message.getMessageProperties().getReceivedDeliveryMode());
+				return null;
+			}
+
+		};
+
+		recoverer.recover(message, cause);
+
+		assertEquals(MessageDeliveryMode.PERSISTENT, message.getMessageProperties().getDeliveryMode());
+	}
+
+	@Test
+	public void setDeliveryModeIfNull() {
+		this.message.getMessageProperties().setDeliveryMode(null);
+		this.recoverer = new RepublishMessageRecoverer(amqpTemplate, "error");
+
+		this.recoverer.setDeliveryMode(MessageDeliveryMode.NON_PERSISTENT);
+		recoverer.recover(this.message, this.cause);
+
+		assertEquals(MessageDeliveryMode.NON_PERSISTENT, this.message.getMessageProperties().getDeliveryMode());
 	}
 
 }

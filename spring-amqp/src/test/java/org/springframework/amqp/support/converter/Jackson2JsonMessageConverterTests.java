@@ -1,5 +1,5 @@
 /*
- * Copyright 2002-2016 the original author or authors.
+ * Copyright 2002-2017 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -55,6 +55,8 @@ import com.fasterxml.jackson.databind.ser.BeanSerializerFactory;
 @RunWith(SpringJUnit4ClassRunner.class)
 public class Jackson2JsonMessageConverterTests {
 
+	public static final String TRUSTED_PACKAGE = Jackson2JsonMessageConverterTests.class.getPackage().getName();
+
 	private Jackson2JsonMessageConverter converter;
 
 	private SimpleTrade trade;
@@ -64,7 +66,7 @@ public class Jackson2JsonMessageConverterTests {
 
 	@Before
 	public void before() {
-		converter = new Jackson2JsonMessageConverter();
+		converter = new Jackson2JsonMessageConverter(TRUSTED_PACKAGE);
 		trade = new SimpleTrade();
 		trade.setAccountName("Acct1");
 		trade.setBuyRequest(true);
@@ -74,7 +76,6 @@ public class Jackson2JsonMessageConverterTests {
 		trade.setRequestId("R123");
 		trade.setTicker("VMW");
 		trade.setUserName("Joe Trader");
-
 	}
 
 	@Test
@@ -89,7 +90,10 @@ public class Jackson2JsonMessageConverterTests {
 	public void simpleTradeOverrideMapper() {
 		ObjectMapper mapper = new ObjectMapper();
 		mapper.setSerializerFactory(BeanSerializerFactory.instance);
-		converter.setJsonObjectMapper(mapper);
+		converter = new Jackson2JsonMessageConverter(mapper);
+
+		((DefaultJackson2JavaTypeMapper) this.converter.getJavaTypeMapper())
+				.setTrustedPackages(TRUSTED_PACKAGE);
 
 		Message message = converter.toMessage(trade, new MessageProperties());
 
@@ -129,13 +133,19 @@ public class Jackson2JsonMessageConverterTests {
 		converter.setClassMapper(new DefaultClassMapper());
 		converter.setJavaTypeMapper(null);
 
+
+		((DefaultClassMapper) this.converter.getClassMapper()).setTrustedPackages(TRUSTED_PACKAGE);
+
 		SimpleTrade marshalledTrade = (SimpleTrade) converter.fromMessage(message);
 		assertEquals(trade, marshalledTrade);
 	}
 
 	@Test
 	public void shouldUseClassMapperWhenProvidedOutbound() {
-		converter.setClassMapper(new DefaultClassMapper());
+		DefaultClassMapper classMapper = new DefaultClassMapper();
+		classMapper.setTrustedPackages(TRUSTED_PACKAGE);
+
+		converter.setClassMapper(classMapper);
 		converter.setJavaTypeMapper(null);
 		Message message = converter.toMessage(trade, new MessageProperties());
 
@@ -232,7 +242,7 @@ public class Jackson2JsonMessageConverterTests {
 		MessageProperties messageProperties = new MessageProperties();
 		messageProperties.setContentType("application/json");
 		messageProperties.setInferredArgumentType(
-				(new ParameterizedTypeReference<Map<String, List<Bar>>>() { }).getType());
+				(new ParameterizedTypeReference<Map<String, List<Bar>>>() {	}).getType());
 		Message message = new Message(bytes, messageProperties);
 		Object foo = this.converter.fromMessage(message);
 		assertThat(foo, instanceOf(LinkedHashMap.class));
@@ -311,6 +321,7 @@ public class Jackson2JsonMessageConverterTests {
 			}
 			return true;
 		}
+
 	}
 
 	public static class Bar {
@@ -374,6 +385,7 @@ public class Jackson2JsonMessageConverterTests {
 			}
 			return true;
 		}
+
 	}
 
 }

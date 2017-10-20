@@ -1,5 +1,5 @@
 /*
- * Copyright 2002-2016 the original author or authors.
+ * Copyright 2002-2017 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,16 +16,20 @@
 
 package org.springframework.amqp.support.converter;
 
+import java.util.Arrays;
+import java.util.LinkedHashSet;
+import java.util.List;
+import java.util.Set;
+
 import org.springframework.amqp.core.MessageProperties;
 import org.springframework.util.Assert;
 import org.springframework.util.ClassUtils;
 
 import com.fasterxml.jackson.databind.JavaType;
-import com.fasterxml.jackson.databind.type.CollectionType;
-import com.fasterxml.jackson.databind.type.MapType;
 import com.fasterxml.jackson.databind.type.TypeFactory;
 
 /**
+ * Jackson 2 type mapper.
  * @author Mark Pollack
  * @author Sam Nelson
  * @author Andreas Asplund
@@ -34,6 +38,14 @@ import com.fasterxml.jackson.databind.type.TypeFactory;
  */
 public class DefaultJackson2JavaTypeMapper extends AbstractJavaTypeMapper
 		implements Jackson2JavaTypeMapper, ClassMapper {
+
+	private static final List<String> TRUSTED_PACKAGES =
+			Arrays.asList(
+					"java.util",
+					"java.lang"
+			);
+
+	private final Set<String> trustedPackages = new LinkedHashSet<String>(TRUSTED_PACKAGES);
 
 	private volatile TypePrecedence typePrecedence = TypePrecedence.INFERRED;
 
@@ -72,6 +84,26 @@ public class DefaultJackson2JavaTypeMapper extends AbstractJavaTypeMapper
 		this.typePrecedence = typePrecedence;
 	}
 
+	/**
+	 * Specify a set of packages to trust during deserialization.
+	 * The asterisk ({@code *}) means trust all.
+	 * @param trustedPackages the trusted Java packages for deserialization
+	 * @since 1.6.11
+	 */
+	public void setTrustedPackages(String... trustedPackages) {
+		if (trustedPackages != null) {
+			for (String whiteListClass : trustedPackages) {
+				if ("*".equals(whiteListClass)) {
+					this.trustedPackages.clear();
+					break;
+				}
+				else {
+					this.trustedPackages.add(whiteListClass);
+				}
+			}
+		}
+	}
+
 	@Override
 	public JavaType toJavaType(MessageProperties properties) {
 		boolean hasInferredTypeHeader = hasInferredTypeHeader(properties);
@@ -94,11 +126,13 @@ public class DefaultJackson2JavaTypeMapper extends AbstractJavaTypeMapper
 
 			JavaType contentClassType = getClassIdType(retrieveHeader(properties, getContentClassIdFieldName()));
 			if (classType.getKeyType() == null) {
-				return CollectionType.construct(classType.getRawClass(), contentClassType);
+				return TypeFactory.defaultInstance()
+						.constructCollectionLikeType(classType.getRawClass(), contentClassType);
 			}
 
 			JavaType keyClassType = getClassIdType(retrieveHeader(properties, getKeyClassIdFieldName()));
-			return MapType.construct(classType.getRawClass(), keyClassType, contentClassType);
+			return TypeFactory.defaultInstance()
+					.constructMapLikeType(classType.getRawClass(), keyClassType, contentClassType);
 		}
 
 		if (hasInferredTypeHeader) {
@@ -112,17 +146,39 @@ public class DefaultJackson2JavaTypeMapper extends AbstractJavaTypeMapper
 		if (getIdClassMapping().containsKey(classId)) {
 			return TypeFactory.defaultInstance().constructType(getIdClassMapping().get(classId));
 		}
+		else {
+			try {
+				if (!isTrustedPackage(classId)) {
+					throw new IllegalArgumentException("The class '" + classId + "' is not in the trusted packages: " +
+							this.trustedPackages + ". " +
+							"If you believe this class is safe to deserialize, please provide its name. " +
+							"If the serialization is only done by a trusted source, you can also enable trust all (*).");
+				}
+				else {
+					return TypeFactory.defaultInstance()
+							.constructType(ClassUtils.forName(classId, getClassLoader()));
+				}
+			}
+			catch (ClassNotFoundException e) {
+				throw new MessageConversionException("failed to resolve class name. Class not found [" + classId + "]", e);
+			}
+			catch (LinkageError e) {
+				throw new MessageConversionException("failed to resolve class name. Linkage error [" + classId + "]", e);
+			}
+		}
+	}
 
-		try {
-			return TypeFactory.defaultInstance()
-					.constructType(ClassUtils.forName(classId, getClassLoader()));
+	private boolean isTrustedPackage(String requestedType) {
+		if (!this.trustedPackages.isEmpty()) {
+			String packageName = ClassUtils.getPackageName(requestedType).replaceFirst("\\[L", "");
+			for (String trustedPackage : this.trustedPackages) {
+				if (packageName.equals(trustedPackage)) {
+					return true;
+				}
+			}
+			return false;
 		}
-		catch (ClassNotFoundException e) {
-			throw new MessageConversionException("failed to resolve class name. Class not found [" + classId + "]", e);
-		}
-		catch (LinkageError e) {
-			throw new MessageConversionException("failed to resolve class name. Linkage error [" + classId + "]", e);
-		}
+		return true;
 	}
 
 	@Override

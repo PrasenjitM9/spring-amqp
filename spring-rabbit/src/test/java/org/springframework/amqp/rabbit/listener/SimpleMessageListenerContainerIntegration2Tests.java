@@ -1,5 +1,5 @@
 /*
- * Copyright 2002-2016 the original author or authors.
+ * Copyright 2002-2017 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,9 +16,9 @@
 
 package org.springframework.amqp.rabbit.listener;
 
-import static org.hamcrest.Matchers.contains;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
+import static org.hamcrest.Matchers.hasItem;
 import static org.hamcrest.Matchers.instanceOf;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
@@ -26,8 +26,8 @@ import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertThat;
 import static org.junit.Assert.assertTrue;
-import static org.mockito.Matchers.any;
-import static org.mockito.Matchers.anyBoolean;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.spy;
@@ -225,10 +225,10 @@ public class SimpleMessageListenerContainerIntegration2Tests {
 		assertTrue("Timed out waiting for message", waited);
 		BlockingQueueConsumer newConsumer = consumer;
 		int n = 0;
-		while (n++ < 100 && newConsumer == consumer) {
+		while (n++ < 100) {
 			try {
 				newConsumer = (BlockingQueueConsumer) consumers.iterator().next();
-				if (newConsumer == consumer) {
+				if (newConsumer != consumer) {
 					break;
 				}
 			}
@@ -368,11 +368,11 @@ public class SimpleMessageListenerContainerIntegration2Tests {
 		container2.stop();
 		ArgumentCaptor<String> captor = ArgumentCaptor.forClass(String.class);
 		verify(logger, atLeastOnce()).info(captor.capture());
-		assertThat(captor.getAllValues(), contains(containsString("exclusive")));
+		assertThat(captor.getAllValues(), hasItem(containsString("exclusive")));
 		assertEquals("Consumer raised exception, attempting restart", eventRef.get().getReason());
 		assertFalse(eventRef.get().isFatal());
 		assertThat(eventRef.get().getThrowable(), instanceOf(AmqpIOException.class));
-		verify(containerLogger).warn(any());
+		verify(containerLogger, atLeastOnce()).warn(any());
 	}
 
 	@Test

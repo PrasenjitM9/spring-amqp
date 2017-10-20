@@ -1,5 +1,5 @@
 /*
- * Copyright 2002-2016 the original author or authors.
+ * Copyright 2002-2017 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -472,7 +472,7 @@ public class MessageProperties implements Serializable {
 
 	/**
 	 * Set the inferred target argument type when using a method-level
-	 * {@code @RabbitListener}
+	 * {@code @RabbitListener}.
 	 * @param inferredArgumentType the type.
 	 * @since 1.6
 	 */
@@ -499,7 +499,7 @@ public class MessageProperties implements Serializable {
 	}
 
 	/**
-	 * The target bean when using {@code @RabbitListener}
+	 * The target bean when using {@code @RabbitListener}.
 	 * @return the bean.
 	 * @since 1.6
 	 */
@@ -508,7 +508,7 @@ public class MessageProperties implements Serializable {
 	}
 
 	/**
-	 * Set the target bean when using {@code @RabbitListener}
+	 * Set the target bean when using {@code @RabbitListener}.
 	 * @param targetBean the bean.
 	 * @since 1.6
 	 */
@@ -695,32 +695,32 @@ public class MessageProperties implements Serializable {
 
 	@Override
 	public String toString() {
-		return "MessageProperties [headers=" + this.headers +
-				", timestamp=" + this.timestamp +
-				", messageId=" + this.messageId +
-				", userId=" + this.userId +
-				", receivedUserId=" + this.receivedUserId +
-				", appId=" + this.appId +
-				", clusterId=" + this.clusterId +
-				", type=" + this.type +
-				", correlationId=" + this.correlationId +
-				", replyTo=" + this.replyTo +
-				", contentType=" + this.contentType +
-				", contentEncoding=" + this.contentEncoding +
-				", contentLength=" + this.contentLength +
-				", deliveryMode=" + this.deliveryMode +
-				", receivedDeliveryMode=" + this.receivedDeliveryMode +
-				", expiration=" + this.expiration +
-				", priority=" + this.priority +
-				", redelivered=" + this.redelivered +
-				", receivedExchange=" + this.receivedExchange +
-				", receivedRoutingKey=" + this.receivedRoutingKey +
-				", receivedDelay=" + this.receivedDelay +
-				", deliveryTag=" + this.deliveryTag +
-				", messageCount=" + this.messageCount +
-				", consumerTag=" + this.consumerTag +
-				", consumerQueue=" + this.consumerQueue +
-				"]";
+		return "MessageProperties [headers=" + this.headers
+				+ (this.timestamp == null ? "" : ", timestamp=" + this.timestamp)
+				+ (this.messageId == null ? "" : ", messageId=" + this.messageId)
+				+ (this.userId == null ? "" : ", userId=" + this.userId)
+				+ (this.receivedUserId == null ? "" : ", receivedUserId=" + this.receivedUserId)
+				+ (this.appId == null ? "" : ", appId=" + this.appId)
+				+ (this.clusterId == null ? "" : ", clusterId=" + this.clusterId)
+				+ (this.type == null ? "" : ", type=" + this.type)
+				+ (this.correlationId == null ? "" : ", correlationId=" + this.correlationId)
+				+ (this.replyTo == null ? "" : ", replyTo=" + this.replyTo)
+				+ (this.contentType == null ? "" : ", contentType=" + this.contentType)
+				+ (this.contentEncoding == null ? "" : ", contentEncoding=" + this.contentEncoding)
+				+ ", contentLength=" + this.contentLength
+				+ (this.deliveryMode == null ? "" : ", deliveryMode=" + this.deliveryMode)
+				+ (this.receivedDeliveryMode == null ? "" : ", receivedDeliveryMode=" + this.receivedDeliveryMode)
+				+ (this.expiration == null ? "" : ", expiration=" + this.expiration)
+				+ (this.priority == null ? "" : ", priority=" + this.priority)
+				+ (this.redelivered == null ? "" : ", redelivered=" + this.redelivered)
+				+ (this.receivedExchange == null ? "" : ", receivedExchange=" + this.receivedExchange)
+				+ (this.receivedRoutingKey == null ? "" : ", receivedRoutingKey=" + this.receivedRoutingKey)
+				+ (this.receivedDelay == null ? "" : ", receivedDelay=" + this.receivedDelay)
+				+ ", deliveryTag=" + this.deliveryTag
+				+ (this.messageCount == null ? "" : ", messageCount=" + this.messageCount)
+				+ (this.consumerTag == null ? "" : ", consumerTag=" + this.consumerTag)
+				+ (this.consumerQueue == null ? "" : ", consumerQueue=" + this.consumerQueue)
+				+ "]";
 	}
 
 }

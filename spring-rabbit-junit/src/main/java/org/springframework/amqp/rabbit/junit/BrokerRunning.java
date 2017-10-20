@@ -1,5 +1,5 @@
 /*
- * Copyright 2002-2016 the original author or authors.
+ * Copyright 2002-2017 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -15,6 +15,8 @@
  */
 
 package org.springframework.amqp.rabbit.junit;
+
+import static org.junit.Assert.fail;
 
 import java.io.IOException;
 import java.nio.ByteBuffer;
@@ -43,11 +45,10 @@ import com.rabbitmq.client.ConnectionFactory;
 import com.rabbitmq.http.client.Client;
 
 /**
- * <p>
- * A rule that prevents integration tests from failing if the Rabbit broker application is not running or not
- * accessible. If the Rabbit broker is not running in the background all the tests here will simply be skipped because
- * of a violated assumption (showing as successful). Usage:
- * </p>
+ * A rule that prevents integration tests from failing if the Rabbit broker application is
+ * not running or not accessible. If the Rabbit broker is not running in the background
+ * all the tests here will simply be skipped (by default) because of a violated assumption
+ * (showing as successful). Usage:
  *
  * <pre class="code">
  * &#064;Rule
@@ -58,33 +59,53 @@ import com.rabbitmq.http.client.Client;
  * 	// ... test using RabbitTemplate etc.
  * }
  * </pre>
- * <p>
- * The rule can be declared as static so that it only has to check once for all tests in the enclosing test case, but
- * there isn't a lot of overhead in making it non-static.
- * </p>
  *
- * @see Assume
- * @see AssumptionViolatedException
+ * The rule can be declared as static so that it only has to check once for all tests in
+ * the enclosing test case, but there isn't a lot of overhead in making it non-static.
+ * <p>Use {@link #isRunningWithEmptyQueues(String...)} to declare and/or purge test queue(s)
+ * when the rule is run.
+ * <p>Call {@link #removeTestQueues(String...)} from an {@code @After} method to remove
+ * those queues (and optionally others).
+ * <p>If you wish to enforce the broker being available, for example, on a CI server,
+ * set the environment variable {@value #BROKER_REQUIRED} to {@code true} and the
+ * tests will fail fast.
  *
  * @author Dave Syer
  * @author Gary Russell
  *
  * @since 1.7
- *
+ * @see Assume
+ * @see AssumptionViolatedException
  */
 public final class BrokerRunning extends TestWatcher {
+
+	public static final String BROKER_ADMIN_URI = "RABBITMQ_TEST_ADMIN_URI";
+
+	public static final String BROKER_HOSTNAME = "RABBITMQ_TEST_HOSTNAME";
+
+	public static final String BROKER_PORT = "RABBITMQ_TEST_PORT";
+
+	public static final String BROKER_USER = "RABBITMQ_TEST_USER";
+
+	public static final String BROKER_PW = "RABBITMQ_TEST_PASSWORD";
+
+	public static final String BROKER_ADMIN_USER = "RABBITMQ_TEST_ADMIN_USER";
+
+	public static final String BROKER_ADMIN_PW = "RABBITMQ_TEST_ADMIN_PASSWORD";
 
 	public static final String BROKER_REQUIRED = "RABBITMQ_SERVER_REQUIRED";
 
 	private static final String DEFAULT_QUEUE_NAME = BrokerRunning.class.getName();
 
-	private static Log logger = LogFactory.getLog(BrokerRunning.class);
+	private static final Log logger = LogFactory.getLog(BrokerRunning.class);
 
 	// Static so that we only test once on failure: speeds up test suite
-	private static Map<Integer, Boolean> brokerOnline = new HashMap<Integer, Boolean>();
+	private static final Map<Integer, Boolean> brokerOnline = new HashMap<Integer, Boolean>();
 
 	// Static so that we only test once on failure
-	private static Map<Integer, Boolean> brokerOffline = new HashMap<Integer, Boolean>();
+	private static final Map<Integer, Boolean> brokerOffline = new HashMap<Integer, Boolean>();
+
+	private static final Map<String, String> environmentOverrides = new HashMap<>();
 
 	private final boolean assumeOnline;
 
@@ -94,16 +115,60 @@ public final class BrokerRunning extends TestWatcher {
 
 	private final String[] queues;
 
-	private final int defaultPort = BrokerTestUtils.getPort();
+	private final int defaultPort = fromEnvironment(BROKER_PORT, null) == null ? BrokerTestUtils.getPort()
+			: Integer.valueOf(fromEnvironment(BROKER_PORT, null));
 
 	private int port;
 
-	private String hostName = null;
+	private String hostName = fromEnvironment(BROKER_HOSTNAME, "localhost");
+
+	private String adminUri = fromEnvironment(BROKER_ADMIN_URI, null);
 
 	private ConnectionFactory connectionFactory;
 
+	private String user = fromEnvironment(BROKER_USER, "guest");
+
+	private String password = fromEnvironment(BROKER_PW, "guest");
+
+	private String adminUser = fromEnvironment(BROKER_ADMIN_USER, "guest");
+
+	private String adminPassword = fromEnvironment(BROKER_ADMIN_PW, "guest");
+
+	private String fromEnvironment(String key, String defaultValue) {
+		String environmentValue = environmentOverrides.get(key);
+		if (!StringUtils.hasText(environmentValue)) {
+			environmentValue = System.getenv(key);
+		}
+		if (StringUtils.hasText(environmentValue)) {
+			return environmentValue;
+		}
+		else {
+			return defaultValue;
+		}
+	}
+
 	/**
-	 * Ensure the broker is running and has an empty queue with the specified name in the default exchange.
+	 * Set environment variable overrides for host, port etc. Will override any real
+	 * environment variables, if present.
+	 * <p><b>The variables will only apply to rule instances that are created after this
+	 * method is called.</b>
+	 * The overrides will remain until
+	 * @param environmentVariables the variables.
+	 */
+	public static void setEnvironmentVariableOverrides(Map<String, String> environmentVariables) {
+		environmentOverrides.putAll(environmentVariables);
+	}
+
+	/**
+	 * Clear any environment variable overrides set in {@link #setEnvironmentVariableOverrides(Map)}.
+	 */
+	public static void clearEnvironmentVariableOverrides() {
+		environmentOverrides.clear();
+	}
+
+	/**
+	 * Ensure the broker is running and has a empty queue(s) with the specified name(s) in the
+	 * default exchange.
 	 *
 	 * @param names the queues to declare for the test.
 	 * @return a new rule that assumes an existing running broker
@@ -131,6 +196,15 @@ public final class BrokerRunning extends TestWatcher {
 	 */
 	public static BrokerRunning isBrokerAndManagementRunning() {
 		return new BrokerRunning(true, false, true);
+	}
+
+	/**
+	 * @param queues the queues.
+	 * @return a new rule that assumes an existing broker with the management plugin with
+	 * the provided queues declared (and emptied if needed)..
+	 */
+	public static BrokerRunning isBrokerAndManagementRunningWithEmptyQueues(String...queues) {
+		return new BrokerRunning(true, false, true, queues);
 	}
 
 	private BrokerRunning(boolean assumeOnline, boolean purge, String... queues) {
@@ -177,6 +251,105 @@ public final class BrokerRunning extends TestWatcher {
 		this.hostName = hostName;
 	}
 
+	/**
+	 * Set the user for the amqp connection default "guest".
+	 * @param user the user.
+	 * @since 1.7.2
+	 */
+	public void setUser(String user) {
+		this.user = user;
+	}
+
+	/**
+	 * Set the password for the amqp connection default "guest".
+	 * @param password the password.
+	 * @since 1.7.2
+	 */
+	public void setPassword(String password) {
+		this.password = password;
+	}
+
+	/**
+	 * Set the uri for the REST API.
+	 * @param adminUri the uri.
+	 * @since 1.7.2
+	 */
+	public void setAdminUri(String adminUri) {
+		this.adminUri = adminUri;
+	}
+
+	/**
+	 * Set the user for the management REST API connection default "guest".
+	 * @param user the user.
+	 * @since 1.7.2
+	 */
+	public void setAdminUser(String user) {
+		this.adminUser = user;
+	}
+
+	/**
+	 * Set the password for the management REST API connection default "guest".
+	 * @param password the password.
+	 * @since 1.7.2
+	 */
+	public void setAdminPassword(String password) {
+		this.adminPassword = password;
+	}
+
+	/**
+	 * Return the port.
+	 * @return the port.
+	 * @since 1.7.2
+	 */
+	public int getPort() {
+		return this.port;
+	}
+
+	/**
+	 * Return the port.
+	 * @return the port.
+	 * @since 1.7.2
+	 */
+	public String getHostName() {
+		return this.hostName;
+	}
+
+	/**
+	 * Return the user.
+	 * @return the user.
+	 * @since 1.7.2
+	 */
+	public String getUser() {
+		return this.user;
+	}
+
+	/**
+	 * Return the password.
+	 * @return the password.
+	 * @since 1.7.2
+	 */
+	public String getPassword() {
+		return this.password;
+	}
+
+	/**
+	 * Return the admin user.
+	 * @return the user.
+	 * @since 1.7.2
+	 */
+	public String getAdminUser() {
+		return this.adminUser;
+	}
+
+	/**
+	 * Return the admin password.
+	 * @return the password.
+	 * @since 1.7.2
+	 */
+	public String getAdminPassword() {
+		return this.adminPassword;
+	}
+
 	@Override
 	public Statement apply(Statement base, Description description) {
 
@@ -220,7 +393,7 @@ public final class BrokerRunning extends TestWatcher {
 			}
 
 			if (this.management) {
-				Client client = new Client("http://localhost:15672/api/", "guest", "guest");
+				Client client = new Client(getAdminUri(), this.adminUser, this.adminPassword);
 				if (!client.alivenessTest("/")) {
 					throw new RuntimeException("Aliveness test failed for localhost:15672 guest/quest; "
 							+ "management not available");
@@ -228,10 +401,15 @@ public final class BrokerRunning extends TestWatcher {
 			}
 		}
 		catch (Exception e) {
-			logger.warn("Not executing tests because basic connectivity test failed", e);
+			logger.warn("Not executing tests because basic connectivity test failed: " + e.getMessage());
 			brokerOnline.put(this.port, false);
-			if (this.assumeOnline && !fatal()) {
-				Assume.assumeNoException(e);
+			if (this.assumeOnline) {
+				if (fatal()) {
+					fail("RabbitMQ Broker is required, but not available");
+				}
+				else {
+					Assume.assumeNoException(e);
+				}
 			}
 		}
 		finally {
@@ -252,6 +430,11 @@ public final class BrokerRunning extends TestWatcher {
 		}
 	}
 
+	/**
+	 * Generate the connection id for the connection used by the rule's
+	 * connection factory.
+	 * @return the id.
+	 */
 	public String generateId() {
 		UUID uuid = UUID.randomUUID();
 		ByteBuffer bb = ByteBuffer.wrap(new byte[16]);
@@ -264,6 +447,12 @@ public final class BrokerRunning extends TestWatcher {
 		return DEFAULT_QUEUE_NAME.equals(queue);
 	}
 
+	/**
+	 * Remove any test queues that were created by an
+	 * {@link #isRunningWithEmptyQueues(String...)} method.
+	 * @param additionalQueues additional queues to remove that might have been created by
+	 * tests.
+	 */
 	public void removeTestQueues(String... additionalQueues) {
 		List<String> queuesToRemove = Arrays.asList(this.queues);
 		if (additionalQueues != null) {
@@ -292,6 +481,10 @@ public final class BrokerRunning extends TestWatcher {
 		}
 	}
 
+	/**
+	 * Delete arbitrary queues from the broker.
+	 * @param queues the queues to delete.
+	 */
 	public void deleteQueues(String... queues) {
 		ConnectionFactory connectionFactory = getConnectionFactory();
 		Connection connection = null; // NOSONAR (closeResources())
@@ -314,6 +507,10 @@ public final class BrokerRunning extends TestWatcher {
 		}
 	}
 
+	/**
+	 * Delete arbitrary exchanges from the broker.
+	 * @param exchanges the exchanges to delete.
+	 */
 	public void deleteExchanges(String... exchanges) {
 		ConnectionFactory connectionFactory = getConnectionFactory();
 		Connection connection = null; // NOSONAR (closeResources())
@@ -336,6 +533,10 @@ public final class BrokerRunning extends TestWatcher {
 		}
 	}
 
+	/**
+	 * Get the connection factory used by this rule.
+	 * @return the connection factory.
+	 */
 	public ConnectionFactory getConnectionFactory() {
 		if (this.connectionFactory == null) {
 			this.connectionFactory = new ConnectionFactory();
@@ -346,8 +547,27 @@ public final class BrokerRunning extends TestWatcher {
 				this.connectionFactory.setHost("localhost");
 			}
 			this.connectionFactory.setPort(this.port);
+			this.connectionFactory.setUsername(this.user);
+			this.connectionFactory.setPassword(this.password);
 		}
 		return this.connectionFactory;
+	}
+
+	/**
+	 * Return the admin uri.
+	 * @return the uri.
+	 * @since 1.7.2
+	 */
+	public String getAdminUri() {
+		if (!StringUtils.hasText(this.adminUri)) {
+			if (!StringUtils.hasText(this.hostName)) {
+				this.adminUri = "http://localhost:15672/api/";
+			}
+			else {
+				this.adminUri = "http://" + this.hostName + ":15672/api/";
+			}
+		}
+		return this.adminUri;
 	}
 
 	private void closeResources(Connection connection, Channel channel) {

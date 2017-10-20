@@ -1,5 +1,5 @@
 /*
- * Copyright 2002-2016 the original author or authors.
+ * Copyright 2002-2017 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -63,6 +63,8 @@ import com.rabbitmq.client.Channel;
  * @author Dave Syer
  * @author Gunnar Hillert
  * @author Gary Russell
+ * @author Artem Bilan
+ *
  * @since 1.0
  *
  */
@@ -395,7 +397,7 @@ public class MessageListenerRecoveryCachingConnectionIntegrationTests {
 		try {
 			container = doCreateContainer("nonexistent", new VanillaListener(latch), connectionFactory);
 			Properties properties = new Properties();
-			properties.setProperty("smlc.missing.queues.fatal", "false");
+			properties.setProperty("mlc.missing.queues.fatal", "false");
 			GenericApplicationContext context = new GenericApplicationContext();
 			context.getBeanFactory().registerSingleton("spring.amqp.global.properties", properties);
 			context.refresh();
@@ -459,6 +461,7 @@ public class MessageListenerRecoveryCachingConnectionIntegrationTests {
 		SimpleMessageListenerContainer container = new SimpleMessageListenerContainer(connectionFactory);
 		container.setMessageListener(new MessageListenerAdapter(listener));
 		container.setQueueNames(queueName);
+		container.setPrefetchCount(1);
 		container.setConcurrentConsumers(concurrentConsumers);
 		container.setChannelTransacted(transactional);
 		container.setAcknowledgeMode(acknowledgeMode);
@@ -483,22 +486,19 @@ public class MessageListenerRecoveryCachingConnectionIntegrationTests {
 		@Override
 		public void onMessage(Message message, Channel channel) throws Exception {
 			String value = new String(message.getBody());
-			try {
-				logger.debug("Acking: " + value);
+			logger.debug("Acking: " + value);
+			channel.basicAck(message.getMessageProperties().getDeliveryTag(), false);
+			if (failed.compareAndSet(false, true)) {
+				// intentional error (causes exception on connection thread):
 				channel.basicAck(message.getMessageProperties().getDeliveryTag(), false);
-				if (failed.compareAndSet(false, true)) {
-					// intentional error (causes exception on connection thread):
-					channel.basicAck(message.getMessageProperties().getDeliveryTag(), false);
-				}
 			}
-			finally {
-				if (this.received.add(value)) {
-					latch.countDown();
-				}
-				else {
-					logger.debug(value + " already received, redelivered="
-							+ message.getMessageProperties().isRedelivered());
-				}
+
+			if (this.received.add(value)) {
+				latch.countDown();
+			}
+			else {
+				logger.debug(value + " already received, redelivered="
+						+ message.getMessageProperties().isRedelivered());
 			}
 		}
 	}

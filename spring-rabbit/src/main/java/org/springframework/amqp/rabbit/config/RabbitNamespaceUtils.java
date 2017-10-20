@@ -1,5 +1,5 @@
 /*
- * Copyright 2002-2016 the original author or authors.
+ * Copyright 2002-2017 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -29,6 +29,7 @@ import org.springframework.util.StringUtils;
 /**
  * @author Gary Russell
  * @author Artem Bilan
+ *
  * @since 1.0.1
  *
  */
@@ -83,6 +84,8 @@ public final class RabbitNamespaceUtils {
 	private static final String RECOVERY_BACK_OFF = "recovery-back-off";
 
 	private static final String MISSING_QUEUES_FATAL = "missing-queues-fatal";
+
+	private static final String POSSIBLE_AUTHENTICATION_FAILURE_FATAL = "possible-authentication-failure-fatal";
 
 	private static final String MISMATCHED_QUEUES_FATAL = "mismatched-queues-fatal";
 
@@ -191,8 +194,9 @@ public final class RabbitNamespaceUtils {
 
 		String channelTransacted = containerEle.getAttribute(CHANNEL_TRANSACTED_ATTRIBUTE);
 		if (StringUtils.hasText(channelTransacted)) {
-			// Note: a placeholder will pass this test, but if it resolves to true, it will be caught during container initialization
-			if (acknowledgeMode.isAutoAck() && channelTransacted.equalsIgnoreCase("true")) {
+			// Note: a placeholder will pass this test, but if it resolves to true,
+			// it will be caught during container initialization
+			if (AcknowledgeMode.NONE == acknowledgeMode && channelTransacted.equalsIgnoreCase("true")) {
 				parserContext.getReaderContext().error(
 						"Listener Container - cannot set channel-transacted with acknowledge='NONE'", containerEle);
 			}
@@ -241,6 +245,12 @@ public final class RabbitNamespaceUtils {
 		String missingQueuesFatal = containerEle.getAttribute(MISSING_QUEUES_FATAL);
 		if (StringUtils.hasText(missingQueuesFatal)) {
 			containerDef.getPropertyValues().add("missingQueuesFatal", new TypedStringValue(missingQueuesFatal));
+		}
+
+		String possibleAuthenticationFailureFatal = containerEle.getAttribute(POSSIBLE_AUTHENTICATION_FAILURE_FATAL);
+		if (StringUtils.hasText(possibleAuthenticationFailureFatal)) {
+			containerDef.getPropertyValues().add("possibleAuthenticationFailureFatal",
+					new TypedStringValue(possibleAuthenticationFailureFatal));
 		}
 
 		String mismatchedQueuesFatal = containerEle.getAttribute(MISMATCHED_QUEUES_FATAL);

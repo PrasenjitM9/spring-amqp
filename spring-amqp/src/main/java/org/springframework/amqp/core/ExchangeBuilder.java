@@ -1,5 +1,5 @@
 /*
- * Copyright 2016 the original author or authors.
+ * Copyright 2016-2017 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -22,6 +22,8 @@ import java.util.Map;
  * Builder providing a fluent API for building {@link Exchange}s.
  *
  * @author Gary Russell
+ * @author Artem Bilan
+ *
  * @since 1.6
  *
  */
@@ -31,7 +33,7 @@ public final class ExchangeBuilder extends AbstractBuilder {
 
 	private final String type;
 
-	private boolean durable;
+	private boolean durable = true;
 
 	private boolean autoDelete;
 
@@ -39,7 +41,16 @@ public final class ExchangeBuilder extends AbstractBuilder {
 
 	private boolean delayed;
 
-	private ExchangeBuilder(String name, String type) {
+	private boolean ignoreDeclarationExceptions;
+
+	/**
+	 * Construct an instance of the appropriate type.
+	 * @param name the exchange name
+	 * @param type the type name
+	 * @since 1.6.7
+	 * @see ExchangeTypes
+	 */
+	public ExchangeBuilder(String name, String type) {
 		this.name = name;
 		this.type = type;
 	}
@@ -91,10 +102,11 @@ public final class ExchangeBuilder extends AbstractBuilder {
 
 	/**
 	 * Set the durable flag.
+	 * @param durable the durable flag (default true).
 	 * @return the builder.
 	 */
-	public ExchangeBuilder durable() {
-		this.durable = true;
+	public ExchangeBuilder durable(boolean durable) {
+		this.durable = durable;
 		return this;
 	}
 
@@ -137,6 +149,16 @@ public final class ExchangeBuilder extends AbstractBuilder {
 		return this;
 	}
 
+	/**
+	 * Switch on ignore exceptions such as mismatched properties when declaring.
+	 * @return the builder.
+	 * @since 2.0
+	 */
+	public ExchangeBuilder ignoreDeclarationExceptions() {
+		this.ignoreDeclarationExceptions = true;
+		return this;
+	}
+
 	public Exchange build() {
 		AbstractExchange exchange;
 		if (ExchangeTypes.DIRECT.equals(this.type)) {
@@ -152,10 +174,11 @@ public final class ExchangeBuilder extends AbstractBuilder {
 			exchange = new HeadersExchange(this.name, this.durable, this.autoDelete, getArguments());
 		}
 		else {
-			throw new IllegalStateException("Invalid type: " + this.type);
+			exchange = new CustomExchange(this.name, this.type, this.durable, this.autoDelete, getArguments());
 		}
 		exchange.setInternal(this.internal);
 		exchange.setDelayed(this.delayed);
+		exchange.setIgnoreDeclarationExceptions(this.ignoreDeclarationExceptions);
 		return exchange;
 	}
 

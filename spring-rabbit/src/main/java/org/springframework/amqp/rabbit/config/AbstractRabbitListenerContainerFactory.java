@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2016 the original author or authors.
+ * Copyright 2014-2017 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -25,6 +25,7 @@ import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 
 import org.springframework.amqp.core.AcknowledgeMode;
+import org.springframework.amqp.core.MessagePostProcessor;
 import org.springframework.amqp.rabbit.connection.ConnectionFactory;
 import org.springframework.amqp.rabbit.listener.AbstractMessageListenerContainer;
 import org.springframework.amqp.rabbit.listener.RabbitListenerContainerFactory;
@@ -44,10 +45,12 @@ import org.springframework.util.backoff.FixedBackOff;
 
 /**
  * Base {@link RabbitListenerContainerFactory} for Spring's base container implementation.
+ * @param <C> the container type.
  *
  * @author Stephane Nicoll
  * @author Gary Russell
  * @author Artem Bilan
+ * @author Joris Kuipers
  *
  * @since 1.4
  *
@@ -97,6 +100,8 @@ public abstract class AbstractRabbitListenerContainerFactory<C extends AbstractM
 	private Boolean autoStartup;
 
 	private Integer phase;
+
+	private MessagePostProcessor[] afterReceivePostProcessors;
 
 	protected final AtomicInteger counter = new AtomicInteger();
 
@@ -170,6 +175,14 @@ public abstract class AbstractRabbitListenerContainerFactory<C extends AbstractM
 	 */
 	public void setDefaultRequeueRejected(Boolean requeueRejected) {
 		this.defaultRequeueRejected = requeueRejected;
+	}
+
+	/**
+	 * @return the advice chain that was set. Defaults to {@code null}.
+	 * @since 1.7.4
+	 */
+	public Advice[] getAdviceChain() {
+		return this.adviceChain;
 	}
 
 	/**
@@ -260,6 +273,14 @@ public abstract class AbstractRabbitListenerContainerFactory<C extends AbstractM
 		this.phase = phase;
 	}
 
+	/**
+	 * @param afterReceivePostProcessors the post processors.
+	 * @see AbstractMessageListenerContainer#setAfterReceivePostProcessors(MessagePostProcessor...)
+	 */
+	public void setAfterReceivePostProcessors(MessagePostProcessor... afterReceivePostProcessors) {
+		this.afterReceivePostProcessors = afterReceivePostProcessors;
+	}
+
 
 	@Override
 	public C createListenerContainer(RabbitListenerEndpoint endpoint) {
@@ -319,16 +340,22 @@ public abstract class AbstractRabbitListenerContainerFactory<C extends AbstractM
 		if (this.applicationEventPublisher != null) {
 			instance.setApplicationEventPublisher(this.applicationEventPublisher);
 		}
-		if (this.autoStartup != null) {
+		if (endpoint.getAutoStartup() != null) {
+			instance.setAutoStartup(endpoint.getAutoStartup());
+		}
+		else if (this.autoStartup != null) {
 			instance.setAutoStartup(this.autoStartup);
 		}
 		if (this.phase != null) {
 			instance.setPhase(this.phase);
 		}
+		if (this.afterReceivePostProcessors != null) {
+			instance.setAfterReceivePostProcessors(this.afterReceivePostProcessors);
+		}
 		instance.setListenerId(endpoint.getId());
 
 		endpoint.setupListenerContainer(instance);
-		initializeContainer(instance);
+		initializeContainer(instance, endpoint);
 
 		return instance;
 	}
@@ -343,9 +370,10 @@ public abstract class AbstractRabbitListenerContainerFactory<C extends AbstractM
 	 * Further initialize the specified container.
 	 * <p>Subclasses can inherit from this method to apply extra
 	 * configuration if necessary.
-	 * @param instance the containe instance to configure.
+	 * @param instance the container instance to configure.
+	 * @param endpoint the endpoint.
 	 */
-	protected void initializeContainer(C instance) {
+	protected void initializeContainer(C instance, RabbitListenerEndpoint endpoint) {
 	}
 
 }

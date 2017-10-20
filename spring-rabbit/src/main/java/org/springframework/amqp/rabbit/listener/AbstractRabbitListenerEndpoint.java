@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2015 the original author or authors.
+ * Copyright 2014-2017 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -37,7 +37,7 @@ import org.springframework.expression.BeanResolver;
 import org.springframework.util.Assert;
 
 /**
- * Base model for a Rabbit listener endpoint
+ * Base model for a Rabbit listener endpoint.
  *
  * @author Stephane Nicoll
  * @author Gary Russell
@@ -57,6 +57,8 @@ public abstract class AbstractRabbitListenerEndpoint implements RabbitListenerEn
 
 	private Integer priority;
 
+	private String concurrency;
+
 	private RabbitAdmin admin;
 
 	private BeanFactory beanFactory;
@@ -68,6 +70,8 @@ public abstract class AbstractRabbitListenerEndpoint implements RabbitListenerEn
 	private BeanResolver beanResolver;
 
 	private String group;
+
+	private Boolean autoStartup;
 
 	@Override
 	public void setBeanFactory(BeanFactory beanFactory) throws BeansException {
@@ -176,6 +180,27 @@ public abstract class AbstractRabbitListenerEndpoint implements RabbitListenerEn
 	}
 
 	/**
+	 * Set the concurrency of this endpoint; usually overrides any concurrency
+	 * settings on the container factory. Contents depend on container implementation.
+	 * @param concurrency the concurrency.
+	 * @since 2.0
+	 */
+	public void setConcurrency(String concurrency) {
+		this.concurrency = concurrency;
+	}
+
+	/**
+	 * The concurrency of this endpoint; Not used by this abstract class;
+	 * used by subclasses to set the concurrency appropriate for the container type.
+	 * @return the concurrency.
+	 * @since 2.0
+	 */
+	@Override
+	public String getConcurrency() {
+		return this.concurrency;
+	}
+
+	/**
 	 * Set the {@link RabbitAdmin} instance to use.
 	 * @param admin the {@link RabbitAdmin} instance.
 	 */
@@ -203,6 +228,21 @@ public abstract class AbstractRabbitListenerEndpoint implements RabbitListenerEn
 	 */
 	public void setGroup(String group) {
 		this.group = group;
+	}
+
+
+	/**
+	 * Override the default autoStartup property.
+	 * @param autoStartup the autoStartup.
+	 * @since 2.0
+	 */
+	public void setAutoStartup(Boolean autoStartup) {
+		this.autoStartup = autoStartup;
+	}
+
+	@Override
+	public Boolean getAutoStartup() {
+		return this.autoStartup;
 	}
 
 	@Override

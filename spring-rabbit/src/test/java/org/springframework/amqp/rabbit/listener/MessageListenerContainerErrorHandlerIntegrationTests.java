@@ -1,5 +1,5 @@
 /*
- * Copyright 2002-2016 the original author or authors.
+ * Copyright 2002-2017 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -22,8 +22,8 @@ import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
-import static org.mockito.Matchers.any;
-import static org.mockito.Matchers.contains;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.contains;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.mock;
@@ -73,6 +73,8 @@ import com.rabbitmq.client.Channel;
  * @author Dave Syer
  * @author Gunar Hillert
  * @author Gary Russell
+ * @author Artem Bilan
+ *
  * @since 1.0
  *
  */
@@ -165,7 +167,8 @@ public class MessageListenerContainerErrorHandlerIntegrationTests {
 		int messageCount = 3;
 		CountDownLatch latch = new CountDownLatch(messageCount);
 		doTest(messageCount, errorHandler, latch, new ThrowingExceptionListener(latch,
-				new ListenerExecutionFailedException("Listener throws specific runtime exception", null)));
+				new ListenerExecutionFailedException("Listener throws specific runtime exception", null,
+						mock(Message.class))));
 	}
 
 	@Test
@@ -258,7 +261,8 @@ public class MessageListenerContainerErrorHandlerIntegrationTests {
 
 		container.stop();
 
-		Exception e = new ListenerExecutionFailedException("foo", new MessageConversionException("bar"));
+		Exception e = new ListenerExecutionFailedException("foo", new MessageConversionException("bar"),
+				mock(Message.class));
 		try {
 			eh.handleError(e);
 			fail("expected exception");
@@ -267,7 +271,7 @@ public class MessageListenerContainerErrorHandlerIntegrationTests {
 			assertSame(e, aradre.getCause());
 		}
 		e = new ListenerExecutionFailedException("foo", new MessageConversionException("bar",
-				new AmqpRejectAndDontRequeueException("baz")));
+				new AmqpRejectAndDontRequeueException("baz")), mock(Message.class));
 		eh.handleError(e);
 		((DisposableBean) template.getConnectionFactory()).destroy();
 	}
@@ -403,4 +407,5 @@ public class MessageListenerContainerErrorHandlerIntegrationTests {
 			}
 		}
 	}
+
 }

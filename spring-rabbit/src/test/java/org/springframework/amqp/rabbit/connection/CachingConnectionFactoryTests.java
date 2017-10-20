@@ -1,5 +1,5 @@
 /*
- * Copyright 2002-2016 the original author or authors.
+ * Copyright 2002-2017 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -24,12 +24,15 @@ import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
 import static org.mockito.AdditionalMatchers.aryEq;
-import static org.mockito.Matchers.any;
-import static org.mockito.Matchers.anyInt;
-import static org.mockito.Matchers.anyString;
-import static org.mockito.Matchers.isNull;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyInt;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.isNull;
+import static org.mockito.BDDMockito.willAnswer;
 import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.doReturn;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -54,14 +57,17 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 
+import org.junit.Ignore;
 import org.junit.Test;
 import org.mockito.InOrder;
 import org.mockito.invocation.InvocationOnMock;
 import org.mockito.stubbing.Answer;
 
+import org.springframework.amqp.AmqpConnectException;
 import org.springframework.amqp.AmqpTimeoutException;
 import org.springframework.amqp.rabbit.connection.CachingConnectionFactory.CacheMode;
 import org.springframework.amqp.utils.test.TestUtils;
@@ -71,6 +77,7 @@ import com.rabbitmq.client.Address;
 import com.rabbitmq.client.Channel;
 import com.rabbitmq.client.ConnectionFactory;
 import com.rabbitmq.client.GetResponse;
+import com.rabbitmq.client.ShutdownSignalException;
 
 /**
  * @author Mark Pollack
@@ -83,7 +90,9 @@ public class CachingConnectionFactoryTests extends AbstractConnectionFactoryTest
 
 	@Override
 	protected AbstractConnectionFactory createConnectionFactory(ConnectionFactory connectionFactory) {
-		return new CachingConnectionFactory(connectionFactory);
+		CachingConnectionFactory ccf = new CachingConnectionFactory(connectionFactory);
+		ccf.setExecutor(mock(ExecutorService.class));
+		return ccf;
 	}
 
 	@Test
@@ -98,6 +107,7 @@ public class CachingConnectionFactoryTests extends AbstractConnectionFactoryTest
 		when(mockConnection.isOpen()).thenReturn(true);
 
 		CachingConnectionFactory ccf = new CachingConnectionFactory(mockConnectionFactory);
+		ccf.setExecutor(mock(ExecutorService.class));
 		Connection con = ccf.createConnection();
 
 		Channel channel = con.createChannel(false);
@@ -116,8 +126,8 @@ public class CachingConnectionFactoryTests extends AbstractConnectionFactoryTest
 		assertSame(channel, channel2);
 		verify(mockConnection, never()).close();
 		verify(mockChannel, never()).close();
-
 	}
+
 	@Test
 	public void testWithConnectionFactoryCacheSize() throws Exception {
 		com.rabbitmq.client.ConnectionFactory mockConnectionFactory = mock(com.rabbitmq.client.ConnectionFactory.class);
@@ -136,6 +146,7 @@ public class CachingConnectionFactoryTests extends AbstractConnectionFactoryTest
 		when(mockChannel2.isOpen()).thenReturn(true);
 
 		CachingConnectionFactory ccf = new CachingConnectionFactory(mockConnectionFactory);
+		ccf.setExecutor(mock(ExecutorService.class));
 		ccf.setChannelCacheSize(2);
 
 		Connection con = ccf.createConnection();
@@ -155,9 +166,9 @@ public class CachingConnectionFactoryTests extends AbstractConnectionFactoryTest
 		channel2.close(); // should be ignored, and add last into channel cache.
 
 		Channel ch1 = con.createChannel(false); // remove first entry in cache
-												// (channel1)
+		// (channel1)
 		Channel ch2 = con.createChannel(false); // remove first entry in cache
-												// (channel2)
+		// (channel2)
 
 		assertNotSame(ch1, ch2);
 		assertSame(ch1, channel1);
@@ -194,6 +205,7 @@ public class CachingConnectionFactoryTests extends AbstractConnectionFactoryTest
 		when(mockChannel3.isOpen()).thenReturn(true);
 
 		CachingConnectionFactory ccf = new CachingConnectionFactory(mockConnectionFactory);
+		ccf.setExecutor(mock(ExecutorService.class));
 		ccf.setChannelCacheSize(1);
 
 		Connection con = ccf.createConnection();
@@ -246,6 +258,7 @@ public class CachingConnectionFactoryTests extends AbstractConnectionFactoryTest
 		when(mockChannel1.isOpen()).thenReturn(true);
 
 		CachingConnectionFactory ccf = new CachingConnectionFactory(mockConnectionFactory);
+		ccf.setExecutor(mock(ExecutorService.class));
 		ccf.setChannelCacheSize(1);
 		ccf.setChannelCheckoutTimeout(10);
 
@@ -257,7 +270,8 @@ public class CachingConnectionFactoryTests extends AbstractConnectionFactoryTest
 			con.createChannel(false);
 			fail("Exception expected");
 		}
-		catch (AmqpTimeoutException e) { }
+		catch (AmqpTimeoutException e) {
+		}
 
 		// should be ignored, and added last into channel cache.
 		channel1.close();
@@ -280,6 +294,66 @@ public class CachingConnectionFactoryTests extends AbstractConnectionFactoryTest
 	}
 
 	@Test
+	public void testCheckoutLimitWithFailures() throws Exception {
+		com.rabbitmq.client.ConnectionFactory mockConnectionFactory = mock(com.rabbitmq.client.ConnectionFactory.class);
+		final com.rabbitmq.client.Connection mockConnection = mock(com.rabbitmq.client.Connection.class);
+		Channel mockChannel1 = mock(Channel.class);
+		final AtomicBoolean brokerDown = new AtomicBoolean();
+
+		willAnswer(i -> {
+			if (brokerDown.get()) {
+				throw new AmqpConnectException(null);
+			}
+			return mockConnection;
+		}).given(mockConnectionFactory).newConnection((ExecutorService) isNull(), anyString());
+
+		when(mockConnection.createChannel()).thenReturn(mockChannel1);
+
+		doAnswer(i -> !brokerDown.get()).when(mockConnection).isOpen();
+
+		// Called during physical close
+		doAnswer(i -> !brokerDown.get()).when(mockChannel1).isOpen();
+
+		CachingConnectionFactory ccf = new CachingConnectionFactory(mockConnectionFactory);
+		ccf.setChannelCacheSize(1);
+		ccf.setChannelCheckoutTimeout(10);
+
+		Connection con = ccf.createConnection();
+
+		Channel channel1 = con.createChannel(false);
+
+		try {
+			con.createChannel(false);
+			fail("Exception expected");
+		}
+		catch (AmqpTimeoutException e) {
+		}
+
+		// should be ignored, and added last into channel cache.
+		channel1.close();
+
+		// remove first entry in cache (channel1)
+		Channel ch1 = con.createChannel(false);
+
+		assertSame(ch1, channel1);
+
+		ch1.close();
+
+		brokerDown.set(true);
+		try {
+			con.createChannel(false);
+			fail("Exception expected");
+		}
+		catch (AmqpConnectException e) {
+		}
+		brokerDown.set(false);
+		ch1 = con.createChannel(false);
+		ch1.close();
+
+		ccf.destroy();
+	}
+
+	@Test
 	public void testConnectionLimit() throws Exception {
 		com.rabbitmq.client.ConnectionFactory mockConnectionFactory = mock(com.rabbitmq.client.ConnectionFactory.class);
 		com.rabbitmq.client.Connection mockConnection = mock(com.rabbitmq.client.Connection.class);
@@ -288,6 +362,7 @@ public class CachingConnectionFactoryTests extends AbstractConnectionFactoryTest
 		when(mockConnection.isOpen()).thenReturn(true);
 
 		final CachingConnectionFactory ccf = new CachingConnectionFactory(mockConnectionFactory);
+		ccf.setExecutor(mock(ExecutorService.class));
 		ccf.setCacheMode(CacheMode.CONNECTION);
 		ccf.setConnectionCacheSize(1);
 		ccf.setConnectionLimit(1);
@@ -299,7 +374,8 @@ public class CachingConnectionFactoryTests extends AbstractConnectionFactoryTest
 			ccf.createConnection();
 			fail("Exception expected");
 		}
-		catch (AmqpTimeoutException e) { }
+		catch (AmqpTimeoutException e) {
+		}
 
 		// should be ignored, and added to cache
 		con1.close();
@@ -358,13 +434,14 @@ public class CachingConnectionFactoryTests extends AbstractConnectionFactoryTest
 		when(mockChannel4.isOpen()).thenReturn(true);
 
 		CachingConnectionFactory ccf = new CachingConnectionFactory(mockConnectionFactory);
+		ccf.setExecutor(mock(ExecutorService.class));
 		ccf.setChannelCacheSize(2);
 		ccf.setChannelCheckoutTimeout(10);
 		ccf.setCacheMode(mode);
 
 		ccf.addConnectionListener(connection -> {
 			try {
-				 // simulate admin
+				// simulate admin
 				connection.createChannel(false).close();
 			}
 			catch (Exception e) {
@@ -377,13 +454,13 @@ public class CachingConnectionFactoryTests extends AbstractConnectionFactoryTest
 		Channel channel1 = con.createChannel(false);
 		assertEquals(1,
 				((Semaphore) TestUtils.getPropertyValue(ccf, "checkoutPermits", Map.class).values().iterator().next())
-					.availablePermits());
+						.availablePermits());
 		channel1.close();
 		con.close();
 
 		assertEquals(2,
 				((Semaphore) TestUtils.getPropertyValue(ccf, "checkoutPermits", Map.class).values().iterator().next())
-					.availablePermits());
+						.availablePermits());
 
 		when(mockConnection1.isOpen()).thenReturn(false);
 		when(mockChannel1.isOpen()).thenReturn(false);
@@ -406,13 +483,13 @@ public class CachingConnectionFactoryTests extends AbstractConnectionFactoryTest
 
 		assertEquals(2,
 				((Semaphore) TestUtils.getPropertyValue(ccf, "checkoutPermits", Map.class).values().iterator().next())
-					.availablePermits());
+						.availablePermits());
 
 		ccf.destroy();
 
 		assertEquals(2,
 				((Semaphore) TestUtils.getPropertyValue(ccf, "checkoutPermits", Map.class).values().iterator().next())
-					.availablePermits());
+						.availablePermits());
 
 	}
 
@@ -430,6 +507,7 @@ public class CachingConnectionFactoryTests extends AbstractConnectionFactoryTest
 		when(mockChannel1.isOpen()).thenReturn(true);
 
 		CachingConnectionFactory ccf = new CachingConnectionFactory(mockConnectionFactory);
+		ccf.setExecutor(mock(ExecutorService.class));
 		ccf.setChannelCacheSize(1);
 		ccf.setChannelCheckoutTimeout(10000);
 
@@ -480,6 +558,7 @@ public class CachingConnectionFactoryTests extends AbstractConnectionFactoryTest
 		when(mockChannel1.isOpen()).thenReturn(true);
 
 		CachingConnectionFactory ccf = new CachingConnectionFactory(mockConnectionFactory);
+		ccf.setExecutor(mock(ExecutorService.class));
 		ccf.setChannelCacheSize(1);
 		ccf.setChannelCheckoutTimeout(10);
 
@@ -488,35 +567,35 @@ public class CachingConnectionFactoryTests extends AbstractConnectionFactoryTest
 		Channel channel1 = con.createChannel(false);
 		assertEquals(0,
 				((Semaphore) TestUtils.getPropertyValue(ccf, "checkoutPermits", Map.class).values().iterator().next())
-					.availablePermits());
+						.availablePermits());
 		channel1.close();
 		con.close();
 
 		assertEquals(1,
 				((Semaphore) TestUtils.getPropertyValue(ccf, "checkoutPermits", Map.class).values().iterator().next())
-					.availablePermits());
+						.availablePermits());
 
 		channel1 = con.createChannel(false);
-		RabbitUtils.setPhysicalCloseRequired(true);
+		RabbitUtils.setPhysicalCloseRequired(channel1, true);
 		assertEquals(0,
 				((Semaphore) TestUtils.getPropertyValue(ccf, "checkoutPermits", Map.class).values().iterator().next())
-					.availablePermits());
+						.availablePermits());
 
 		channel1.close();
-		RabbitUtils.setPhysicalCloseRequired(false);
+		RabbitUtils.setPhysicalCloseRequired(channel1, false);
 		con.close();
 		verify(mockChannel1).close();
 		verify(mockConnection1, never()).close();
 
 		assertEquals(1,
 				((Semaphore) TestUtils.getPropertyValue(ccf, "checkoutPermits", Map.class).values().iterator().next())
-					.availablePermits());
+						.availablePermits());
 
 		ccf.destroy();
 
 		assertEquals(1,
 				((Semaphore) TestUtils.getPropertyValue(ccf, "checkoutPermits", Map.class).values().iterator().next())
-					.availablePermits());
+						.availablePermits());
 
 	}
 
@@ -533,6 +612,7 @@ public class CachingConnectionFactoryTests extends AbstractConnectionFactoryTest
 		when(mockChannel1.isOpen()).thenReturn(true);
 
 		CachingConnectionFactory ccf = new CachingConnectionFactory(mockConnectionFactory);
+		ccf.setExecutor(mock(ExecutorService.class));
 		ccf.setChannelCacheSize(1);
 		ccf.setChannelCheckoutTimeout(10);
 
@@ -541,18 +621,18 @@ public class CachingConnectionFactoryTests extends AbstractConnectionFactoryTest
 		Channel channel1 = con.createChannel(false);
 		assertEquals(0,
 				((Semaphore) TestUtils.getPropertyValue(ccf, "checkoutPermits", Map.class).values().iterator().next())
-					.availablePermits());
+						.availablePermits());
 		channel1.close();
 
 		assertEquals(1,
 				((Semaphore) TestUtils.getPropertyValue(ccf, "checkoutPermits", Map.class).values().iterator().next())
-					.availablePermits());
+						.availablePermits());
 
 		channel1.close(); // double close of proxy
 
 		assertEquals(1,
 				((Semaphore) TestUtils.getPropertyValue(ccf, "checkoutPermits", Map.class).values().iterator().next())
-					.availablePermits());
+						.availablePermits());
 
 		con.close();
 		verify(mockChannel1, never()).close();
@@ -562,7 +642,7 @@ public class CachingConnectionFactoryTests extends AbstractConnectionFactoryTest
 
 		assertEquals(1,
 				((Semaphore) TestUtils.getPropertyValue(ccf, "checkoutPermits", Map.class).values().iterator().next())
-					.availablePermits());
+						.availablePermits());
 
 	}
 
@@ -582,6 +662,7 @@ public class CachingConnectionFactoryTests extends AbstractConnectionFactoryTest
 		when(mockChannel2.isOpen()).thenReturn(true);
 
 		CachingConnectionFactory ccf = new CachingConnectionFactory(mockConnectionFactory);
+		ccf.setExecutor(mock(ExecutorService.class));
 		ccf.setChannelCacheSize(1);
 
 		Connection con = ccf.createConnection();
@@ -593,7 +674,7 @@ public class CachingConnectionFactoryTests extends AbstractConnectionFactoryTest
 		assertSame(channel1, channel2);
 
 		Channel ch1 = con.createChannel(false); // remove first entry in cache
-												// (channel1)
+		// (channel1)
 		Channel ch2 = con.createChannel(false); // create new channel
 
 		assertNotSame(ch1, ch2);
@@ -629,6 +710,7 @@ public class CachingConnectionFactoryTests extends AbstractConnectionFactoryTest
 		when(mockChannel2.isOpen()).thenReturn(true);
 
 		CachingConnectionFactory ccf = new CachingConnectionFactory(mockConnectionFactory);
+		ccf.setExecutor(mock(ExecutorService.class));
 		ccf.setChannelCacheSize(1);
 
 		Connection con = ccf.createConnection();
@@ -693,6 +775,7 @@ public class CachingConnectionFactoryTests extends AbstractConnectionFactoryTest
 		when(mockChannel3.isOpen()).thenReturn(true);
 
 		CachingConnectionFactory ccf = new CachingConnectionFactory(mockConnectionFactory);
+		ccf.setExecutor(mock(ExecutorService.class));
 		ccf.setChannelCacheSize(2);
 
 		Connection con = ccf.createConnection();
@@ -758,6 +841,7 @@ public class CachingConnectionFactoryTests extends AbstractConnectionFactoryTest
 		final AtomicInteger called = new AtomicInteger(0);
 		AbstractConnectionFactory connectionFactory = createConnectionFactory(mockConnectionFactory);
 		connectionFactory.setChannelListeners(Arrays.asList(new ChannelListener() {
+
 			@Override
 			public void onCreate(Channel channel, boolean transactional) {
 				called.incrementAndGet();
@@ -860,12 +944,16 @@ public class CachingConnectionFactoryTests extends AbstractConnectionFactoryTest
 		final List<Channel> mockChannels = new ArrayList<Channel>();
 
 		doAnswer(new Answer<com.rabbitmq.client.Connection>() {
+
 			private int connectionNumber;
+
 			@Override
 			public com.rabbitmq.client.Connection answer(InvocationOnMock invocation) throws Throwable {
 				com.rabbitmq.client.Connection connection = mock(com.rabbitmq.client.Connection.class);
 				doAnswer(new Answer<Channel>() {
+
 					private int channelNumber;
+
 					@Override
 					public Channel answer(InvocationOnMock invocation) throws Throwable {
 						Channel channel = mock(Channel.class);
@@ -885,6 +973,7 @@ public class CachingConnectionFactoryTests extends AbstractConnectionFactoryTest
 		}).when(mockConnectionFactory).newConnection(any(ExecutorService.class), anyString());
 
 		CachingConnectionFactory ccf = new CachingConnectionFactory(mockConnectionFactory);
+		ccf.setExecutor(mock(ExecutorService.class));
 		ccf.setCacheMode(CacheMode.CONNECTION);
 		ccf.afterPropertiesSet();
 
@@ -1059,12 +1148,16 @@ public class CachingConnectionFactoryTests extends AbstractConnectionFactoryTest
 		final List<Channel> mockChannels = new ArrayList<Channel>();
 
 		doAnswer(new Answer<com.rabbitmq.client.Connection>() {
+
 			private int connectionNumber;
+
 			@Override
 			public com.rabbitmq.client.Connection answer(InvocationOnMock invocation) throws Throwable {
 				com.rabbitmq.client.Connection connection = mock(com.rabbitmq.client.Connection.class);
 				doAnswer(new Answer<Channel>() {
+
 					private int channelNumber;
+
 					@Override
 					public Channel answer(InvocationOnMock invocation) throws Throwable {
 						Channel channel = mock(Channel.class);
@@ -1084,6 +1177,7 @@ public class CachingConnectionFactoryTests extends AbstractConnectionFactoryTest
 		}).when(mockConnectionFactory).newConnection(any(ExecutorService.class), anyString());
 
 		CachingConnectionFactory ccf = new CachingConnectionFactory(mockConnectionFactory);
+		ccf.setExecutor(mock(ExecutorService.class));
 		ccf.setCacheMode(CacheMode.CONNECTION);
 		ccf.setConnectionCacheSize(2);
 		ccf.setChannelCacheSize(2);
@@ -1277,12 +1371,16 @@ public class CachingConnectionFactoryTests extends AbstractConnectionFactoryTest
 		final List<Channel> mockChannels = new ArrayList<Channel>();
 
 		doAnswer(new Answer<com.rabbitmq.client.Connection>() {
+
 			private int connectionNumber;
+
 			@Override
 			public com.rabbitmq.client.Connection answer(InvocationOnMock invocation) throws Throwable {
 				com.rabbitmq.client.Connection connection = mock(com.rabbitmq.client.Connection.class);
 				doAnswer(new Answer<Channel>() {
+
 					private int channelNumber;
+
 					@Override
 					public Channel answer(InvocationOnMock invocation) throws Throwable {
 						Channel channel = mock(Channel.class);
@@ -1302,6 +1400,7 @@ public class CachingConnectionFactoryTests extends AbstractConnectionFactoryTest
 		}).when(mockConnectionFactory).newConnection(any(ExecutorService.class), anyString());
 
 		CachingConnectionFactory ccf = new CachingConnectionFactory(mockConnectionFactory);
+		ccf.setExecutor(mock(ExecutorService.class));
 		ccf.setCacheMode(CacheMode.CONNECTION);
 		ccf.setConnectionCacheSize(5);
 		ccf.afterPropertiesSet();
@@ -1339,6 +1438,51 @@ public class CachingConnectionFactoryTests extends AbstractConnectionFactoryTest
 		assertEquals("0", ccf.getCacheProperties().get("openConnections"));
 	}
 
+	@Test
+	public void testConsumerChannelPhysicallyClosedWhenNotIsOpen() throws Exception {
+		testConsumerChannelPhysicallyClosedWhenNotIsOpenGuts(false);
+	}
+
+	@Test
+	public void testConsumerChannelWithPubConfPhysicallyClosedWhenNotIsOpen() throws Exception {
+		testConsumerChannelPhysicallyClosedWhenNotIsOpenGuts(true);
+	}
+
+	public void testConsumerChannelPhysicallyClosedWhenNotIsOpenGuts(boolean confirms) throws Exception {
+		ExecutorService executor = Executors.newSingleThreadExecutor();
+		try {
+			com.rabbitmq.client.ConnectionFactory mockConnectionFactory = mock(com.rabbitmq.client.ConnectionFactory.class);
+			com.rabbitmq.client.Connection mockConnection = mock(com.rabbitmq.client.Connection.class);
+			Channel mockChannel = mock(Channel.class);
+
+			when(mockConnectionFactory.newConnection(any(ExecutorService.class), anyString())).thenReturn(mockConnection);
+			when(mockConnection.createChannel()).thenReturn(mockChannel);
+			when(mockChannel.isOpen()).thenReturn(true);
+			when(mockConnection.isOpen()).thenReturn(true);
+
+			CachingConnectionFactory ccf = new CachingConnectionFactory(mockConnectionFactory);
+			ccf.setExecutor(executor);
+			ccf.setPublisherConfirms(confirms);
+			Connection con = ccf.createConnection();
+
+			Channel channel = con.createChannel(false);
+			RabbitUtils.setPhysicalCloseRequired(channel, true);
+			when(mockChannel.isOpen()).thenReturn(false);
+			final CountDownLatch physicalCloseLatch = new CountDownLatch(1);
+			doAnswer(i -> {
+				physicalCloseLatch.countDown();
+				return null;
+			}).when(mockChannel).close();
+			channel.close();
+			con.close(); // should be ignored
+
+			assertTrue(physicalCloseLatch.await(10, TimeUnit.SECONDS));
+		}
+		finally {
+			executor.shutdownNow();
+		}
+	}
+
 	private void verifyConnectionIs(com.rabbitmq.client.Connection mockConnection, Object con) {
 		assertSame(mockConnection, targetDelegate(con));
 	}
@@ -1357,9 +1501,11 @@ public class CachingConnectionFactoryTests extends AbstractConnectionFactoryTest
 	public void setAddressesEmpty() throws Exception {
 		ConnectionFactory mock = mock(com.rabbitmq.client.ConnectionFactory.class);
 		CachingConnectionFactory ccf = new CachingConnectionFactory(mock);
+		ccf.setExecutor(mock(ExecutorService.class));
 		ccf.setHost("abc");
 		ccf.setAddresses("");
 		ccf.createConnection();
+		verify(mock).isAutomaticRecoveryEnabled();
 		verify(mock).setHost("abc");
 		verify(mock).newConnection(any(ExecutorService.class), anyString());
 		verifyNoMoreInteractions(mock);
@@ -1371,18 +1517,21 @@ public class CachingConnectionFactoryTests extends AbstractConnectionFactoryTest
 		CachingConnectionFactory ccf = new CachingConnectionFactory(mock);
 		ccf.setAddresses("mq1");
 		ccf.createConnection();
+		verify(mock).isAutomaticRecoveryEnabled();
 		verify(mock)
-				.newConnection(isNull(ExecutorService.class), aryEq(new Address[] { new Address("mq1") }), anyString());
+				.newConnection(isNull(), aryEq(new Address[] { new Address("mq1") }), anyString());
 		verifyNoMoreInteractions(mock);
 	}
 
 	@Test
 	public void setAddressesTwoHosts() throws Exception {
 		ConnectionFactory mock = mock(com.rabbitmq.client.ConnectionFactory.class);
+		doReturn(true).when(mock).isAutomaticRecoveryEnabled();
 		CachingConnectionFactory ccf = new CachingConnectionFactory(mock);
 		ccf.setAddresses("mq1,mq2");
 		ccf.createConnection();
-		verify(mock).newConnection(isNull(ExecutorService.class),
+		verify(mock).isAutomaticRecoveryEnabled();
+		verify(mock).newConnection(isNull(),
 				aryEq(new Address[] { new Address("mq1"), new Address("mq2") }), anyString());
 		verifyNoMoreInteractions(mock);
 	}
@@ -1393,11 +1542,13 @@ public class CachingConnectionFactoryTests extends AbstractConnectionFactoryTest
 
 		ConnectionFactory mock = mock(com.rabbitmq.client.ConnectionFactory.class);
 		CachingConnectionFactory ccf = new CachingConnectionFactory(mock);
+		ccf.setExecutor(mock(ExecutorService.class));
 
 		ccf.setUri(uri);
 		ccf.createConnection();
 
 		InOrder order = inOrder(mock);
+		order.verify(mock).isAutomaticRecoveryEnabled();
 		order.verify(mock).setUri(uri);
 		order.verify(mock).newConnection(any(ExecutorService.class), anyString());
 		verifyNoMoreInteractions(mock);
@@ -1415,6 +1566,7 @@ public class CachingConnectionFactoryTests extends AbstractConnectionFactoryTest
 		when(mockChannel.isOpen()).thenReturn(true).thenReturn(false);
 
 		CachingConnectionFactory ccf = new CachingConnectionFactory(mockConnectionFactory);
+		ccf.setExecutor(mock(ExecutorService.class));
 		Connection con = ccf.createConnection();
 
 		Channel channel = con.createChannel(false);
@@ -1424,6 +1576,32 @@ public class CachingConnectionFactoryTests extends AbstractConnectionFactoryTest
 		channel.close(); // physically closed and removed from the cache  before, so void "close".
 		Channel channel2 = con.createChannel(false);
 		assertNotSame(channel, channel2);
+	}
+
+	@Test
+	@Ignore // Test to verify log message is suppressed after patch to CCF
+	public void testReturnsNormalCloseDeferredClose() throws Exception {
+		com.rabbitmq.client.ConnectionFactory mockConnectionFactory = mock(com.rabbitmq.client.ConnectionFactory.class);
+		com.rabbitmq.client.Connection mockConnection = mock(com.rabbitmq.client.Connection.class);
+		Channel mockChannel = mock(Channel.class);
+
+		when(mockConnectionFactory.newConnection(any(ExecutorService.class), anyString())).thenReturn(mockConnection);
+		when(mockConnection.isOpen()).thenReturn(true);
+		when(mockConnection.createChannel()).thenReturn(mockChannel);
+		when(mockChannel.isOpen()).thenReturn(true);
+		doThrow(new ShutdownSignalException(true, false, new com.rabbitmq.client.AMQP.Connection.Close.Builder()
+				.replyCode(200)
+				.replyText("OK")
+				.build(), null)).when(mockChannel).close();
+
+		CachingConnectionFactory ccf = new CachingConnectionFactory(mockConnectionFactory);
+		ccf.setPublisherReturns(true);
+		ccf.setExecutor(Executors.newSingleThreadExecutor());
+		Connection conn = ccf.createConnection();
+		Channel channel = conn.createChannel(false);
+		RabbitUtils.setPhysicalCloseRequired(channel, true);
+		channel.close();
+		Thread.sleep(6000);
 	}
 
 }

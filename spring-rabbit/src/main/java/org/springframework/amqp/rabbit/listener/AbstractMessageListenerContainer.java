@@ -1,5 +1,5 @@
 /*
- * Copyright 2002-2016 the original author or authors.
+ * Copyright 2002-2017 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -17,7 +17,6 @@
 package org.springframework.amqp.rabbit.listener;
 
 import java.nio.ByteBuffer;
-import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
 import java.util.HashMap;
@@ -25,6 +24,7 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Map.Entry;
+import java.util.Properties;
 import java.util.Set;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.Executor;
@@ -63,6 +63,7 @@ import org.springframework.amqp.support.converter.MessageConverter;
 import org.springframework.amqp.support.postprocessor.MessagePostProcessorUtils;
 import org.springframework.aop.framework.ProxyFactory;
 import org.springframework.aop.support.DefaultPointcutAdvisor;
+import org.springframework.beans.BeansException;
 import org.springframework.beans.factory.BeanNameAware;
 import org.springframework.beans.factory.DisposableBean;
 import org.springframework.context.ApplicationContext;
@@ -89,16 +90,19 @@ import com.rabbitmq.client.ShutdownSignalException;
  * @author Dave Syer
  * @author James Carr
  * @author Gary Russell
+ * @author Alex Panchenko
+ * @author Johno Crawford
+ * @author Arnaud Cogoluègnes
  */
 public abstract class AbstractMessageListenerContainer extends RabbitAccessor
 		implements MessageListenerContainer, ApplicationContextAware, BeanNameAware, DisposableBean,
-				ApplicationEventPublisherAware {
+		ApplicationEventPublisherAware {
 
 	static final int DEFAULT_FAILED_DECLARATION_RETRY_INTERVAL = 5000;
 
 	public static final boolean DEFAULT_DEBATCHING_ENABLED = true;
 
-	public static final int DEFAULT_PREFETCH_COUNT = 1;
+	public static final int DEFAULT_PREFETCH_COUNT = 250;
 
 	/**
 	 * The default recovery interval: 5000 ms = 5 seconds.
@@ -138,6 +142,10 @@ public abstract class AbstractMessageListenerContainer extends RabbitAccessor
 	private boolean missingQueuesFatal = true;
 
 	private boolean missingQueuesFatalSet;
+
+	private boolean possibleAuthenticationFailureFatal = true;
+
+	private boolean possibleAuthenticationFailureFatalSet;
 
 	private boolean autoDeclare = true;
 
@@ -183,6 +191,8 @@ public abstract class AbstractMessageListenerContainer extends RabbitAccessor
 
 	private volatile boolean exclusive;
 
+	private volatile boolean noLocal;
+
 	private volatile boolean defaultRequeueRejected = true;
 
 	private volatile int prefetchCount = DEFAULT_PREFETCH_COUNT;
@@ -195,6 +205,11 @@ public abstract class AbstractMessageListenerContainer extends RabbitAccessor
 
 	private ConditionalExceptionLogger exclusiveConsumerExceptionLogger = new DefaultExclusiveConsumerLogger();
 
+	private boolean alwaysRequeueWithTxManagerRollback;
+
+	private String lookupKeyQualifier = "";
+
+	private boolean forceCloseChannel = true;
 
 	/**
 	 * {@inheritDoc}
@@ -244,21 +259,25 @@ public abstract class AbstractMessageListenerContainer extends RabbitAccessor
 	 */
 	public void setQueueNames(String... queueName) {
 		Assert.noNullElements(queueName, "Queue name(s) cannot be null");
-		this.queueNames = new CopyOnWriteArrayList<>(Arrays.asList(queueName));
+		this.queueNames = new CopyOnWriteArrayList<>(queueName);
 	}
 
 	/**
 	 * Set the name of the queue(s) to receive messages from.
 	 * @param queues the desired queue(s) (can not be <code>null</code>)
 	 */
-	public void setQueues(Queue... queues) {
-		List<String> queueNames = new ArrayList<String>(queues.length);
+	public final void setQueues(Queue... queues) {
+		setQueueNames(collectQueueNames(queues));
+	}
+
+	private static String[] collectQueueNames(Queue... queues) {
+		Assert.notNull(queues, "'queues' cannot be null");
+		Assert.noNullElements(queues, "'queues' cannot contain null elements");
+		String[] queueNames = new String[queues.length];
 		for (int i = 0; i < queues.length; i++) {
-			Assert.notNull(queues[i], "Queue (" + i + ") must not be null.");
-			queueNames.add(queues[i].getName());
+			queueNames[i] = queues[i].getName();
 		}
-		queueNames = new CopyOnWriteArrayList<>(queueNames);
-		this.queueNames = queueNames;
+		return queueNames;
 	}
 
 	/**
@@ -266,11 +285,6 @@ public abstract class AbstractMessageListenerContainer extends RabbitAccessor
 	 */
 	public String[] getQueueNames() {
 		return this.queueNames.toArray(new String[this.queueNames.size()]);
-	}
-
-	protected String[] getRequiredQueueNames() {
-		Assert.state(this.queueNames.size() > 0, "Queue names must not be empty.");
-		return getQueueNames();
 	}
 
 	protected Set<String> getQueueNamesAsSet() {
@@ -291,14 +305,8 @@ public abstract class AbstractMessageListenerContainer extends RabbitAccessor
 	 * Add queue(s) to this container's list of queues.
 	 * @param queues The queue(s) to add.
 	 */
-	public void addQueues(Queue... queues) {
-		Assert.notNull(queues, "'queues' cannot be null");
-		Assert.noNullElements(queues, "'queues' cannot contain null elements");
-		String[] queueNames = new String[queues.length];
-		for (int i = 0; i < queues.length; i++) {
-			queueNames[i] = queues[i].getName();
-		}
-		this.addQueueNames(queueNames);
+	public final void addQueues(Queue... queues) {
+		addQueueNames(collectQueueNames(queues));
 	}
 
 	/**
@@ -317,14 +325,8 @@ public abstract class AbstractMessageListenerContainer extends RabbitAccessor
 	 * @param queues The queue(s) to remove.
 	 * @return the boolean result of removal on the target {@code queueNames} List.
 	 */
-	public boolean removeQueues(Queue... queues) {
-		Assert.notNull(queues, "'queues' cannot be null");
-		Assert.noNullElements(queues, "'queues' cannot contain null elements");
-		String[] queueNames = new String[queues.length];
-		for (int i = 0; i < queues.length; i++) {
-			queueNames[i] = queues[i].getName();
-		}
-		return this.removeQueueNames(queueNames);
+	public final boolean removeQueues(Queue... queues) {
+		return removeQueueNames(collectQueueNames(queues));
 	}
 
 	/**
@@ -536,12 +538,68 @@ public abstract class AbstractMessageListenerContainer extends RabbitAccessor
 		ConnectionFactory connectionFactory = super.getConnectionFactory();
 		if (connectionFactory instanceof RoutingConnectionFactory) {
 			ConnectionFactory targetConnectionFactory = ((RoutingConnectionFactory) connectionFactory)
-					.getTargetConnectionFactory(this.queueNames.toString().replaceAll(" ", ""));
+					.getTargetConnectionFactory(getRoutingLookupKey());
 			if (targetConnectionFactory != null) {
 				return targetConnectionFactory;
 			}
 		}
 		return connectionFactory;
+	}
+
+	/**
+	 * Set a qualifier that will prefix the connection factory lookup key; default none.
+	 * @param lookupKeyQualifier the qualifier
+	 * @since 1.6.9
+	 * @see #getRoutingLookupKey()
+	 */
+	public void setLookupKeyQualifier(String lookupKeyQualifier) {
+		this.lookupKeyQualifier = lookupKeyQualifier;
+	}
+
+	/**
+	 * Force close the channel if the consumer threads don't respond to a shutdown.
+	 * @return true to force close.
+	 * @since 1.7.4
+	 */
+	protected boolean isForceCloseChannel() {
+		return this.forceCloseChannel;
+	}
+
+	/**
+	 * Set to true to force close the channel if the consumer threads don't respond to a
+	 * shutdown. Default: true (since 2.0).
+	 * @param forceCloseChannel true to force close.
+	 * @since 1.7.4
+	 */
+	public void setForceCloseChannel(boolean forceCloseChannel) {
+		this.forceCloseChannel = forceCloseChannel;
+	}
+
+	/**
+	 * Return the lookup key if the connection factory is a
+	 * {@link RoutingConnectionFactory}; null otherwise. The routing key is the
+	 * comma-delimited list of queue names with all spaces removed and bracketed by [...],
+	 * optionally prefixed by a qualifier, e.g. "foo[...]".
+	 * @return the key or null.
+	 * @since 1.6.9
+	 * @see #setLookupKeyQualifier(String)
+	 */
+	protected String getRoutingLookupKey() {
+		return super.getConnectionFactory() instanceof RoutingConnectionFactory
+				? (this.lookupKeyQualifier + this.queueNames.toString().replaceAll(" ", ""))
+				: null;
+	}
+
+	/**
+	 * Return the (@link RoutingConnectionFactory} if the connection factory is a
+	 * {@link RoutingConnectionFactory}; null otherwise.
+	 * @return the {@link RoutingConnectionFactory} or null.
+	 * @since 1.6.9
+	 */
+	protected RoutingConnectionFactory getRoutingConnectionFactory() {
+		return super.getConnectionFactory() instanceof RoutingConnectionFactory
+				? (RoutingConnectionFactory) super.getConnectionFactory()
+				: null;
 	}
 
 	/**
@@ -613,6 +671,22 @@ public abstract class AbstractMessageListenerContainer extends RabbitAccessor
 	}
 
 	/**
+	 * Set to true for an no-local consumer.
+	 * @param noLocal true for an no-local consumer.
+	 */
+	public void setNoLocal(boolean noLocal) {
+		this.noLocal = noLocal;
+	}
+
+	/**
+	 * Return whether the consumers should be no-local.
+	 * @return true for no-local consumers.
+	 */
+	protected boolean isNoLocal() {
+		return this.noLocal;
+	}
+
+	/**
 	 * Set the default behavior when a message is rejected, for example because the listener
 	 * threw an exception. When true, messages will be requeued, when false, they will not. For
 	 * versions of Rabbit that support dead-lettering, the message must not be requeued in order
@@ -628,8 +702,8 @@ public abstract class AbstractMessageListenerContainer extends RabbitAccessor
 	/**
 	 * Return the default requeue rejected.
 	 * @return the boolean.
-	 * @see #setDefaultRequeueRejected(boolean)
 	 * @since 2.0
+	 * @see #setDefaultRequeueRejected(boolean)
 	 */
 	protected boolean isDefaultRequeueRejected() {
 		return this.defaultRequeueRejected;
@@ -820,6 +894,21 @@ public abstract class AbstractMessageListenerContainer extends RabbitAccessor
 		return this.mismatchedQueuesFatal;
 	}
 
+
+	public void setPossibleAuthenticationFailureFatal(boolean possibleAuthenticationFailureFatal) {
+		this.possibleAuthenticationFailureFatal = possibleAuthenticationFailureFatal;
+		this.possibleAuthenticationFailureFatalSet = true;
+	}
+
+	public boolean isPossibleAuthenticationFailureFatal() {
+		return this.possibleAuthenticationFailureFatal;
+	}
+
+
+	protected boolean isPossibleAuthenticationFailureFatalSet() {
+		return this.possibleAuthenticationFailureFatalSet;
+	}
+
 	/**
 	 * Set to true to automatically declare elements (queues, exchanges, bindings)
 	 * in the application context during container start().
@@ -876,6 +965,28 @@ public abstract class AbstractMessageListenerContainer extends RabbitAccessor
 
 	protected ConditionalExceptionLogger getExclusiveConsumerExceptionLogger() {
 		return this.exclusiveConsumerExceptionLogger;
+	}
+
+	/**
+	 * Set to true to always requeue on transaction rollback with an external
+	 * {@link #setTransactionManager(PlatformTransactionManager) TransactionManager}.
+	 * With earlier releases, when a transaction manager was configured, a transaction
+	 * rollback always requeued the message. This was inconsistent with local transactions
+	 * where the normal {@link #setDefaultRequeueRejected(boolean) defaultRequeueRejected}
+	 * and {@link AmqpRejectAndDontRequeueException} logic was honored to determine whether
+	 * the message was requeued. RabbitMQ does not consider the message delivery to be part
+	 * of the transaction.
+	 * This boolean was introduced in 1.7.1, set to true by default, to be consistent with
+	 * previous behavior. Starting with version 2.0, it is false by default.
+	 * @param alwaysRequeueWithTxManagerRollback true to always requeue on rollback.
+	 * @since 1.7.1.
+	 */
+	public void setAlwaysRequeueWithTxManagerRollback(boolean alwaysRequeueWithTxManagerRollback) {
+		this.alwaysRequeueWithTxManagerRollback = alwaysRequeueWithTxManagerRollback;
+	}
+
+	protected boolean isAlwaysRequeueWithTxManagerRollback() {
+		return this.alwaysRequeueWithTxManagerRollback;
 	}
 
 	/**
@@ -946,6 +1057,8 @@ public abstract class AbstractMessageListenerContainer extends RabbitAccessor
 				this.lifecycleMonitor.notifyAll();
 			}
 			initializeProxy(this.delegate);
+			checkMissingQueuesFatalFromProperty();
+			checkPossibleAuthenticationFailureFatalFromProperty();
 			doInitialize();
 			if (!this.isExposeListenerChannel() && this.transactionManager != null) {
 				logger.warn("exposeListenerChannel=false is ignored when using a TransactionManager");
@@ -1083,8 +1196,12 @@ public abstract class AbstractMessageListenerContainer extends RabbitAccessor
 
 	@Override
 	public void stop(Runnable callback) {
-		stop();
-		callback.run();
+		try {
+			stop();
+		}
+		finally {
+			callback.run();
+		}
 	}
 
 	/**
@@ -1148,6 +1265,10 @@ public abstract class AbstractMessageListenerContainer extends RabbitAccessor
 			if (this.afterReceivePostProcessors != null) {
 				for (MessagePostProcessor processor : this.afterReceivePostProcessors) {
 					message = processor.postProcessMessage(message);
+					if (message == null) {
+						throw new ImmediateAcknowledgeAmqpException(
+								"Message Post Processor returned 'null', discarding message");
+					}
 				}
 			}
 			Object batchFormat = message.getMessageProperties().getHeaders().get(MessageProperties.SPRING_BATCH_FORMAT);
@@ -1160,7 +1281,7 @@ public abstract class AbstractMessageListenerContainer extends RabbitAccessor
 					if (length < 0 || length > byteBuffer.remaining()) {
 						throw new ListenerExecutionFailedException("Bad batched message received",
 								new MessageConversionException("Insufficient batch data at offset " + byteBuffer.position()),
-										message);
+								message);
 					}
 					byte[] body = new byte[length];
 					byteBuffer.get(body);
@@ -1183,7 +1304,7 @@ public abstract class AbstractMessageListenerContainer extends RabbitAccessor
 				else {
 					throw new ListenerExecutionFailedException("Cannot retry message more than once without an ID",
 							new AmqpRejectAndDontRequeueException("Not retryable; rejecting and not requeuing", ex),
-									messageIn);
+							messageIn);
 				}
 			}
 			handleListenerException(ex);
@@ -1263,10 +1384,10 @@ public abstract class AbstractMessageListenerContainer extends RabbitAccessor
 				 * will be committed in the finally block.
 				 */
 				if (isChannelLocallyTransacted() &&
-							!TransactionSynchronizationManager.isActualTransactionActive()) {
-						resourceHolder.setSynchronizedWithTransaction(true);
-						TransactionSynchronizationManager.bindResource(this.getConnectionFactory(),
-								resourceHolder);
+						!TransactionSynchronizationManager.isActualTransactionActive()) {
+					resourceHolder.setSynchronizedWithTransaction(true);
+					TransactionSynchronizationManager.bindResource(this.getConnectionFactory(),
+							resourceHolder);
 					boundHere = true;
 				}
 			}
@@ -1515,6 +1636,62 @@ public abstract class AbstractMessageListenerContainer extends RabbitAccessor
 		return false;
 	}
 
+	/**
+	 * A null resource holder is rare, but possible if the transaction attribute caused no
+	 * transaction to be started (e.g. {@code TransactionDefinition.PROPAGATION_NONE}). In
+	 * that case the delivery tags will have been processed manually.
+	 * @param resourceHolder the bound resource holder (if a transaction is active).
+	 * @param exception the exception.
+	 */
+	protected void prepareHolderForRollback(RabbitResourceHolder resourceHolder, RuntimeException exception) {
+		if (resourceHolder != null) {
+			resourceHolder.setRequeueOnRollback(isAlwaysRequeueWithTxManagerRollback() ||
+					RabbitUtils.shouldRequeue(isDefaultRequeueRejected(), exception, logger));
+		}
+	}
+
+	private void checkMissingQueuesFatalFromProperty() {
+		if (!isMissingQueuesFatalSet()) {
+			try {
+				ApplicationContext applicationContext = getApplicationContext();
+				if (applicationContext != null) {
+					Properties properties = applicationContext.getBean("spring.amqp.global.properties", Properties.class);
+					String missingQueuesFatal = properties.getProperty("mlc.missing.queues.fatal");
+
+					if (!StringUtils.hasText(missingQueuesFatal)) {
+						missingQueuesFatal = properties.getProperty("smlc.missing.queues.fatal");
+					}
+
+					if (StringUtils.hasText(missingQueuesFatal)) {
+						setMissingQueuesFatal(Boolean.parseBoolean(missingQueuesFatal));
+					}
+				}
+			}
+			catch (BeansException be) {
+				logger.debug("No global properties bean");
+			}
+		}
+	}
+
+	private void checkPossibleAuthenticationFailureFatalFromProperty() {
+		if (!isPossibleAuthenticationFailureFatal()) {
+			try {
+				ApplicationContext applicationContext = getApplicationContext();
+				if (applicationContext != null) {
+					Properties properties = applicationContext.getBean("spring.amqp.global.properties", Properties.class);
+					String possibleAuthenticationFailureFatal =
+							properties.getProperty("mlc.possible.authentication.failure.fatal");
+					if (StringUtils.hasText(possibleAuthenticationFailureFatal)) {
+						setPossibleAuthenticationFailureFatal(Boolean.parseBoolean(possibleAuthenticationFailureFatal));
+					}
+				}
+			}
+			catch (BeansException be) {
+				logger.debug("No global properties bean");
+			}
+		}
+	}
+
 	@FunctionalInterface
 	private interface ContainerDelegate {
 
@@ -1538,6 +1715,9 @@ public abstract class AbstractMessageListenerContainer extends RabbitAccessor
 		}
 	}
 
+	/**
+	 * A runtime exception to wrap a {@link Throwable}.
+	 */
 	@SuppressWarnings("serial")
 	protected static final class WrappedTransactionException extends RuntimeException {
 

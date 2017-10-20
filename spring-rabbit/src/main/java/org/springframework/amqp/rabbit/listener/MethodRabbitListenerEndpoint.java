@@ -19,7 +19,6 @@ package org.springframework.amqp.rabbit.listener;
 import java.lang.reflect.Method;
 import java.util.Arrays;
 
-import org.springframework.amqp.rabbit.annotation.RabbitListenerErrorHandler;
 import org.springframework.amqp.rabbit.listener.adapter.HandlerAdapter;
 import org.springframework.amqp.rabbit.listener.adapter.MessagingMessageListenerAdapter;
 import org.springframework.amqp.support.converter.MessageConverter;
@@ -166,7 +165,7 @@ public class MethodRabbitListenerEndpoint extends AbstractRabbitListenerEndpoint
 	}
 
 	private String resolve(String value) {
-		if (this.getResolver() != null) {
+		if (getResolver() != null) {
 			Object newValue = this.getResolver().evaluate(value, getBeanExpressionContext());
 			Assert.isInstanceOf(String.class, newValue, "Invalid @SendTo expression");
 			return (String) newValue;

@@ -1,5 +1,5 @@
 /*
- * Copyright 2016 the original author or authors.
+ * Copyright 2016-2017 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -22,7 +22,6 @@ import java.util.concurrent.ConcurrentMap;
 import org.springframework.amqp.core.AcknowledgeMode;
 import org.springframework.amqp.core.Address;
 import org.springframework.amqp.core.MessageListener;
-import org.springframework.amqp.core.Queue;
 import org.springframework.amqp.rabbit.connection.ConnectionFactory;
 import org.springframework.amqp.rabbit.core.ChannelAwareMessageListener;
 import org.springframework.util.Assert;
@@ -73,27 +72,12 @@ public class DirectReplyToMessageListenerContainer extends DirectMessageListener
 	}
 
 	@Override
-	public final void setQueues(Queue... queues) {
-		throw new UnsupportedOperationException();
-	}
-
-	@Override
 	public final void addQueueNames(String... queueNames) {
 		throw new UnsupportedOperationException();
 	}
 
 	@Override
-	public final void addQueues(Queue... queues) {
-		throw new UnsupportedOperationException();
-	}
-
-	@Override
 	public final boolean removeQueueNames(String... queueNames) {
-		throw new UnsupportedOperationException();
-	}
-
-	@Override
-	public final boolean removeQueues(Queue... queues) {
 		throw new UnsupportedOperationException();
 	}
 
@@ -219,11 +203,11 @@ public class DirectReplyToMessageListenerContainer extends DirectMessageListener
 	 */
 	public static class ChannelHolder {
 
-		public final Channel channel;
+		private final Channel channel;
 
-		public final int consumerEpoch;
+		private final int consumerEpoch;
 
-		public ChannelHolder(Channel channel, int consumerEpoch) {
+		ChannelHolder(Channel channel, int consumerEpoch) {
 			this.channel = channel;
 			this.consumerEpoch = consumerEpoch;
 		}

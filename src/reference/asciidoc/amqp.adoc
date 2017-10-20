@@ -22,7 +22,7 @@ If you are not, then have a look at the resources listed in <<resources>>
 
 ===== Message
 
-The 0-8 and 0-9-1 AMQP specifications do not define a Message class or interface.
+The 0-9-1 AMQP specification does not define a Message class or interface.
 Instead, when performing an operation such as `basicPublish()`, the content is passed as a byte-array argument and additional properties are passed in as separate arguments.
 Spring AMQP defines a Message class as part of a more general AMQP domain model representation.
 The purpose of the Message class is to simply encapsulate the body and properties within a single instance so that the API can in turn be simpler.
@@ -54,6 +54,16 @@ public class Message {
 The `MessageProperties` interface defines several common properties such as 'messageId', 'timestamp', 'contentType', and several more.
 Those properties can also be extended with user-defined 'headers' by calling the `setHeader(String
       key, Object value)` method.
+
+[IMPORTANT]
+====
+Starting with versions `1.5.7`, `1.6.11`, `1.7.4`, `2.0.0`, if a message body is a serialized `Serializable` java object, it is no longer deserialized (by default) when performing `toString()` operations (such as in log messages).
+This is to prevent unsafe deserialization.
+By default, only `java.util` and `java.lang` classes are deserialized.
+To revert to the previous behavior, you can add allowable class/package patterns by invoking `Message.addWhiteListPatterns(...)`.
+A simple `*` wildcard is supported, for example `com.foo.*, *.MyClass`.
+Bodies that cannot be deserialized will be represented by `byte[<size>]` in log messages.
+====
 
 ===== Exchange
 
@@ -351,6 +361,18 @@ The `ConnectionFactory` argument can be used to distinguish target connection na
 By default a `beanName` of the `AbstractConnectionFactory` and an internal counter are used to generate `connection_name`.
 The `<rabbit:connection-factory>` namespace component is also supplied with the `connection-name-strategy` attribute.
 
+
+The connection might be blocked for interaction from the Broker according to the https://www.rabbitmq.com/memory.html[Memory Alarm].
+Starting with _version 2.0_, the `org.springframework.amqp.rabbit.connection.Connection` can be supplied with `com.rabbitmq.client.BlockedListener` s to to be notified for connection blocked and unblocked events.
+In addition the `AbstractConnectionFactory` emits a `ConnectionBlockedEvent` and `ConnectionUnblockedEvent`, respectively, via its internal `BlockedListener` implementation.
+These allow you to provide application logic to react appropriately to problems on the broker and take some corrective actions for example.
+
+IMPORTANT:  When the application is configured with a single `CachingConnectionFactory`, as it is by default with Spring Boot auto-configuration, the application will stop working when the connection is blocked by the Broker.
+And when it is blocked by the Broker, any its clients stop to work.
+If we have producers and consumers in the same application, we may end up with a deadlock  when producers are blocking the connection because there are no resources on the Broker anymore and consumers can't free them because the connection is blocked.
+To mitigate the problem, there is just enough to have one more separate `CachingConnectionFactory` instance with the same options - one for producers and one for consumers.
+The separate `CachingConnectionFactory` isn't recommended for transactional producers, since they should reuse a `Channel` associated with the consumer transactions.
+
 [[connection-factory]]
 ===== Configuring the Underlying Client Connection Factory
 
@@ -365,6 +387,13 @@ For convenience, a factory bean is provided to assist in configuring the connect
 <rabbit:connection-factory
       id="connectionFactory" connection-factory="rabbitConnectionFactory"/>
 ----
+
+NOTE: The 4.0.x client enables automatic recovery by default; while compatible with this feature, Spring AMQP has its own recovery mechanisms and the client recovery feature generally isn't needed.
+It is recommended to disable `amqp-client` automatic recovery, to avoid getting `AutoRecoverConnectionNotCurrentlyOpenException` s when the broker is available, but the connection has not yet recovered.
+You may notice this exception, for example, when a `RetryTemplate` is configured in a `RabbitTemplate`, even when failing over to another broker in a cluster.
+Since the auto recovering connection recovers on a timer, the connection may be recovered faster using Spring AMQP's recovery mechanisms.
+Starting with _version 1.7.1_, Spring AMQP disables it unless you explicitly create your own RabbitMQ connection factory and provide it to the `CachingConnectionFactory`.
+RabbitMQ `ConnectionFactory` instances created by the `RabbitConnectionFactoryBean` will also have the option disabled by default.
 
 ===== RabbitConnectionFactoryBean and Configuring SSL
 
@@ -461,9 +490,14 @@ But, if `lenientFallback = false`, an `IllegalStateException` is thrown.
 
 The Namespace support also provides the `send-connection-factory-selector-expression` and `receive-connection-factory-selector-expression` attributes on the `<rabbit:template>` component.
 
-Also starting with _version 1.4_, you can configure a routing connection factory in a `SimpleMessageListenerContainer`.
+Also starting with _version 1.4_, you can configure a routing connection factory in a listener container.
 In that case, the list of queue names is used as the lookup key.
 For example, if you configure the container with `setQueueNames("foo", "bar")`, the lookup key will be `"[foo,bar]"` (no spaces).
+
+Starting with _version 1.6.9_ you can add a qualifier to the lookup key using `setLookupKeyQualifier` on the listener container.
+This would enable, for example, listening to queues with the same name, but in different virtual host (where you would have a connection factory for each).
+
+For example, with lookup key qualifier `foo` and a container listening to queue `bar`, the lookup key you would register the target connection factory with would be `foo[bar]`.
 
 [[queue-affinity]]
 ===== Queue Affinity and the LocalizedQueueConnectionFactory
@@ -566,6 +600,8 @@ public interface ConnectionListener {
 }
 ----
 
+Starting with _version 2.0_, the `org.springframework.amqp.rabbit.connection.Connection` object can be supplied with `com.rabbitmq.client.BlockedListener` s to to be notified for connection blocked and unblocked events.
+
 .ChannelListener
 [source, java]
 ----
@@ -616,6 +652,10 @@ If it equals the cache size, you might want to consider increasing further.
 
 | Meaning
 
+| connectionName
+
+| The name of the connection generated by the `ConnectionNameStrategy`.
+
 | channelCacheSize
 
 | The currently configured maximum channels that are allowed to be idle.
@@ -649,6 +689,10 @@ This can be used to correlate with connections/channels on the RabbitMQ Admin UI
 | Property
 
 | Meaning
+
+| connectionName:<localPort>
+
+| The name of the connection generated by the `ConnectionNameStrategy`.
 
 | openConnections
 
@@ -901,6 +945,53 @@ channel on which a message is published is returned to the cache instead of bein
 You can monitor channel usage using the RabbitMQ management plugin; if you see channels being opened/closed rapidly you
 should consider increasing the cache size to reduce overhead on the server.
 
+See also <<scoped-operations>> for a simpler mechanism for waiting for publisher confirms.
+
+[[scoped-operations]]
+===== Scoped Operations
+
+Normally, when using the template, a `Channel` is checked out of the cache (or created), used for the operation, and returned to the cache for reuse.
+In a multi-threaded environment, there is no guarantee that the next operation will use the same channel.
+There may be times, however, where you want to have more control over the use of a channel, and ensure that a number of operations are all performed on the same channel.
+
+Starting with _version 2.0_, a new method `invoke` is provided, with an `OperationsCallback`.
+Any operations performed within the scope of the callback, and on the provided `RabbitOperations` argument, will use the same dedicated `Channel`, which will be closed at the end (not returned to a cache).
+
+[source, java]
+----
+@FunctionalInterface
+public interface OperationsCallback<T> {
+
+    T doInRabbit(RabbitOperations operations);
+
+}
+----
+
+One example of why you might need this is if you wish to use the `waitForConfirms()` method on the underlying `Channel`.
+This method was not previously exposed using the Spring API because the channel is, generally, cached and shared as discussed above.
+The `RabbitTemplate` now provides `waitForConfirms(long timeout)` and `waitForConfirmsOrDie(long timeout)` which delegate to the dedicated channel used within the scope of the `OperationsCallback`.
+The methods cannot be used outside of that scope, for obvious reasons.
+
+Note that a higher-level abstraction which allows you to correlate confirms to requests is provided elsewhere (see <<template-confirms>>).
+You still need to set the connection factory's `publisherConfirms` property to `true` as discussed in that section, but for simple use cases where you just want to wait until all confirms are received, you can use this technique here:
+
+[source, java]
+----
+Collection<?> messages = getMessagesToSend();
+Boolean result = this.template.invoke(t -> {
+    messages.forEach(m -> t.convertAndSend(ROUTE, m));
+    t.waitForConfirmsOrDie(10_000);
+    return true;
+});
+----
+
+If you wish `RabbitAdmin` operations to be invoked on the same channel, within the scope of the `OperationsCallback`, the admin must have been constructed using the same `RabbitTemplate` that was used for the `invoke` operation.
+
+NOTE: The above discussion is moot if the template operations are already performed within the scope of an existing transaction.
+For example, when running on a transacted listener container thread and performing operations on a transacted template.
+In that case, the operations will be performed on that channel and committed when the thread returns to the container;
+it is not necessary to use `invoke` in that scenario.
+
 [[template-messaging]]
 ===== Messaging integration
 
@@ -1083,6 +1174,24 @@ With the `RabbitTemplate` implementation of `AmqpTemplate`, each of the `send()`
 When publisher confirms are enabled, this object is returned in the callback described in <<amqp-template>>.
 This allows the sender to correlate a confirm (ack or nack) with the sent message.
 
+Starting with _version 1.6.7_, the `CorrelationAwareMessagePostProcessor` interface was introduced, allowing the correlation data to be modified after the message has been converted:
+
+[source, java]
+----
+Message postProcessMessage(Message message, Correlation correlation);
+----
+
+In version 2.0, this interface is deprecated; the method has been moved to `MessagePostProcessor` with a default implementation that delegates to `postProcessMessage(Message message)`.
+
+Also starting with _version 1.6.7_ a new callback interface is provided `CorrelationDataPostProcessor`; this is invoked after all `MessagePostProcessor` s (provided in the `send()` method as well as those provided in `setBeforePublishPostProcessors()`).
+Implementations can update or replace the correlation data supplied in the `send()` method (if any).
+The `Message` and original `CorrelationData` (if any) are provided as arguments.
+
+[source, java]
+----
+CorrelationData postProcess(Message message, CorrelationData correlationData);
+----
+
 ===== Publisher Returns
 
 When the template's `mandatory` property is 'true' returned messages are provided by the callback described in <<amqp-template>>.
@@ -1125,7 +1234,8 @@ It supports sending messages to a single exchange/routing key. It has properties
 The `SimpleBatchingStrategy` formats the batch by preceding each embedded message with a 4 byte binary length.
 This is communicated to the receiving system by setting the `springBatchFormat` message property to `lengthHeader4`.
 
-IMPORTANT: Batched messages are automatically de-batched by listener containers (using the `springBatchFormat` message header). Rejecting any message from a batch will cause the entire batch to be rejected.
+IMPORTANT: Batched messages are automatically de-batched by listener containers (using the `springBatchFormat` message header).
+Rejecting any message from a batch will cause the entire batch to be rejected.
 
 
 [[receiving-messages]]
@@ -1240,6 +1350,27 @@ if (received) {
 
 IMPORTANT: Spring AMQP also supports annotated-listener endpoints through the use of the `@RabbitListener` annotation and provides an open infrastructure to register endpoints programmatically.
 This is by far the most convenient way to setup an asynchronous consumer, see <<async-annotation-driven>> for more details.
+
+[IMPORTANT]
+====
+The prefetch default value used to be 1, which could lead to under-utilization of efficient consumers.
+Starting with _version 2.0_, the default prefetch value is now 250, which should keep consumers busy in most common scenarios and
+thus improve throughput.
+
+There are nevertheless scenarios where the prefetch value should
+be low: for example, with large messages, especially if the processing is slow (messages could add up
+to a large amount of memory in the client process), and if strict message ordering is necessary
+(the prefetch value should be set back to 1 in this case).
+
+Also, with low-volume messaging and multiple consumers (including concurrency within a single listener container instance), you may wish to reduce the prefetch to get a more even distribution of messages across consumers.
+It is also recomended to use `prefetch = 1` with the `MANUAL` ack mode.
+The `basicAck` is async operation and if something wrong happens on the Broker (double ack for the same delivery tag, for example), you end up with processed subsequent messages in the batch, but unacked on the Broker and other consumer may see them.
+
+See <<containerAttributes>>.
+
+For more background about prefetch, see this post about https://www.rabbitmq.com/blog/2014/04/14/finding-bottlenecks-with-rabbitmq-3-3/[consumer utilization in RabbitMQ]
+and this post about https://www.rabbitmq.com/blog/2012/05/11/some-queuing-theory-throughput-latency-and-bandwidth/[queuing theory].
+====
 
 ====== Message Listener
 
@@ -1530,6 +1661,10 @@ The annotated endpoint infrastructure creates a message listener container behin
 In the example above, `myQueue` must already exist and be bound to some exchange.
 The queue can be declared and bound automatically, as long as a `RabbitAdmin` exists in the application context.
 
+NOTE: Property placeholders (`${some.property}`) or SpEL expressions (`#{someExpression}`) can be specified for the annotation properties (`queues` etc).
+See <<annotation-multiple-queues>> for an example of why you might use SpEL instead of a property placeholder.
+
+
 [source,java]
 ----
 
@@ -1568,12 +1703,23 @@ In the second example, an anonymous (exclusive, auto-delete) queue will be decla
 Multiple `QueueBinding` entries can be provided, allowing the listener to listen to multiple queues.
 In the third example, a queue with the name retrieved from property `my.queue` will be declared if necessary, with the default binding to the default exchange using the queue name as the routing key.
 
-Only DIRECT, FANOUT, TOPIC and HEADERS, exchange types are supported with this mechanism.
+Since _version 2.0_ the `@Exchange` annotation supports any exchange types, including custom.
+See more information in the https://www.rabbitmq.com/tutorials/amqp-concepts.html[AMQP Concepts] document.
+
 Use normal `@Bean` definitions when more advanced configuration is required.
 
 Notice `ignoreDeclarationExceptions` on the exchange in the first example.
 This allows, for example, binding to an existing exchange that might have different settings (such as `internal`).
 By default the properties of an existing exchange must match.
+
+Starting with _version 2.0_, you can now bind a queue to an exchange with multiple routing keys:
+
+[source, java]
+----
+...
+    key = { "red", "yellow" }
+...
+----
 
 You can also specify arguments within `@QueueBinding` annotations for queues, exchanges
 and bindings. For example:
@@ -1672,6 +1818,8 @@ public class AppConfig {
 }
 ----
 
+Since _version 2.0_, a `DirectMessageListenerContainerFactory` is also available, which creates `DirectMessageListenerContainer` s.
+
 NOTE: To choose between the `SimpleRabbitListenerContainerFactory` and `DirectRabbitListenerContainerFactory` see <<choose-container>>.
 
 By default, the infrastructure looks for a bean named `rabbitListenerContainerFactory` as the source for the factory to use to create message listener containers.
@@ -1681,11 +1829,12 @@ It is possible to customize the listener container factory to use per annotation
 The default is only required if at least one endpoint is registered without a specific container factory.
 See the javadoc for full details and examples.
 
-If you prefer XML configuration, use the `<rabbit:annotation-driven>` element.
+If you prefer XML configuration, use the `<rabbit:annotation-driven>` element; any beans annotated with `@RabbitListener` will be detected.
+
+For `SimpleRabbitListenerContainer` s:
 
 [source,xml]
 ----
-
 <rabbit:annotation-driven/>
 
 <bean id="rabbitListenerContainerFactory"
@@ -1694,8 +1843,29 @@ If you prefer XML configuration, use the `<rabbit:annotation-driven>` element.
     <property name="concurrentConsumers" value="3"/>
     <property name="maxConcurrentConsumers" value="10"/>
 </bean>
-
 ----
+
+and for `DirectMessageListenerContainer` s:
+
+[source,xml]
+----
+<rabbit:annotation-driven/>
+
+<bean id="rabbitListenerContainerFactory"
+      class="org.springframework.amqp.rabbit.config.DirectRabbitListenerContainerFactory">
+    <property name="connectionFactory" ref="connectionFactory"/>
+    <property name="consumersPerQueue" value="3"/>
+</bean>
+----
+
+Starting with _version 2.0_, the `@RabbitListener` annotation has a `concurrency` property; it supports SpEL expressions (`#{...}`) and property placeholders (`${...}`).
+Its meaning, and allowed values, depend on the container type.
+
+- For the `DirectMessageListenerContainer`, the value must be a single integer value, which sets the `consumersPerQueue` property on the container.
+- For the `SimpleRabbitListenerContainer`, the value can be a single integer value, which sets the `concurrentConsumers` property on the container, or it can have the form `m-n` where `m` is the `concurrentConsumers` property, and `n` is the `maxConcurrentConsumers` property.
+
+In either case, this setting overrides the setting(s) on the factory.
+Previously you had to define different container factories if you had listeners that required different concurrency.
 
 [[async-annotation-conversion]]
 ====== Message Conversion for Annotated Methods
@@ -2225,8 +2395,9 @@ However, there are some limitations with this approach and certain features of t
 
 The following features are available with the SMLC, but not the DMLC:
 
-* `txSize` - with the SMLC, you can set this to reduce the number of acks, but it may cause the number of duplicate deliveries to increase after a failure.
-* `maxConcurrentConsumers` and consumer scaling intervals/triggers - there is no auto-scaling in the DMLC; it does, however, allow you to programatically change the `consumersPerQueue` property and the consumers will be adjusted accordingly.
+* `txSize` - with the SMLC, you can set this to control how many messages are delivered in a transaction and/or to reduce the number of acks, but it may cause the number of duplicate deliveries to increase after a failure.
+(The DMLC does have `mesagesPerAck` which can be used to reduce the acks, the same as with `txSize` and the SMLC, but it can't be used with transactions - each message is delivered and ack'd in a separate transaction).
+* `maxConcurrentConsumers` and consumer scaling intervals/triggers - there is no auto-scaling in the DMLC; it does, however, allow you to programmatically change the `consumersPerQueue` property and the consumers will be adjusted accordingly.
 
 However, the DMLC has the following benefits over the SMLC:
 
@@ -2471,6 +2642,31 @@ can configure a static type using the `defaultType` property
 </bean>
 ----
 
+In addition, you can provide custom mappings from the value in the `__TypeId__` header...
+
+[source, java]
+----
+@Bean
+public Jackson2JsonMessageConverter jsonMessageConverter() {
+    Jackson2JsonMessageConverter jsonConverter = new Jackson2JsonMessageConverter();
+    jsonConverter.setClassMapper(classMapper());
+    return jsonConverter;
+}
+
+@Bean
+public DefaultClassMapper classMapper() {
+    DefaultClassMapper classMapper = new DefaultClassMapper();
+    Map<String, Class<?>> idClassMapping = new HashMap<>();
+    idClassMapping.put("foo", Foo.class);
+    idClassMapping.put("bar", Bar.class);
+    classMapper.setIdClassMapping(idClassMapping);
+    return classMapper;
+}
+----
+
+Now, if the sending system sets the header to `foo`, the converter will create a `Foo` object, etc.
+See the <<spring-rabbit-json>> sample application for a complete discussion about converting messages from non-Spring applications.
+
 ====== Converting from a Message
 
 Inbound messages are converted to objects according to the type information added to headers by the sending system.
@@ -2501,7 +2697,7 @@ for convenience.
 If you inject a custom type mapper, you should set the property on the mapper instead.
 
 NOTE: When converting from the `Message`, an incoming `MessageProperties.getContentType()` must be JSON-compliant (the logic `contentType.contains("json")` is used).
-Otherwise, a `WARN` log message `Could not convert incoming message with content-type [...]`, is emitted and `message.getBody()` is returned as is - as a `byte[]``.
+Otherwise, a `WARN` log message `Could not convert incoming message with content-type [...]`, is emitted and `message.getBody()` is returned as is - as a `byte[]`.
 So, to meet the `Jackson2JsonMessageConverter` requirements on the consumer side, the producer must add the `contentType` message property, e.g. as `application/json`, `text/x-json` or simply use the `Jackson2JsonMessageConverter`, which will set the header automatically.
 
 [source, java]
@@ -2538,6 +2734,12 @@ This type inference can only be achieved when the `@RabbitListener` annotation i
 With class-level `@RabbitListener`, the converted type is used to select which `@RabbitHandler` method to invoke.
 For this reason, the infrastructure provides the `targetObject` message property which can be used by a custom
 converter to determine the type.
+====
+
+[IMPORTANT]
+====
+Starting with _version 1.6.11_, the `Jackson2JsonMessageConverter` and, therefore, `DefaultJackson2JavaTypeMapper` (`DefaultClassMapper`) provide the `trustedPackages` option to overcome https://pivotal.io/security/cve-2017-4995[Serialization Gadgets] vulnerability.
+By default, for backward compatiblity the `Jackson2JsonMessageConverter` trusts all packages - use `*` for the option.
 ====
 
 [[json-complex]]
@@ -3106,6 +3308,8 @@ public interface AmqpAdmin {
 }
 ----
 
+Also see <<scoped-operations>>.
+
 The `getQueueProperties()` method returns some limited information about the queue (message count and consumer count).
 The keys for the properties returned are available as constants in the `RabbitTemplate` (`QUEUE_NAME`,
 `QUEUE_MESSAGE_COUNT`, `QUEUE_CONSUMER_COUNT`).
@@ -3403,14 +3607,16 @@ public Exchange exchange() {
 
 See the javadocs for `org.springframework.amqp.core.QueueBuilder` and `org.springframework.amqp.core.ExchangeBuilder` for more information.
 
+Starting with _version 2.0_, the `ExchangeBuilder` now creates durable exchanges by default, to be consistent with the simple constructors on the individual `AbstractExchange` classes.
+To make a non-durable exchange with the builder, use `.durable(false)` before invoking `.build()`.
+The `durable()` method with no parameter is no longer provided.
+
 [[collection-declaration]]
 ===== Declaring Collections of Exchanges, Queues, Bindings
 
-Starting with _version 1.5_, it is now possible to declare multiple entities with one `@Bean`, by returing a
-collection.
+Starting with _version 1.5_, it is now possible to declare multiple entities with one `@Bean`, by returning a collection.
 
-Only collections where the first element is a `Declarable` are considered, and only `Declarable` elements from such
-collections are processed.
+Only collections where the first element is a `Declarable` are considered, and only `Declarable` elements from such collections are processed.
 
 [source, java]
 -----
@@ -3555,6 +3761,25 @@ public Binding binding() {
     return binding;
 }
 ----
+
+[[note-id-name]]
+===== A Note On "id" and "name" Attributes
+
+The `name` attribute on `<rabbit:queue/>` and `<rabbit:exchange/>` elements reflects the name of the entity in the broker.
+For queues, if the `name` is omitted, an anonymous queue is created (see <<anonymous-queue>> below).
+
+In versions prior to 2.0, the `name` was also registered as a bean name alias (similar to `name` on `<bean/>` elements).
+
+This caused two problems:
+
+- it prevented the declaration of a queue and exchange with the same name
+- the alias was not resolved if it contained a SpEL expression (`#{...}`)
+
+Starting with _version 2.0_, if you declare one of these elements with both an `id` _and_ a `name` attribute, the name will no longer be declared as a bean name alias.
+If you wish to declare a queue and exchange with the same `name`, you must provide an `id`.
+
+There is no change if the element has just a `name` attribute, the bean can still be referenced by the `name`, for example in binding declarations, but you still can't reference it if the name contains SpEL - provide an `id` for reference purposes.
+
 
 [[anonymous-queue]]
 ===== AnonymousQueue
@@ -3795,6 +4020,7 @@ The default `FatalExceptionStrategy` logs a warning message when an exception is
 
 Since _version 1.6.3_ a convenient way to add user exceptions to the fatal list is to subclass `ConditionalRejectingErrorHandler.DefaultExceptionStrategy` and override the method `isUserCauseFatal(Throwable cause)` to return true for fatal exceptions.
 
+[[transactions]]
 ==== Transactions
 
 ===== Introduction
@@ -3886,6 +4112,7 @@ public AbstractMessageListenerContainer container() {
 }
 ----
 
+[[transaction-rollback]]
 ===== A note on Rollback of Received Messages
 
 AMQP transactions only apply to messages and acks sent to the broker, so when there is a rollback of a Spring transaction and a message has been received, what Spring AMQP has to do is not just rollback the transaction, but also manually reject the message (sort of a nack, but that's not what the specification calls it).
@@ -3895,6 +4122,15 @@ For more information about rejecting failed messages, see <<async-listeners>>.
 For more information about RabbitMQ transactions, and their limitations, refer to http://www.rabbitmq.com/semantics.html[RabbitMQ Broker Semantics].
 
 NOTE: Prior to *RabbitMQ 2.7.0*, such messages (and any that are unacked when a channel is closed or aborts) went to the back of the queue on a Rabbit broker, since 2.7.0, rejected messages go to the front of the queue, in a similar manner to JMS rolled back messages.
+
+[NOTE]
+====
+Previously, message requeue on transaction rollback was inconsistent between local transactions and when a `TransactionManager` was provided.
+In the former case, the normal requeue logic (`AmqpRejectAndDontRequeueException` or `defaultRequeueRejected=false`) applied (see <<async-listeners>>); with a transaction manager, the message was unconditionally requeued on rollback.
+Starting with __version 2.0__, the behavior is consistent and the normal requeue logic is applied in both cases.
+To revert to the previous behavior, set the container's `alwaysRequeueWithTxManagerRollback` property to `true`.
+See <<containerAttributes>>.
+====
 
 ===== Using the RabbitTransactionManager
 
@@ -3994,10 +4230,18 @@ a| image::images/tickmark.png[]
 | prefetchCount
 (prefetch)
 
-| The number of messages to accept from the broker in one socket frame.
+a| The number of unacknowledged messages that can be outstanding at each consumer.
 The higher this is the faster the messages can be delivered, but the higher the risk of non-sequential processing.
 Ignored if the `acknowledgeMode` is NONE.
-This will be increased, if necessary, to match the `txSize`.
+This will be increased, if necessary, to match the `txSize` or `messagePerAck`.
+Defaults to 250 since 2.0; set to 1 to revert to previous behavior.
+
+IMPORTANT: There are scenarios where the prefetch value should
+be low: for example, with large messages, especially if the processing is slow (messages could add up
+to a large amount of memory in the client process), and if strict message ordering is necessary
+(the prefetch value should be set back to 1 in this case).
+Also, with low-volume messaging and multiple consumers (including concurrency within a single listener container instance), you may wish to reduce the prefetch to get a more even distribution of messages across consumers.
+
 
 a| image::images/tickmark.png[]
 a| image::images/tickmark.png[]
@@ -4008,7 +4252,15 @@ a| image::images/tickmark.png[]
 | When a container shuts down (e.g.
 if its enclosing `ApplicationContext` is closed) it waits for in-flight messages to be processed up to this limit.
 Defaults to 5 seconds.
-After the limit is reached, if the channel is not transacted messages will be discarded.
+
+a| image::images/tickmark.png[]
+a| image::images/tickmark.png[]
+
+| forceCloseChannel
+(N/A)
+
+| If the consumers don't respond to a shutdown within `shutdownTimeout`, if this is `true`, the channel will be closed, causing any unacked messages to be requeued.
+Default `true` since 2.0; set to false to revert to previous behavior.
 
 a| image::images/tickmark.png[]
 a| image::images/tickmark.png[]
@@ -4022,6 +4274,32 @@ If the `prefetchCount` is less than the `txSize`, it will be increased to match 
 
 a| image::images/tickmark.png[]
 a|
+
+| messagesPerAck
+(N/A)
+
+| The number of messages to receive between acks.
+Use this to reduce the number of acks sent to the broker (at the cost of increasing the possibility of redelivered messages).
+Generally, you should only set this property on high-volume listener containers.
+If this is set, and a message is rejected (exception thrown), pending acks will be acknowledged and the failed message rejected.
+Not allowed with transacted channels.
+If the `prefetchCount` is less than the `messagesPerAck`, it will be increased to match the `messagesPerAck`.
+Default: ack every message.
+See also `ackTimeout`.
+
+a|
+a| image::images/tickmark.png[]
+
+| ackTimeout
+(N/A)
+
+| When `messagesPerAck` is set, this timeout is used as an alternative to send an ack.
+When a new message arrives, the count of unacked messages is compared to `messagesPerAck`, and the time since the last ack is compared to this value; if either condition is true, the message is acknowledged.
+When no new messages arrive, and there are unacked messages, this timeout is approximate since the condition is only checked each `monitorInterval`.
+See also `messagesPerAck`, `monitorInterval`.
+
+a|
+a| image::images/tickmark.png[]
 
 | receiveTimeout
 (receive-timeout)
@@ -4109,6 +4387,16 @@ See <<listener-concurrency>>.
 a| image::images/tickmark.png[]
 a|
 
+| concurrency
+(N/A)
+
+| `m-n` The range of concurrent consumers for each listener (min, max).
+If only `n` is provided, `n` is a fixed number of consumers.
+See <<listener-concurrency>>.
+
+a| image::images/tickmark.png[]
+a|
+
 | startConsumerMin
 Interval
 (min-start-interval)
@@ -4153,7 +4441,7 @@ See <<listener-concurrency>>.
 Default 10.
 
 a| image::images/tickmark.png[]
-a| image::images/tickmark.png[]
+a|
 
 | connectionFactory
 (connection-factory)
@@ -4236,7 +4524,36 @@ You can also use a properties bean to set the property globally for all containe
 [source,xml]
 ----
 <util:properties id="spring.amqp.global.properties">
-    <prop key="smlc.missing.queues.fatal">false</prop>
+    <prop key="mlc.missing.queues.fatal">false</prop>
+</util:properties>
+----
+
+This global property will not be applied to any containers that have an explicit `missingQueuesFatal` property set.
+
+The default retry properties (3 retries at 5 second intervals) can be overridden using the properties below.
+
+a| image::images/tickmark.png[]
+a| image::images/tickmark.png[]
+
+| possibleAuthenticationFailureFatal
+(possible-authentication-failure-fatal)
+
+a| When set to `true` (default), if a `PossibleAuthenticationFailureException` is thrown during connection, it is considered fatal.
+This causes the application context to fail to initialize during startup.
+
+Since _version 2.0_.
+
+When set to `false`, after making the 3 retries, the container will go into recovery mode, as with other problems, such as the broker being down.
+The container will attempt to recover according to the `recoveryInterval` property.
+During each recovery attempt, each consumer will again try 4 times to start.
+This process will continue indefinitely.
+
+You can also use a properties bean to set the property globally for all containers, as follows:
+
+[source,xml]
+----
+<util:properties id="spring.amqp.global.properties">
+    <prop key="mlc.possible.authentication.failure.fatal">false</prop>
 </util:properties>
 ----
 
@@ -4382,6 +4699,33 @@ Set this to false, to discard (or route to a dead-letter queue) such messages.
 a| image::images/tickmark.png[]
 a| image::images/tickmark.png[]
 
+| alwaysRequeueWithTx
+ManagerRollback
+(N/A)
+
+| Set to `true` to always requeue messages on rollback when a transaction manager is configured.
+
+a| image::images/tickmark.png[]
+a| image::images/tickmark.png[]
+
+| noLocal
+(N/A)
+
+| Set to `true` to disable delivery from the server to consumers messages published on the same channel's connection.
+
+a| image::images/tickmark.png[]
+a| image::images/tickmark.png[]
+
+| afterReceivePostProcessors
+(N/A)
+
+| An array of `MessagePostProcessor` s which are invoked, before invoking the listener.
+Post processors can implement `PriorityOrdered`, `Ordered`; the array is sorted with un-ordered members invoked last.
+If a post processor returns `null`, the message is discarded (and acknowledged, if appropriate).
+
+a| image::images/tickmark.png[]
+a| image::images/tickmark.png[]
+
 |===
 
 [[listener-concurrency]]
@@ -4417,6 +4761,8 @@ NOTE: Practically, consumers will only be stopped if the whole container is idle
 This is because the broker will share its work across all the active consumers.
 
 A single channel is used by each consumer, regardless of the number of configured queues.
+
+Starting with version _2.0_ the `concurrentConsumers` and `maxConcurrentConsumers` properties can be set with the single property `concurrency`; e.g. `"2-4"`.
 
 ===== DirectMessageListenerContainer
 
@@ -4546,11 +4892,14 @@ The `MessageRecover` is called when all retries have been exhausted.
 The `RejectAndDontRequeueRecoverer` does exactly that.
 The default `MessageRecoverer` simply consumes the errant message and emits a WARN message.
 
-Starting with _version 1.3_, a new `RepublishMessageRecoverer` is provided, to allow publishing of failed messages after
-retries are exhausted:
+Starting with _version 1.3_, a new `RepublishMessageRecoverer` is provided, to allow publishing of failed messages after retries are exhausted:
 
 When a recoverer consumes the final exception, the message is ACK'd and won't be sent to the Dead Letter Exchange, if any.
 
+NOTE: When `RepublishMessageRecoverer` is used on the consumer side, the received message has `deliveryMode` in the `receivedDeliveryMode` message property, the `deliveryMode` is this case is `null`.
+That means a `NON_PERSISTENT` delivery mode on the Broker.
+Starting with _version 2.0_, the `RepublishMessageRecoverer` can be configured for the `deliveryMode` to set into the message to republish if it is `null`.
+By default it uses `MessageProperties` default value - `MessageDeliveryMode.PERSISTENT`.
 
 [source,java]
 ----
@@ -4563,9 +4912,21 @@ RetryOperationsInterceptor interceptor() {
 }
 ----
 
-The `RepublishMessageRecoverer` publishes the message with additional information in message headers, such as the
-exception message, stack trace, original exchange and routing key.
+The `RepublishMessageRecoverer` publishes the message with additional information in message headers, such as the exception message, stack trace, original exchange and routing key.
 Additional headers can be added by creating a subclass and overriding `additionalHeaders()`.
+The `deliveryMode` (or any other properties) can be changed in the `additionalHeaders()`, too:
+
+[source,java]
+----
+RepublishMessageRecoverer recoverer = new RepublishMessageRecoverer(amqpTemplate, "error") {
+
+    protected Map<? extends String, ? extends Object> additionalHeaders(Message message, Throwable cause) {
+        message.getMessageProperties().setDeliveryMode(message.getMessageProperties().getReceivedDeliveryMode());
+        return null;
+    }
+
+};
+----
 
 ===== Exception Classification for Retry
 

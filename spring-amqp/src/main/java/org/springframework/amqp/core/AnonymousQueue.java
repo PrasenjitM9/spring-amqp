@@ -1,5 +1,5 @@
 /*
- * Copyright 2002-2016 the original author or authors.
+ * Copyright 2002-2017 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -71,7 +71,7 @@ public class AnonymousQueue extends Queue {
 	}
 
 	/**
-	 * A strategy to name anonymous queues
+	 * A strategy to name anonymous queues.
 	 * @since 1.5.3
 	 *
 	 */
@@ -96,7 +96,7 @@ public class AnonymousQueue extends Queue {
 		/**
 		 * The default instance - using {@code spring.gen-} as the prefix.
 		 */
-		public static Base64UrlNamingStrategy DEFAULT = new Base64UrlNamingStrategy();
+		public static final Base64UrlNamingStrategy DEFAULT = new Base64UrlNamingStrategy();
 
 		private final String prefix;
 
@@ -140,7 +140,7 @@ public class AnonymousQueue extends Queue {
 		/**
 		 * The default instance.
 		 */
-		public static UUIDNamingStrategy DEFAULT = new UUIDNamingStrategy();
+		public static final UUIDNamingStrategy DEFAULT = new UUIDNamingStrategy();
 
 		@Override
 		public String generateName() {

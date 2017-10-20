@@ -1,8 +1,7 @@
-Spring AMQP [<img src="https://build.spring.io/plugins/servlet/buildStatusImage/AMQP-MASTER">](https://build.spring.io/browse/AMQP-MASTER) [![Join the chat at https://gitter.im/spring-projects/spring-amqp](https://badges.gitter.im/spring-projects/spring-amqp.svg)](https://gitter.im/spring-projects/spring-amqp?utm_source=badge&utm_medium=badge&utm_campaign=pr-badge&utm_content=badge)
-
+Spring AMQP [<img src="https://build.spring.io/plugins/servlet/wittified/build-status/AMQP-MASTER">](https://build.spring.io/browse/AMQP-MASTER) [![Join the chat at https://gitter.im/spring-projects/spring-amqp](https://badges.gitter.im/spring-projects/spring-amqp.svg)](https://gitter.im/spring-projects/spring-amqp?utm_source=badge&utm_medium=badge&utm_campaign=pr-badge&utm_content=badge)
 ===========
 
-This project provides support for using Spring and Java with [AMQP](http://www.amqp.org/), and in particular [RabbitMQ](http://www.rabbitmq.com/).
+This project provides support for using Spring and Java with [AMQP 0.9.1](https://www.rabbitmq.com/amqp-0-9-1-reference.html), and in particular [RabbitMQ](http://www.rabbitmq.com/).
 
 # Checking out and Building
 
@@ -86,7 +85,7 @@ The binary JARs and the source code are available in the **libs**. The reference
 
 ## Changelog
 
-Lists of issues addressed per release can be found in [JIRA](https://jira.springsource.org/browse/AMQP#selectedTab=com.atlassian.jira.plugin.system.project%3Aversions-panel).
+Lists of issues addressed per release can be found in [JIRA](https://jira.spring.io/browse/AMQP#selectedTab=com.atlassian.jira.plugin.system.project%3Aversions-panel).
 
 ## Additional Resources
 
@@ -101,7 +100,7 @@ Lists of issues addressed per release can be found in [JIRA](https://jira.spring
 Here are some ways for you to get involved in the community:
 
 * Get involved with the Spring community on the Spring Community Forums.  Please help out on the [forum](http://forum.springsource.org/forumdisplay.php?f=74) by responding to questions and joining the debate.
-* Create [JIRA](https://jira.springsource.org/browse/AMQP) tickets for bugs and new features and comment and vote on the ones that you are interested in.  
+* Create [JIRA](https://jira.spring.io/browse/AMQP) tickets for bugs and new features and comment and vote on the ones that you are interested in.  
 * Github is for social coding: if you want to write code, we encourage contributions through pull requests from [forks of this repository](http://help.github.com/forking/).  If you want to contribute code this way, please reference a JIRA ticket as well covering the specific issue you are addressing.
 * Watch for upcoming articles on Spring by [subscribing](http://www.springsource.org/node/feed) to springframework.org
 

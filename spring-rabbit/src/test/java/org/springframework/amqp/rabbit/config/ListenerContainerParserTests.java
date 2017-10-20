@@ -1,5 +1,5 @@
 /*
- * Copyright 2010-2016 the original author or authors.
+ * Copyright 2010-2017 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -95,6 +95,7 @@ public class ListenerContainerParserTests {
 		assertEquals(Long.valueOf(5555), TestUtils.getPropertyValue(container, "recoveryBackOff.interval", Long.class));
 		assertFalse(TestUtils.getPropertyValue(container, "exclusive", Boolean.class));
 		assertFalse(TestUtils.getPropertyValue(container, "missingQueuesFatal", Boolean.class));
+		assertFalse(TestUtils.getPropertyValue(container, "possibleAuthenticationFailureFatal", Boolean.class));
 		assertTrue(TestUtils.getPropertyValue(container, "autoDeclare", Boolean.class));
 		assertEquals(5, TestUtils.getPropertyValue(container, "declarationRetries"));
 		assertEquals(1000L, TestUtils.getPropertyValue(container, "failedDeclarationRetryInterval"));
@@ -225,7 +226,7 @@ public class ListenerContainerParserTests {
 	public void testIncompatibleTxAtts() {
 		try {
 			new ClassPathXmlApplicationContext(getClass().getSimpleName() + "-fail-context.xml", getClass()).close();
-			fail("Parse exception exptected");
+			fail("Parse exception expected");
 		}
 		catch (BeanDefinitionParsingException e) {
 			assertTrue(e.getMessage().startsWith(
@@ -234,14 +235,18 @@ public class ListenerContainerParserTests {
 	}
 
 	static class TestBean {
+
 		public void handle(String s) {
 		}
+
 	}
 
 	static class TestAdvice implements MethodBeforeAdvice {
+
 		@Override
 		public void before(Method method, Object[] args, Object target) throws Throwable {
 		}
+
 	}
 
 	public static class TestConsumerTagStrategy implements ConsumerTagStrategy {

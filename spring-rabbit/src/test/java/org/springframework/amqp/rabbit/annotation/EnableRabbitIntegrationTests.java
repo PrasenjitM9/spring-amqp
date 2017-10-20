@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2016 the original author or authors.
+ * Copyright 2014-2017 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,6 +16,7 @@
 
 package org.springframework.amqp.rabbit.annotation;
 
+import static org.hamcrest.Matchers.arrayWithSize;
 import static org.hamcrest.Matchers.contains;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
@@ -24,6 +25,8 @@ import static org.hamcrest.Matchers.startsWith;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
+import static org.junit.Assert.assertNull;
+import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertThat;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
@@ -50,7 +53,6 @@ import java.util.concurrent.atomic.AtomicReference;
 import org.aopalliance.aop.Advice;
 import org.aopalliance.intercept.MethodInterceptor;
 import org.aopalliance.intercept.MethodInvocation;
-import org.hamcrest.Matchers;
 import org.junit.AfterClass;
 import org.junit.BeforeClass;
 import org.junit.ClassRule;
@@ -76,6 +78,7 @@ import org.springframework.amqp.rabbit.listener.ConditionalRejectingErrorHandler
 import org.springframework.amqp.rabbit.listener.MessageListenerContainer;
 import org.springframework.amqp.rabbit.listener.RabbitListenerEndpointRegistrar;
 import org.springframework.amqp.rabbit.listener.RabbitListenerEndpointRegistry;
+import org.springframework.amqp.rabbit.listener.RabbitListenerErrorHandler;
 import org.springframework.amqp.rabbit.listener.SimpleMessageListenerContainer;
 import org.springframework.amqp.rabbit.listener.exception.ListenerExecutionFailedException;
 import org.springframework.amqp.rabbit.test.MessageTestUtils;
@@ -96,10 +99,12 @@ import org.springframework.beans.factory.BeanFactory;
 import org.springframework.beans.factory.BeanFactoryAware;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.config.BeanPostProcessor;
+import org.springframework.beans.factory.config.ConfigurableBeanFactory;
 import org.springframework.context.ApplicationContext;
 import org.springframework.context.annotation.AnnotationConfigApplicationContext;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.context.annotation.Scope;
 import org.springframework.core.Ordered;
 import org.springframework.core.PriorityOrdered;
 import org.springframework.core.convert.ConversionService;
@@ -131,6 +136,7 @@ import com.rabbitmq.client.Channel;
  * @author Stephane Nicoll
  * @author Artem Bilan
  * @author Gary Russell
+ *
  * @since 1.4
  */
 @ContextConfiguration(classes = EnableRabbitIntegrationTests.EnableRabbitConfig.class)
@@ -146,12 +152,14 @@ public class EnableRabbitIntegrationTests {
 			"test.sendTo.spel", "test.sendTo.reply.spel", "test.sendTo.runtimespel", "test.sendTo.reply.runtimespel",
 			"test.sendTo.runtimespelsource", "test.sendTo.runtimespelsource.reply",
 			"test.intercepted", "test.intercepted.withReply",
-			"test.invalidPojo", "differentTypes", "test.inheritance", "test.inheritance.class",
+			"test.invalidPojo", "differentTypes", "differentTypes2", "differentTypes3",
+			"test.inheritance", "test.inheritance.class",
 			"test.comma.1", "test.comma.2", "test.comma.3", "test.comma.4", "test,with,commas",
 			"test.converted", "test.converted.list", "test.converted.array", "test.converted.args1",
 			"test.converted.args2", "test.converted.message", "test.notconverted.message",
 			"test.notconverted.channel", "test.notconverted.messagechannel", "test.notconverted.messagingmessage",
 			"test.converted.foomessage", "test.notconverted.messagingmessagenotgeneric", "test.simple.direct",
+			"test.simple.direct2",
 			"amqp656dlq", "test.simple.declare", "test.return.exceptions", "test.pojo.errors", "test.pojo.errors2");
 
 	@Autowired
@@ -215,6 +223,14 @@ public class EnableRabbitIntegrationTests {
 	}
 
 	@Test
+	public void autoSimpleDeclareAnonymousQueue() {
+		final SimpleMessageListenerContainer container = (SimpleMessageListenerContainer) registry
+				.getListenerContainer("anonymousQueue575");
+		assertThat(container.getQueueNames(), arrayWithSize(1));
+		assertEquals("viaAnonymous:foo", rabbitTemplate.convertSendAndReceive(container.getQueueNames()[0], "foo"));
+	}
+
+	@Test
 	public void tx() {
 		assertTrue(AopUtils.isJdkDynamicProxy(this.txService));
 		Baz baz = new Baz();
@@ -260,9 +276,22 @@ public class EnableRabbitIntegrationTests {
 
 	@Test
 	public void simpleDirectEndpoint() {
+		MessageListenerContainer container = this.registry.getListenerContainer("direct");
+		assertFalse(container.isRunning());
+		container.start();
 		String reply = (String) rabbitTemplate.convertSendAndReceive("test.simple.direct", "foo");
 		assertThat(reply, startsWith("FOOfoo"));
 		assertThat(reply, containsString("rabbitClientThread-")); // container runs on client thread
+		assertThat(TestUtils.getPropertyValue(container, "consumersPerQueue"), equalTo(2));
+	}
+
+	@Test
+	public void simpleDirectEndpointWithConcurrency() {
+		String reply = (String) rabbitTemplate.convertSendAndReceive("test.simple.direct2", "foo");
+		assertThat(reply, startsWith("FOOfoo"));
+		assertThat(reply, containsString("rabbitClientThread-")); // container runs on client thread
+		assertThat(TestUtils.getPropertyValue(this.registry.getListenerContainer("directWithConcurrency"),
+				"consumersPerQueue"), equalTo(3));
 	}
 
 	@Test
@@ -325,6 +354,8 @@ public class EnableRabbitIntegrationTests {
 		this.jsonRabbitTemplate.convertAndSend(exchange, routingKey, bar);
 		this.jsonRabbitTemplate.setReceiveTimeout(10000);
 		assertEquals("BAR: barMultiListenerJsonBean", this.jsonRabbitTemplate.receiveAndConvert("sendTo.replies.spel"));
+		assertThat(TestUtils.getPropertyValue(this.registry.getListenerContainer("multi"), "concurrentConsumers"),
+				equalTo(1));
 	}
 
 	@Test
@@ -415,8 +446,36 @@ public class EnableRabbitIntegrationTests {
 		foo.setBar("bar");
 		this.jsonRabbitTemplate.convertAndSend("differentTypes", foo);
 		assertTrue(this.service.latch.await(10, TimeUnit.SECONDS));
-		assertThat(this.service.foos.get(0), Matchers.instanceOf(Foo2.class));
+		assertThat(this.service.foos.get(0), instanceOf(Foo2.class));
 		assertEquals("bar", ((Foo2) this.service.foos.get(0)).getBar());
+		assertThat(TestUtils.getPropertyValue(this.registry.getListenerContainer("different"), "concurrentConsumers"),
+				equalTo(2));
+	}
+
+	@Test
+	public void testDifferentTypesWithConcurrency() throws InterruptedException {
+		Foo1 foo = new Foo1();
+		foo.setBar("bar");
+		this.jsonRabbitTemplate.convertAndSend("differentTypes", foo);
+		assertTrue(this.service.latch.await(10, TimeUnit.SECONDS));
+		assertThat(this.service.foos.get(0), instanceOf(Foo2.class));
+		assertEquals("bar", ((Foo2) this.service.foos.get(0)).getBar());
+		MessageListenerContainer container = this.registry.getListenerContainer("differentWithConcurrency");
+		assertThat(TestUtils.getPropertyValue(container, "concurrentConsumers"), equalTo(3));
+		assertNull(TestUtils.getPropertyValue(container, "maxConcurrentConsumers"));
+	}
+
+	@Test
+	public void testDifferentTypesWithVariableConcurrency() throws InterruptedException {
+		Foo1 foo = new Foo1();
+		foo.setBar("bar");
+		this.jsonRabbitTemplate.convertAndSend("differentTypes", foo);
+		assertTrue(this.service.latch.await(10, TimeUnit.SECONDS));
+		assertThat(this.service.foos.get(0), instanceOf(Foo2.class));
+		assertEquals("bar", ((Foo2) this.service.foos.get(0)).getBar());
+		MessageListenerContainer container = this.registry.getListenerContainer("differentWithVariableConcurrency");
+		assertThat(TestUtils.getPropertyValue(container, "concurrentConsumers"), equalTo(3));
+		assertThat(TestUtils.getPropertyValue(container, "maxConcurrentConsumers"), equalTo(4));
 	}
 
 	@Test
@@ -521,7 +580,7 @@ public class EnableRabbitIntegrationTests {
 
 	@Test
 	public void testMeta() throws Exception {
-		rabbitTemplate.convertSendAndReceive("test.metaFanout", "", "foo");
+		this.rabbitTemplate.convertAndSend("test.metaFanout", "", "foo");
 		assertTrue(this.metaListener.latch.await(10, TimeUnit.SECONDS));
 	}
 
@@ -587,6 +646,21 @@ public class EnableRabbitIntegrationTests {
 			assertThat(e.getCause().getMessage(), equalTo("from error handler"));
 			assertThat(e.getCause().getCause().getMessage(), equalTo("return this"));
 		}
+	}
+
+	@Test
+	public void testPrototypeCache() {
+		RabbitListenerAnnotationBeanPostProcessor bpp =
+				this.context.getBean(RabbitListenerAnnotationBeanPostProcessor.class);
+		@SuppressWarnings("unchecked")
+		Map<Class<?>, ?> typeCache = TestUtils.getPropertyValue(bpp, "typeCache", Map.class);
+		assertFalse(typeCache.containsKey(Foo1.class));
+		this.context.getBean("foo1Prototype");
+		assertTrue(typeCache.containsKey(Foo1.class));
+		Object value = typeCache.get(Foo1.class);
+		this.context.getBean("foo1Prototype");
+		assertTrue(typeCache.containsKey(Foo1.class));
+		assertSame(value, typeCache.get(Foo1.class));
 	}
 
 	interface TxService {
@@ -659,6 +733,11 @@ public class EnableRabbitIntegrationTests {
 			return foo.toUpperCase() + "X";
 		}
 
+		@RabbitListener(queuesToDeclare = @Queue, id = "anonymousQueue575")
+		public String handleWithAnonymousQueueToDeclare(String data) throws Exception {
+			return "viaAnonymous:" + data;
+		}
+
 		@RabbitListener(bindings = @QueueBinding(
 				value = @Queue(value = "auto.declare.fanout", autoDelete = "true"),
 				exchange = @Exchange(value = "auto.exch.fanout", autoDelete = "true", type = "fanout"))
@@ -686,13 +765,20 @@ public class EnableRabbitIntegrationTests {
 			return foo + ":" + queue;
 		}
 
-		@RabbitListener(queues = "test.simple", group = "testGroup")
+		@RabbitListener(queues = "test.#{'${my.queue.suffix:SIMPLE}'.toLowerCase()}", group = "testGroup")
 		public String capitalize(String foo) {
 			return foo.toUpperCase();
 		}
 
-		@RabbitListener(queues = "test.simple.direct", containerFactory = "directListenerContainerFactory")
-		public String capitalizeDirect(String foo) {
+		@RabbitListener(id = "direct", queues = "test.simple.direct", autoStartup = "${no.property.here:false}",
+				containerFactory = "directListenerContainerFactory")
+		public String capitalizeDirect1(String foo) {
+			return foo.toUpperCase() + foo + Thread.currentThread().getName();
+		}
+
+		@RabbitListener(id = "directWithConcurrency", queues = "test.simple.direct2", concurrency = "${ffffx:3}",
+				containerFactory = "directListenerContainerFactory")
+		public String capitalizeDirect2(String foo) {
 			return foo.toUpperCase() + foo + Thread.currentThread().getName();
 		}
 
@@ -754,8 +840,22 @@ public class EnableRabbitIntegrationTests {
 
 		private final CountDownLatch latch = new CountDownLatch(1);
 
-		@RabbitListener(queues = "differentTypes", containerFactory = "jsonListenerContainerFactory")
+		@RabbitListener(id = "different", queues = "differentTypes", containerFactory = "jsonListenerContainerFactory")
 		public void handleDifferent(Foo2 foo) {
+			foos.add(foo);
+			latch.countDown();
+		}
+
+		@RabbitListener(id = "differentWithConcurrency", queues = "differentTypes2",
+				containerFactory = "jsonListenerContainerFactory", concurrency = "#{3}")
+		public void handleDifferentWithConcurrency(Foo2 foo) {
+			foos.add(foo);
+			latch.countDown();
+		}
+
+		@RabbitListener(id = "differentWithVariableConcurrency", queues = "differentTypes3",
+				containerFactory = "jsonListenerContainerFactory", concurrency = "3-4")
+		public void handleDifferentWithVariableConcurrency(Foo2 foo) {
 			foos.add(foo);
 			latch.countDown();
 		}
@@ -828,7 +928,7 @@ public class EnableRabbitIntegrationTests {
 						@Argument(name = "x-dead-letter-routing-key", value = "amqp656dlq"),
 						@Argument(name = "test-empty", value = ""),
 						@Argument(name = "test-null", value = "") }),
-				exchange = @Exchange(value = "amq.topic", durable = "true", type = "topic"),
+				exchange = @Exchange(value = "amq.topic", type = "topic"),
 				key = "foo"))
 		public String handleWithDeadLetterDefaultExchange(String foo) {
 			throw new AmqpRejectAndDontRequeueException("dlq");
@@ -988,6 +1088,12 @@ public class EnableRabbitIntegrationTests {
 		}
 
 		@Bean
+		@Scope(ConfigurableBeanFactory.SCOPE_PROTOTYPE)
+		public Foo1 foo1Prototype() {
+			return new Foo1();
+		}
+
+		@Bean
 		public SimpleRabbitListenerContainerFactory rabbitListenerContainerFactory() {
 			SimpleRabbitListenerContainerFactory factory = new SimpleRabbitListenerContainerFactory();
 			factory.setConnectionFactory(rabbitConnectionFactory());
@@ -1021,6 +1127,7 @@ public class EnableRabbitIntegrationTests {
 			messageConverter.setClassMapper(classMapper);
 			factory.setMessageConverter(messageConverter);
 			factory.setReceiveTimeout(10L);
+			factory.setConcurrentConsumers(2);
 			return factory;
 		}
 
@@ -1128,7 +1235,10 @@ public class EnableRabbitIntegrationTests {
 		@Bean
 		public ConnectionFactory rabbitConnectionFactory() {
 			CachingConnectionFactory connectionFactory = new CachingConnectionFactory();
-			connectionFactory.setHost("localhost");
+			connectionFactory.setHost(brokerRunning.getHostName());
+			connectionFactory.setPort(brokerRunning.getPort());
+			connectionFactory.setUsername(brokerRunning.getUser());
+			connectionFactory.setPassword(brokerRunning.getPassword());
 			ThreadPoolTaskExecutor executor = new ThreadPoolTaskExecutor();
 			executor.setThreadNamePrefix("rabbitClientThread-");
 			executor.afterPropertiesSet();
@@ -1200,7 +1310,7 @@ public class EnableRabbitIntegrationTests {
 
 		@Bean
 		public DirectExchange internal() {
-			DirectExchange directExchange = new DirectExchange("auto.internal", false, true);
+			DirectExchange directExchange = new DirectExchange("auto.internal", true, true);
 			directExchange.setInternal(true);
 			return directExchange;
 		}
@@ -1231,7 +1341,7 @@ public class EnableRabbitIntegrationTests {
 
 	}
 
-	@RabbitListener(bindings = @QueueBinding
+	@RabbitListener(id = "multi", bindings = @QueueBinding
 			(value = @Queue,
 			exchange = @Exchange(value = "multi.json.exch", autoDelete = "true"),
 			key = "multi.json.rk"), containerFactory = "simpleJsonListenerContainerFactory")
@@ -1349,7 +1459,10 @@ public class EnableRabbitIntegrationTests {
 		@Bean
 		public ConnectionFactory rabbitConnectionFactory() {
 			CachingConnectionFactory connectionFactory = new CachingConnectionFactory();
-			connectionFactory.setHost("localhost");
+			connectionFactory.setHost(brokerRunning.getHostName());
+			connectionFactory.setPort(brokerRunning.getPort());
+			connectionFactory.setUsername(brokerRunning.getUser());
+			connectionFactory.setPassword(brokerRunning.getPassword());
 			return connectionFactory;
 		}
 

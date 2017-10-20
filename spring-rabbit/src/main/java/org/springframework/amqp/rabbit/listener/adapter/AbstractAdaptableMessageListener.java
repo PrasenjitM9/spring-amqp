@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2016 the original author or authors.
+ * Copyright 2014-2017 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -47,7 +47,7 @@ import com.rabbitmq.client.Channel;
 
 /**
  * An abstract {@link MessageListener} adapter providing the necessary infrastructure
- * to extract the payload of a {@link Message}
+ * to extract the payload of a {@link Message}.
  *
  * @author Stephane Nicoll
  * @author Gary Russell
@@ -67,7 +67,7 @@ public abstract class AbstractAdaptableMessageListener implements MessageListene
 
 	private static final ParserContext PARSER_CONTEXT = new TemplateParserContext("!{", "}");
 
-	/** Logger available to subclasses */
+	/** Logger available to subclasses. */
 	protected final Log logger = LogFactory.getLog(getClass());
 
 	private final StandardEvaluationContext evalContext = new StandardEvaluationContext();
@@ -105,11 +105,21 @@ public abstract class AbstractAdaptableMessageListener implements MessageListene
 	}
 
 	/**
-	 * The encoding to use when inter-converting between byte arrays and Strings in message properties.
-	 * @param encoding the encoding to set
+	 * The encoding to use when inter-converting between byte arrays and Strings in
+	 * message properties.
+	 * @param encoding the encoding to set.
 	 */
 	public void setEncoding(String encoding) {
 		this.encoding = encoding;
+	}
+
+	/**
+	 * The encoding to use when inter-converting between byte arrays and Strings in
+	 * message properties.
+	 * @return encoding the encoding.
+	 */
+	public String getEncoding() {
+		return this.encoding;
 	}
 
 	/**
@@ -437,6 +447,9 @@ public abstract class AbstractAdaptableMessageListener implements MessageListene
 	protected void postProcessChannel(Channel channel, Message response) throws Exception {
 	}
 
+	/**
+	 * Result holder.
+	 */
 	public static final class ResultHolder {
 
 		private final Object result;
@@ -455,6 +468,9 @@ public abstract class AbstractAdaptableMessageListener implements MessageListene
 
 	}
 
+	/**
+	 * Root object for reply expression evaluation.
+	 */
 	public static final class ReplyExpressionRoot {
 
 		private final Message request;

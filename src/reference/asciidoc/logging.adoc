@@ -165,6 +165,17 @@ Properties
 </Appenders>
 ----
 
+[IMPORTANT]
+====
+Starting with _versions 1.6.10, 1.7.3_, the log4j2 Appender publishes the messages to RabbitMQ on the calling thread by default.
+This is because log4j2 does not create thread-safe events by default.
+If the broker is down, the `maxSenderRetries` will be used to retry, with no delay between retries.
+If you wish to restore the previous behavior of publishing the messages on separate threads (`senderPoolSize`), set the `async` property to `true`.
+However, you will also need to configure log4j2 to use the `DefaultLogEventFactory` instead of the `ReusableLogEventFactory`.
+One way to do that is to set the system property `-Dlog4j2.enable.threadlocals=false`.
+If async publishing is used with the `ReusableLogEventFactory`, events will have a high likelihood of being corrupted due to cross-talk.
+====
+
 ==== Logback Appender
 
 .Example logback.xml Snippet
@@ -176,6 +187,7 @@ Properties
     </layout>
     <addresses>foo:5672,bar:5672</addresses>
     <abbreviation>36</abbreviation>
+    <includeCallerData>false</includeCallerData>
     <applicationId>myApplication</applicationId>
     <routingKeyPattern>%property{applicationId}.%c.%p</routingKeyPattern>
     <generateId>true</generateId>
@@ -186,7 +198,30 @@ Properties
 </appender>
 ----
 
+Starting with _version 1.7.1_, the Logback `AmqpAppender` provides  an `includeCallerData` option which is `false` by default.
+Extracting caller data can be rather expensive because the log event has to create a throwable and inspect it to determine the calling location.
+Therefore, by default, caller data associated with an event is not extracted when the event added to the event queue.
+You can configure the appender to include caller data by setting the `includeCallerData` property to `true`.
+
+Starting with _version 2.0.0_, the Logback `AmqpAppender` supports https://logback.qos.ch/manual/encoders.html[Logback encoders] with the `encoder` option. The `encoder` and `layout` options are mutually exclusive.
+
 ==== Customizing the Messages
+
+By default AMQP appenders populates these message properties:
+* deliveryMode
+* contentType
+* contentEncoding if configured
+* messageId if `generateId` is configured
+* timestamp of the log event
+* appId if applicationId is configured
+
+In addition they populate headers:
+* categoryName of the log event
+* level of the log event
+* thread the name of the thread where log event happened
+* location the stack trace of the log event call
+* copy of all the MDC properties
+
 
 Each of the appenders can be subclassed, allowing you to modify the messages before publishing.
 

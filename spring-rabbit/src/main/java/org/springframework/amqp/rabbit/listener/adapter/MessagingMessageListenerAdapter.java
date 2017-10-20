@@ -1,5 +1,5 @@
 /*
- * Copyright 2002-2016 the original author or authors.
+ * Copyright 2002-2017 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -22,7 +22,7 @@ import java.lang.reflect.Type;
 import java.lang.reflect.WildcardType;
 
 import org.springframework.amqp.core.MessageProperties;
-import org.springframework.amqp.rabbit.annotation.RabbitListenerErrorHandler;
+import org.springframework.amqp.rabbit.listener.RabbitListenerErrorHandler;
 import org.springframework.amqp.rabbit.listener.exception.ListenerExecutionFailedException;
 import org.springframework.amqp.support.AmqpHeaderMapper;
 import org.springframework.amqp.support.converter.MessageConversionException;
@@ -53,6 +53,7 @@ import com.rabbitmq.client.Channel;
  * @author Stephane Nicoll
  * @author Gary Russell
  * @author Artem Bilan
+ *
  * @since 1.4
  */
 public class MessagingMessageListenerAdapter extends AbstractAdaptableMessageListener {
@@ -136,17 +137,29 @@ public class MessagingMessageListenerAdapter extends AbstractAdaptableMessageLis
 					}
 				}
 				catch (Exception ex) {
-					if (!this.returnExceptions) {
-						throw ex;
-					}
-					handleResult(new RemoteInvocationResult(ex), amqpMessage, channel, message);
+					returnOrThrow(amqpMessage, channel, message, ex, ex);
 				}
 			}
 			else {
-				if (!this.returnExceptions) {
-					throw e;
-				}
-				handleResult(new RemoteInvocationResult(e.getCause()), amqpMessage, channel, message);
+				returnOrThrow(amqpMessage, channel, message, e.getCause(), e);
+			}
+		}
+	}
+
+	private void returnOrThrow(org.springframework.amqp.core.Message amqpMessage, Channel channel, Message<?> message,
+			Throwable throwableToReturn, Exception exceptionToThrow) throws Exception {
+		if (!this.returnExceptions) {
+			throw exceptionToThrow;
+		}
+		try {
+			handleResult(new RemoteInvocationResult(throwableToReturn), amqpMessage, channel, message);
+		}
+		catch (ReplyFailureException rfe) {
+			if (void.class.equals(this.handlerMethod.getReturnType(message.getPayload()))) {
+				throw exceptionToThrow;
+			}
+			else {
+				throw rfe;
 			}
 		}
 	}
@@ -158,6 +171,10 @@ public class MessagingMessageListenerAdapter extends AbstractAdaptableMessageLis
 	/**
 	 * Invoke the handler, wrapping any exception to a {@link ListenerExecutionFailedException}
 	 * with a dedicated error message.
+	 * @param amqpMessage the raw message.
+	 * @param channel the channel.
+	 * @param message the messaging message.
+	 * @return the result of invoking the handler.
 	 */
 	private Object invokeHandler(org.springframework.amqp.core.Message amqpMessage, Channel channel,
 			Message<?> message) {
@@ -166,11 +183,11 @@ public class MessagingMessageListenerAdapter extends AbstractAdaptableMessageLis
 		}
 		catch (MessagingException ex) {
 			throw new ListenerExecutionFailedException(createMessagingErrorMessage("Listener method could not " +
-					"be invoked with the incoming message", message.getPayload()), ex);
+					"be invoked with the incoming message", message.getPayload()), ex, amqpMessage);
 		}
 		catch (Exception ex) {
 			throw new ListenerExecutionFailedException("Listener method '" +
-					this.handlerMethod.getMethodAsString(message.getPayload()) + "' threw exception", ex);
+					this.handlerMethod.getMethodAsString(message.getPayload()) + "' threw exception", ex, amqpMessage);
 		}
 	}
 

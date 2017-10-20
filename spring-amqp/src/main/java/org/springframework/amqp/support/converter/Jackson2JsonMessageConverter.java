@@ -1,5 +1,5 @@
 /*
- * Copyright 2002-2016 the original author or authors.
+ * Copyright 2002-2017 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -25,6 +25,7 @@ import org.springframework.amqp.core.Message;
 import org.springframework.amqp.core.MessageProperties;
 import org.springframework.amqp.support.converter.Jackson2JavaTypeMapper.TypePrecedence;
 import org.springframework.core.ParameterizedTypeReference;
+import org.springframework.util.Assert;
 
 import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.JavaType;
@@ -40,19 +41,61 @@ import com.fasterxml.jackson.databind.ObjectMapper;
  * @author Andreas Asplund
  * @author Gary Russell
  * @author Artem Bilan
+ * @author Arlo Louis O'Keeffe
  */
 public class Jackson2JsonMessageConverter extends AbstractJsonMessageConverter implements SmartMessageConverter {
 
 	private static Log log = LogFactory.getLog(Jackson2JsonMessageConverter.class);
 
-	private ObjectMapper jsonObjectMapper = new ObjectMapper();
+	private final ObjectMapper jsonObjectMapper;
 
 	private Jackson2JavaTypeMapper javaTypeMapper = new DefaultJackson2JavaTypeMapper();
 
 	private boolean typeMapperSet;
 
+	/**
+	 * Construct with an internal {@link ObjectMapper} instance
+	 * and trusted packed to all ({@code *}).
+	 * @since 1.6.11
+	 */
 	public Jackson2JsonMessageConverter() {
-		initializeJsonObjectMapper();
+		this("*");
+	}
+
+	/**
+	 * Construct with an internal {@link ObjectMapper} instance.
+	 * The {@link DeserializationFeature#FAIL_ON_UNKNOWN_PROPERTIES} is set to false on
+	 * the {@link ObjectMapper}.
+	 * @param trustedPackages the trusted Java packages for deserialization
+	 * @since 1.6.11
+	 * @see DefaultJackson2JavaTypeMapper#setTrustedPackages(String...)
+	 */
+	public Jackson2JsonMessageConverter(String... trustedPackages) {
+		this(new ObjectMapper(), trustedPackages);
+		this.jsonObjectMapper.configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false);
+	}
+
+	/**
+	 * Construct with the provided {@link ObjectMapper} instance
+	 * and trusted packed to all ({@code *}).
+	 * @param jsonObjectMapper the {@link ObjectMapper} to use.
+	 * @since 1.6.12
+	 */
+	public Jackson2JsonMessageConverter(ObjectMapper jsonObjectMapper) {
+		this(jsonObjectMapper, "*");
+	}
+
+	/**
+	 * Construct with the provided {@link ObjectMapper} instance.
+	 * @param jsonObjectMapper the {@link ObjectMapper} to use.
+	 * @param trustedPackages the trusted Java packages for deserialization
+	 * @since 1.6.11
+	 * @see DefaultJackson2JavaTypeMapper#setTrustedPackages(String...)
+	 */
+	public Jackson2JsonMessageConverter(ObjectMapper jsonObjectMapper, String... trustedPackages) {
+		Assert.notNull(jsonObjectMapper, "'jsonObjectMapper' must not be null");
+		this.jsonObjectMapper = jsonObjectMapper;
+		((DefaultJackson2JavaTypeMapper) this.javaTypeMapper).setTrustedPackages(trustedPackages);
 	}
 
 	public Jackson2JavaTypeMapper getJavaTypeMapper() {
@@ -65,19 +108,10 @@ public class Jackson2JsonMessageConverter extends AbstractJsonMessageConverter i
 	}
 
 	/**
-	 * The {@link com.fasterxml.jackson.databind.ObjectMapper} to use instead of using the default. An
-	 * alternative to injecting a mapper is to extend this class and override
-	 * {@link #initializeJsonObjectMapper()}.
-	 * @param jsonObjectMapper the object mapper to set
-	 */
-	public void setJsonObjectMapper(ObjectMapper jsonObjectMapper) {
-		this.jsonObjectMapper = jsonObjectMapper;
-	}
-
-	/**
+	 * Return the type precedence.
 	 * @return the precedence.
-	 * @see #setTypePrecedence(Jackson2JavaTypeMapper.TypePrecedence)
 	 * @since 1.6.
+	 * @see #setTypePrecedence(Jackson2JavaTypeMapper.TypePrecedence)
 	 */
 	public Jackson2JavaTypeMapper.TypePrecedence getTypePrecedence() {
 		return this.javaTypeMapper.getTypePrecedence();
@@ -120,19 +154,13 @@ public class Jackson2JsonMessageConverter extends AbstractJsonMessageConverter i
 		}
 	}
 
-	/**
-	 * Subclass and override to customize.
-	 */
-	protected void initializeJsonObjectMapper() {
-		this.jsonObjectMapper.configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false);
-	}
-
 	@Override
 	public Object fromMessage(Message message) throws MessageConversionException {
 		return fromMessage(message, null);
 	}
 
 	/**
+	 * {@inheritDoc}
 	 * @param conversionHint The conversionHint must be a {@link ParameterizedTypeReference}.
 	 */
 	@Override

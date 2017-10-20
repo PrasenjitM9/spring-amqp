@@ -1,5 +1,5 @@
 /*
- * Copyright 2002-2016 the original author or authors.
+ * Copyright 2002-2017 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -55,6 +55,7 @@ import org.springframework.amqp.rabbit.support.Delivery;
 import org.springframework.amqp.rabbit.support.MessagePropertiesConverter;
 import org.springframework.amqp.rabbit.support.RabbitExceptionTranslator;
 import org.springframework.amqp.support.ConsumerTagStrategy;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 import org.springframework.util.ObjectUtils;
 import org.springframework.util.backoff.BackOffExecution;
 
@@ -76,6 +77,7 @@ import com.rabbitmq.utility.Utility;
  * @author Casper Mout
  * @author Artem Bilan
  * @author Alex Panchenko
+ * @author Johno Crawford
  */
 public class BlockingQueueConsumer {
 
@@ -114,6 +116,8 @@ public class BlockingQueueConsumer {
 
 	private final Map<String, Object> consumerArgs = new HashMap<String, Object>();
 
+	private final boolean noLocal;
+
 	private final boolean exclusive;
 
 	private final Set<Long> deliveryTags = new LinkedHashSet<Long>();
@@ -142,6 +146,8 @@ public class BlockingQueueConsumer {
 	private boolean locallyTransacted;
 
 	private volatile long abortStarted;
+
+	private volatile boolean normalCancel;
 
 	/**
 	 * Create a consumer. The consumer must not attempt to use
@@ -223,10 +229,36 @@ public class BlockingQueueConsumer {
 	 * @param queues The queues.
 	 */
 	public BlockingQueueConsumer(ConnectionFactory connectionFactory,
+								 MessagePropertiesConverter messagePropertiesConverter,
+								 ActiveObjectCounter<BlockingQueueConsumer> activeObjectCounter, AcknowledgeMode acknowledgeMode,
+								 boolean transactional, int prefetchCount, boolean defaultRequeueRejected,
+								 Map<String, Object> consumerArgs, boolean exclusive, String... queues) {
+		this(connectionFactory, messagePropertiesConverter, activeObjectCounter, acknowledgeMode, transactional,
+				prefetchCount, defaultRequeueRejected, consumerArgs, false, exclusive, queues);
+	}
+
+	/**
+	 * Create a consumer. The consumer must not attempt to use
+	 * the connection factory or communicate with the broker
+	 * until it is started.
+	 * @param connectionFactory The connection factory.
+	 * @param messagePropertiesConverter The properties converter.
+	 * @param activeObjectCounter The active object counter; used during shutdown.
+	 * @param acknowledgeMode The acknowledge mode.
+	 * @param transactional Whether the channel is transactional.
+	 * @param prefetchCount The prefetch count.
+	 * @param defaultRequeueRejected true to reject requeued messages.
+	 * @param consumerArgs The consumer arguments (e.g. x-priority).
+	 * @param noLocal true if the consumer is to be no-local.
+	 * @param exclusive true if the consumer is to be exclusive.
+	 * @param queues The queues.
+	 * @since 1.7.4
+	 */
+	public BlockingQueueConsumer(ConnectionFactory connectionFactory,
 			MessagePropertiesConverter messagePropertiesConverter,
 			ActiveObjectCounter<BlockingQueueConsumer> activeObjectCounter, AcknowledgeMode acknowledgeMode,
 			boolean transactional, int prefetchCount, boolean defaultRequeueRejected,
-			Map<String, Object> consumerArgs, boolean exclusive, String... queues) {
+			Map<String, Object> consumerArgs, boolean noLocal, boolean exclusive, String... queues) {
 		this.connectionFactory = connectionFactory;
 		this.messagePropertiesConverter = messagePropertiesConverter;
 		this.activeObjectCounter = activeObjectCounter;
@@ -237,6 +269,7 @@ public class BlockingQueueConsumer {
 		if (consumerArgs != null && consumerArgs.size() > 0) {
 			this.consumerArgs.putAll(consumerArgs);
 		}
+		this.noLocal = noLocal;
 		this.exclusive = exclusive;
 		this.queues = Arrays.copyOf(queues, queues.length);
 		this.queue = new LinkedBlockingQueue<Delivery>(prefetchCount);
@@ -257,8 +290,8 @@ public class BlockingQueueConsumer {
 	/**
 	 * Set the number of retries after passive queue declaration fails.
 	 * @param declarationRetries The number of retries, default 3.
-	 * @see #setFailedDeclarationRetryInterval(long)
 	 * @since 1.3.9
+	 * @see #setFailedDeclarationRetryInterval(long)
 	 */
 	public void setDeclarationRetries(int declarationRetries) {
 		this.declarationRetries = declarationRetries;
@@ -267,8 +300,8 @@ public class BlockingQueueConsumer {
 	/**
 	 * Set the interval between passive queue declaration attempts in milliseconds.
 	 * @param failedDeclarationRetryInterval the interval, default 5000.
-	 * @see #setDeclarationRetries(int)
 	 * @since 1.3.9
+	 * @see #setDeclarationRetries(int)
 	 */
 	public void setFailedDeclarationRetryInterval(long failedDeclarationRetryInterval) {
 		this.failedDeclarationRetryInterval = failedDeclarationRetryInterval;
@@ -325,6 +358,14 @@ public class BlockingQueueConsumer {
 	}
 
 	/**
+	 * Return true if cancellation is expected.
+	 * @return true if expected.
+	 */
+	public boolean isNormalCancel() {
+		return this.normalCancel;
+	}
+
+	/**
 	 * Return the size the queues array.
 	 * @return the count.
 	 */
@@ -333,12 +374,19 @@ public class BlockingQueueConsumer {
 	}
 
 	protected void basicCancel() {
+		basicCancel(false);
+	}
+
+	protected void basicCancel(boolean expected) {
+		this.normalCancel = expected;
 		for (String consumerTag : this.consumerTags.keySet()) {
 			removeConsumer(consumerTag);
 			try {
-				this.channel.basicCancel(consumerTag);
+				if (this.channel.isOpen()) {
+					this.channel.basicCancel(consumerTag);
+				}
 			}
-			catch (IOException e) {
+			catch (IOException | IllegalStateException e) {
 				if (logger.isDebugEnabled()) {
 					logger.debug("Error performing 'basicCancel'", e);
 				}
@@ -374,6 +422,9 @@ public class BlockingQueueConsumer {
 	 * If this is a non-POISON non-null delivery simply return it.
 	 * If this is POISON we are in shutdown mode, throw
 	 * shutdown. If delivery is null, we may be in shutdown mode. Check and see.
+	 * @param delivery the delivered message contents.
+	 * @return A message built from the contents.
+	 * @throws InterruptedException if the thread is interrupted.
 	 */
 	private Message handle(Delivery delivery) throws InterruptedException {
 		if ((delivery == null && this.shutdown != null)) {
@@ -408,7 +459,9 @@ public class BlockingQueueConsumer {
 	 * @throws ShutdownSignalException if the connection is shut down while waiting
 	 */
 	public Message nextMessage() throws InterruptedException, ShutdownSignalException {
-		logger.trace("Retrieving delivery for " + this);
+		if (logger.isTraceEnabled()) {
+		    logger.trace("Retrieving delivery for " + this);
+        }
 		return handle(this.queue.take());
 	}
 
@@ -420,8 +473,8 @@ public class BlockingQueueConsumer {
 	 * @throws ShutdownSignalException if the connection is shut down while waiting
 	 */
 	public Message nextMessage(long timeout) throws InterruptedException, ShutdownSignalException {
-		if (logger.isDebugEnabled()) {
-			logger.debug("Retrieving delivery for " + this);
+		if (logger.isTraceEnabled()) {
+			logger.trace("Retrieving delivery for " + this);
 		}
 		checkShutdown();
 		if (this.missingQueues.size() > 0) {
@@ -570,7 +623,7 @@ public class BlockingQueueConsumer {
 
 	private void consumeFromQueue(String queue) throws IOException {
 		String consumerTag = this.channel.basicConsume(queue, this.acknowledgeMode.isAutoAck(),
-				(this.tagStrategy != null ? this.tagStrategy.createConsumerTag(queue) : ""), false, this.exclusive,
+				(this.tagStrategy != null ? this.tagStrategy.createConsumerTag(queue) : ""), this.noLocal, this.exclusive,
 				this.consumerArgs, this.consumer);
 		if (consumerTag != null) {
 			this.consumerTags.put(consumerTag, queue);
@@ -603,7 +656,7 @@ public class BlockingQueueConsumer {
 			}
 			catch (IOException e) {
 				if (logger.isWarnEnabled()) {
-					logger.warn("Failed to declare queue:" + queueName);
+					logger.warn("Failed to declare queue: " + queueName);
 				}
 				if (!this.channel.isOpen()) {
 					throw new AmqpIOException(e);
@@ -620,6 +673,9 @@ public class BlockingQueueConsumer {
 	}
 
 	public void stop() {
+		if (this.abortStarted == 0) { // signal handle delivery to use offer
+			this.abortStarted = System.currentTimeMillis();
+		}
 		if (this.consumer != null && this.consumer.getChannel() != null && this.consumerTags.size() > 0
 				&& !this.cancelled.get()) {
 			try {
@@ -628,14 +684,14 @@ public class BlockingQueueConsumer {
 			}
 			catch (Exception e) {
 				if (logger.isDebugEnabled()) {
-					logger.debug("Error closing consumer", e);
+					logger.debug("Error closing consumer " + this, e);
 				}
 			}
 		}
 		if (logger.isDebugEnabled()) {
 			logger.debug("Closing Rabbit Channel: " + this.channel);
 		}
-		RabbitUtils.setPhysicalCloseRequired(true);
+		RabbitUtils.setPhysicalCloseRequired(this.channel, true);
 		ConnectionFactoryUtils.releaseResources(this.resourceHolder);
 		this.deliveryTags.clear();
 		this.consumer = null;
@@ -697,8 +753,8 @@ public class BlockingQueueConsumer {
 	/**
 	 * Perform a commit or message acknowledgement, as appropriate.
 	 * @param locallyTransacted Whether the channel is locally transacted.
-	 * @throws IOException Any IOException.
 	 * @return true if at least one delivery tag exists.
+	 * @throws IOException Any IOException.
 	 */
 	public boolean commitIfNecessary(boolean locallyTransacted) throws IOException {
 
@@ -706,18 +762,24 @@ public class BlockingQueueConsumer {
 			return false;
 		}
 
+		/*
+		 * If we have a TX Manager, but no TX, act like we are locally transacted.
+		 */
+		boolean isLocallyTransacted = locallyTransacted
+				|| (this.transactional
+						&& TransactionSynchronizationManager.getResource(this.connectionFactory) == null);
 		try {
 
 			boolean ackRequired = !this.acknowledgeMode.isAutoAck() && !this.acknowledgeMode.isManual();
 
 			if (ackRequired) {
-				if (!this.transactional || locallyTransacted) {
+				if (!this.transactional || isLocallyTransacted) {
 					long deliveryTag = new ArrayList<Long>(this.deliveryTags).get(this.deliveryTags.size() - 1);
 					this.channel.basicAck(deliveryTag, true);
 				}
 			}
 
-			if (locallyTransacted) {
+			if (isLocallyTransacted) {
 				// For manual acks we still need to commit
 				RabbitUtils.commitIfNecessary(this.channel);
 			}
@@ -776,7 +838,7 @@ public class BlockingQueueConsumer {
 						+ "); " + BlockingQueueConsumer.this);
 			}
 			if (removeConsumer(consumerTag)) {
-				basicCancel();
+				basicCancel(false);
 			}
 		}
 
@@ -798,8 +860,18 @@ public class BlockingQueueConsumer {
 			try {
 				if (BlockingQueueConsumer.this.abortStarted > 0) {
 					if (!BlockingQueueConsumer.this.queue.offer(new Delivery(consumerTag, envelope, properties, body),
-							BlockingQueueConsumer.this.shutdownTimeout, TimeUnit.MILLISECONDS)) { // NOSONAR
-						// ignore - we're aborting anyway
+							BlockingQueueConsumer.this.shutdownTimeout, TimeUnit.MILLISECONDS)) {
+						RabbitUtils.setPhysicalCloseRequired(getChannel(), true);
+						// Defensive - should never happen
+						BlockingQueueConsumer.this.queue.clear();
+						getChannel().basicNack(envelope.getDeliveryTag(), true, true);
+						getChannel().basicCancel(consumerTag);
+						try {
+							getChannel().close();
+						}
+						catch (TimeoutException e) {
+							// no-op
+						}
 					}
 				}
 				else {

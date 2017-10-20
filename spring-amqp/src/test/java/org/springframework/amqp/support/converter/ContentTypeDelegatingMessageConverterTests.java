@@ -1,5 +1,5 @@
 /*
- * Copyright 2015-2016 the original author or authors.
+ * Copyright 2015-2017 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,6 +16,7 @@
 
 package org.springframework.amqp.support.converter;
 
+import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.instanceOf;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertThat;
@@ -23,7 +24,6 @@ import static org.junit.Assert.fail;
 
 import java.io.Serializable;
 
-import org.hamcrest.Matchers;
 import org.junit.Test;
 
 import org.springframework.amqp.core.Message;
@@ -31,6 +31,8 @@ import org.springframework.amqp.core.MessageProperties;
 
 /**
  * @author Gary Russell
+ * @author Artem Bilan
+ *
  * @since 1.4.2
  *
  */
@@ -39,8 +41,10 @@ public class ContentTypeDelegatingMessageConverterTests {
 	@Test
 	public void testDelegationOutbound() {
 		ContentTypeDelegatingMessageConverter converter = new ContentTypeDelegatingMessageConverter();
-		converter.addDelegate("foo/bar", new Jackson2JsonMessageConverter());
-		converter.addDelegate(MessageProperties.CONTENT_TYPE_JSON, new Jackson2JsonMessageConverter());
+		Jackson2JsonMessageConverter messageConverter =
+				new Jackson2JsonMessageConverter(ContentTypeDelegatingMessageConverterTests.class.getPackage().getName());
+		converter.addDelegate("foo/bar", messageConverter);
+		converter.addDelegate(MessageProperties.CONTENT_TYPE_JSON, messageConverter);
 		MessageProperties props = new MessageProperties();
 		Foo foo = new Foo();
 		foo.setFoo("bar");
@@ -63,7 +67,7 @@ public class ContentTypeDelegatingMessageConverterTests {
 		}
 		catch (Exception e) {
 			assertThat(e, instanceOf(MessageConversionException.class));
-			assertThat(e.getMessage(), Matchers.containsString("No delegate converter"));
+			assertThat(e.getMessage(), containsString("No delegate converter"));
 		}
 	}
 

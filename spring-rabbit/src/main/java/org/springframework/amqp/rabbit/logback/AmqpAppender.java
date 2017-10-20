@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2016 the original author or authors.
+ * Copyright 2014-2017 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -17,9 +17,11 @@
 package org.springframework.amqp.rabbit.logback;
 
 import java.io.UnsupportedEncodingException;
+import java.net.URI;
 import java.util.Calendar;
 import java.util.Map;
 import java.util.Map.Entry;
+import java.util.Optional;
 import java.util.Set;
 import java.util.Timer;
 import java.util.TimerTask;
@@ -27,6 +29,7 @@ import java.util.UUID;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import org.springframework.amqp.AmqpException;
@@ -55,7 +58,7 @@ import ch.qos.logback.classic.spi.ILoggingEvent;
 import ch.qos.logback.classic.spi.LoggingEvent;
 import ch.qos.logback.core.AppenderBase;
 import ch.qos.logback.core.Layout;
-
+import ch.qos.logback.core.encoder.Encoder;
 import com.rabbitmq.client.ConnectionFactory;
 
 /**
@@ -83,6 +86,9 @@ import com.rabbitmq.client.ConnectionFactory;
  * @author Artem Bilan
  * @author Gary Russell
  * @author Stephen Oakey
+ * @author Dominique Villard
+ * @author Nicolas Ristock
+ *
  * @since 1.4
  */
 public class AmqpAppender extends AppenderBase<ILoggingEvent> {
@@ -101,6 +107,11 @@ public class AmqpAppender extends AppenderBase<ILoggingEvent> {
 	 * Key name for the logger level name in the message properties
 	 */
 	public static final String CATEGORY_LEVEL = "level";
+
+	/**
+	 * Key name for the thread name in the message properties.
+	 */
+	public static final String THREAD_NAME = "thread";
 
 	/**
 	 * Name of the exchange to publish log events to.
@@ -126,6 +137,8 @@ public class AmqpAppender extends AppenderBase<ILoggingEvent> {
 	{
 		this.routingKeyLayout.setPattern("%nopex%c.%p");
 	}
+
+	private final AtomicBoolean headerWritten = new AtomicBoolean();
 
 	/**
 	 * Configuration arbitrary application ID.
@@ -178,27 +191,32 @@ public class AmqpAppender extends AppenderBase<ILoggingEvent> {
 	/**
 	 * RabbitMQ host to connect to.
 	 */
-	private String host = "localhost";
+	private URI uri;
+
+	/**
+	 * RabbitMQ host to connect to.
+	 */
+	private String host;
 
 	/**
 	 * RabbitMQ virtual host to connect to.
 	 */
-	private String virtualHost = "/";
+	private String virtualHost;
 
 	/**
 	 * RabbitMQ port to connect to.
 	 */
-	private int port = 5672;
+	private Integer port;
 
 	/**
 	 * RabbitMQ user to connect as.
 	 */
-	private String username = "guest";
+	private String username;
 
 	/**
 	 * RabbitMQ password for this user.
 	 */
-	private String password = "guest";
+	private String password;
 
 	/**
 	 * Use an SSL connection.
@@ -280,10 +298,22 @@ public class AmqpAppender extends AppenderBase<ILoggingEvent> {
 
 	private Layout<ILoggingEvent> layout;
 
+	private Encoder<ILoggingEvent> encoder;
+
 	private TargetLengthBasedClassNameAbbreviator abbreviator;
+
+	private boolean includeCallerData;
 
 	public void setRoutingKeyPattern(String routingKeyPattern) {
 		this.routingKeyLayout.setPattern("%nopex{}" + routingKeyPattern);
+	}
+
+	public URI getUri() {
+		return this.uri;
+	}
+
+	public void setUri(URI uri) {
+		this.uri = uri;
 	}
 
 	public String getHost() {
@@ -294,11 +324,11 @@ public class AmqpAppender extends AppenderBase<ILoggingEvent> {
 		this.host = host;
 	}
 
-	public int getPort() {
+	public Integer getPort() {
 		return this.port;
 	}
 
-	public void setPort(int port) {
+	public void setPort(Integer port) {
 		this.port = port;
 	}
 
@@ -518,8 +548,24 @@ public class AmqpAppender extends AppenderBase<ILoggingEvent> {
 		this.layout = layout;
 	}
 
+	public Encoder<ILoggingEvent> getEncoder() {
+		return this.encoder;
+	}
+
+	public void setEncoder(final Encoder<ILoggingEvent> encoder) {
+		this.encoder = encoder;
+	}
+
 	public void setAbbreviation(int len) {
 		this.abbreviator = new TargetLengthBasedClassNameAbbreviator(len);
+	}
+
+	/**
+	 * Return the number of events waiting to be sent.
+	 * @return the number of events waiting to be sent.
+	 */
+	public int getQueuedEventCount() {
+		return this.events.size();
 	}
 
 	/**
@@ -531,6 +577,21 @@ public class AmqpAppender extends AppenderBase<ILoggingEvent> {
 	 */
 	public void setClientConnectionProperties(String clientConnectionProperties) {
 		this.clientConnectionProperties = clientConnectionProperties;
+	}
+
+	public boolean isIncludeCallerData() {
+		return this.includeCallerData;
+	}
+
+	/**
+	 * If true, the caller data will be available in the target AMQP message.
+	 * By default no caller data is sent to the RabbitMQ.
+	 * @param includeCallerData include or on caller data
+	 * @since 1.7.1
+	 * @see ILoggingEvent#getCallerData()
+	 */
+	public void setIncludeCallerData(boolean includeCallerData) {
+		this.includeCallerData = includeCallerData;
 	}
 
 	@Override
@@ -583,11 +644,15 @@ public class AmqpAppender extends AppenderBase<ILoggingEvent> {
 	 * @param factoryBean the {@link RabbitConnectionFactoryBean}.
 	 */
 	protected void configureRabbitConnectionFactory(RabbitConnectionFactoryBean factoryBean) {
-		factoryBean.setHost(this.host);
-		factoryBean.setPort(this.port);
-		factoryBean.setUsername(this.username);
-		factoryBean.setPassword(this.password);
-		factoryBean.setVirtualHost(this.virtualHost);
+
+		Optional.ofNullable(this.host).ifPresent(factoryBean::setHost);
+		Optional.ofNullable(this.port).ifPresent(factoryBean::setPort);
+		Optional.ofNullable(this.username).ifPresent(factoryBean::setUsername);
+		Optional.ofNullable(this.password).ifPresent(factoryBean::setPassword);
+		Optional.ofNullable(this.virtualHost).ifPresent(factoryBean::setVirtualHost);
+		// overrides all preceding items when set
+		Optional.ofNullable(this.uri).ifPresent(factoryBean::setUri);
+
 		if (this.useSsl) {
 			factoryBean.setUseSSL(true);
 			if (this.sslAlgorithm != null) {
@@ -607,8 +672,12 @@ public class AmqpAppender extends AppenderBase<ILoggingEvent> {
 				factoryBean.setTrustStoreType(this.trustStoreType);
 			}
 		}
-		if (this.layout == null) {
-			addError("A layout is required");
+		if (this.layout == null && this.encoder == null) {
+			addError("Either a layout or encoder is required");
+		}
+
+		if (this.layout != null && this.encoder != null) {
+			addError("Only one of layout or encoder is possible");
 		}
 	}
 
@@ -638,6 +707,10 @@ public class AmqpAppender extends AppenderBase<ILoggingEvent> {
 
 	@Override
 	protected void append(ILoggingEvent event) {
+		if (isIncludeCallerData()) {
+			event.getCallerData();
+		}
+		event.getThreadName();
 		this.events.add(new Event(event));
 	}
 
@@ -699,6 +772,7 @@ public class AmqpAppender extends AppenderBase<ILoggingEvent> {
 						amqpProps.setContentEncoding(AmqpAppender.this.contentEncoding);
 					}
 					amqpProps.setHeader(CATEGORY_NAME, name);
+					amqpProps.setHeader(THREAD_NAME, logEvent.getThreadName());
 					amqpProps.setHeader(CATEGORY_LEVEL, level.toString());
 					if (AmqpAppender.this.generateId) {
 						amqpProps.setMessageId(UUID.randomUUID().toString());
@@ -721,36 +795,37 @@ public class AmqpAppender extends AppenderBase<ILoggingEvent> {
 								"location",
 								String.format("%s.%s()[%s]", location[0], location[1], location[2]));
 					}
-					String msgBody;
+					byte[] msgBody;
 					String routingKey = AmqpAppender.this.routingKeyLayout.doLayout(logEvent);
 					// Set applicationId, if we're using one
 					if (AmqpAppender.this.applicationId != null) {
 						amqpProps.setAppId(AmqpAppender.this.applicationId);
 					}
 
+					if (AmqpAppender.this.encoder != null && AmqpAppender.this.headerWritten.compareAndSet(false, true)) {
+						byte[] header = AmqpAppender.this.encoder.headerBytes();
+						if (header != null && header.length > 0) {
+							rabbitTemplate.convertAndSend(AmqpAppender.this.exchangeName, routingKey, header, m -> {
+								if (AmqpAppender.this.applicationId != null) {
+									m.getMessageProperties().setAppId(AmqpAppender.this.applicationId);
+								}
+								return m;
+							});
+						}
+					}
+
 					if (AmqpAppender.this.abbreviator != null && logEvent instanceof LoggingEvent) {
 						((LoggingEvent) logEvent).setLoggerName(AmqpAppender.this.abbreviator.abbreviate(name));
-						msgBody = AmqpAppender.this.layout.doLayout(logEvent);
+						msgBody = encodeMessage(logEvent);
 						((LoggingEvent) logEvent).setLoggerName(name);
 					}
 					else {
-						msgBody = AmqpAppender.this.layout.doLayout(logEvent);
+						msgBody = encodeMessage(logEvent);
 					}
 
 					// Send a message
 					try {
-						Message message = null;
-						if (AmqpAppender.this.charset != null) {
-							try {
-								message = new Message(msgBody.getBytes(AmqpAppender.this.charset), amqpProps);
-							}
-							catch (UnsupportedEncodingException e) {
-								message = new Message(msgBody.getBytes(), amqpProps); //NOSONAR (default charset)
-							}
-						}
-						else {
-							message = new Message(msgBody.getBytes(), amqpProps); //NOSONAR (default charset)
-						}
+						Message message = new Message(msgBody, amqpProps);
 
 						message = postProcessMessageBeforeSend(message, event);
 						rabbitTemplate.send(AmqpAppender.this.exchangeName, routingKey, message);
@@ -777,6 +852,25 @@ public class AmqpAppender extends AppenderBase<ILoggingEvent> {
 				Thread.currentThread().interrupt();
 			}
 		}
+
+		private byte[] encodeMessage(ILoggingEvent logEvent) {
+			if (AmqpAppender.this.encoder != null) {
+				return AmqpAppender.this.encoder.encode(logEvent);
+			}
+
+			String msgBody = AmqpAppender.this.layout.doLayout(logEvent);
+			if (AmqpAppender.this.charset != null) {
+				try {
+					return msgBody.getBytes(AmqpAppender.this.charset);
+				}
+				catch (UnsupportedEncodingException e) {
+					return msgBody.getBytes(); //NOSONAR (default charset)
+				}
+			}
+			else {
+				return msgBody.getBytes(); //NOSONAR (default charset)
+			}
+		}
 	}
 
 	/**
@@ -793,7 +887,6 @@ public class AmqpAppender extends AppenderBase<ILoggingEvent> {
 		public Event(ILoggingEvent event) {
 			this.event = event;
 			this.properties = this.event.getMDCPropertyMap();
-			this.event.getCallerData();
 		}
 
 		public ILoggingEvent getEvent() {

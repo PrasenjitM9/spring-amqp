@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2016 the original author or authors.
+ * Copyright 2014-2017 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -25,6 +25,8 @@ import org.apache.commons.logging.LogFactory;
 
 import org.springframework.amqp.core.AmqpTemplate;
 import org.springframework.amqp.core.Message;
+import org.springframework.amqp.core.MessageDeliveryMode;
+import org.springframework.amqp.core.MessageProperties;
 import org.springframework.util.Assert;
 
 /**
@@ -39,6 +41,8 @@ import org.springframework.util.Assert;
  *
  * @author James Carr
  * @author Gary Russell
+ * @author Artem Bilan
+ *
  * @since 1.3
  */
 public class RepublishMessageRecoverer implements MessageRecoverer {
@@ -51,15 +55,17 @@ public class RepublishMessageRecoverer implements MessageRecoverer {
 
 	public static final String X_ORIGINAL_ROUTING_KEY = "x-original-routingKey";
 
-	private final Log logger = LogFactory.getLog(getClass());
+	protected final Log logger = LogFactory.getLog(getClass());
 
-	private final AmqpTemplate errorTemplate;
+	protected final AmqpTemplate errorTemplate;
 
-	private final String errorRoutingKey;
+	protected final String errorRoutingKey;
 
-	private volatile String errorRoutingKeyPrefix = "error.";
+	protected final String errorExchangeName;
 
-	private final String errorExchangeName;
+	private String errorRoutingKeyPrefix = "error.";
+
+	private MessageDeliveryMode deliveryMode = MessageDeliveryMode.PERSISTENT;
 
 	public RepublishMessageRecoverer(AmqpTemplate errorTemplate) {
 		this(errorTemplate, null, null);
@@ -89,24 +95,48 @@ public class RepublishMessageRecoverer implements MessageRecoverer {
 	}
 
 	/**
-	 * @see #errorRoutingKeyPrefix(String)
 	 * @param errorRoutingKeyPrefix The prefix (default "error.").
+	 * @see #errorRoutingKeyPrefix(String)
 	 */
 	public void setErrorRoutingKeyPrefix(String errorRoutingKeyPrefix) {
 		Assert.notNull(errorRoutingKeyPrefix, "'errorRoutingKeyPrefix' cannot be null");
 		this.errorRoutingKeyPrefix = errorRoutingKeyPrefix;
 	}
 
+	protected String getErrorRoutingKeyPrefix() {
+		return this.errorRoutingKeyPrefix;
+	}
+
+	/**
+	 * Specify a {@link MessageDeliveryMode} to set into the message to republish
+	 * if the message doesn't have it already.
+	 * @param deliveryMode the delivery mode to set to message.
+	 * @since 2.0
+	 */
+	public void setDeliveryMode(MessageDeliveryMode deliveryMode) {
+		Assert.notNull(deliveryMode, "'deliveryMode' cannot be null");
+		this.deliveryMode = deliveryMode;
+	}
+
+	protected MessageDeliveryMode getDeliveryMode() {
+		return this.deliveryMode;
+	}
+
 	@Override
 	public void recover(Message message, Throwable cause) {
-		Map<String, Object> headers = message.getMessageProperties().getHeaders();
+		MessageProperties messageProperties = message.getMessageProperties();
+		Map<String, Object> headers = messageProperties.getHeaders();
 		headers.put(X_EXCEPTION_STACKTRACE, getStackTraceAsString(cause));
 		headers.put(X_EXCEPTION_MESSAGE, cause.getCause() != null ? cause.getCause().getMessage() : cause.getMessage());
-		headers.put(X_ORIGINAL_EXCHANGE, message.getMessageProperties().getReceivedExchange());
-		headers.put(X_ORIGINAL_ROUTING_KEY, message.getMessageProperties().getReceivedRoutingKey());
+		headers.put(X_ORIGINAL_EXCHANGE, messageProperties.getReceivedExchange());
+		headers.put(X_ORIGINAL_ROUTING_KEY, messageProperties.getReceivedRoutingKey());
 		Map<? extends String, ? extends Object> additionalHeaders = additionalHeaders(message, cause);
 		if (additionalHeaders != null) {
 			headers.putAll(additionalHeaders);
+		}
+
+		if (messageProperties.getDeliveryMode() == null) {
+			messageProperties.setDeliveryMode(this.deliveryMode);
 		}
 
 		if (null != this.errorExchangeName) {

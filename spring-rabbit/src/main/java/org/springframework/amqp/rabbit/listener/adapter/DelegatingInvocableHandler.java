@@ -1,5 +1,5 @@
 /*
- * Copyright 2015-2016 the original author or authors.
+ * Copyright 2015-2017 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -98,9 +98,9 @@ public class DelegatingInvocableHandler {
 	 * Invoke the method with the given message.
 	 * @param message the message.
 	 * @param providedArgs additional arguments.
+	 * @return the result of the invocation.
 	 * @throws Exception raised if no suitable argument resolver can be found,
 	 * or the method raised an exception.
-	 * @return the result of the invocation.
 	 */
 	public Object invoke(Message<?> message, Object... providedArgs) throws Exception {
 		Class<? extends Object> payloadClass = message.getPayload().getClass();
@@ -109,7 +109,7 @@ public class DelegatingInvocableHandler {
 		if (message.getHeaders().get(AmqpHeaders.REPLY_TO) == null) {
 			Expression replyTo = this.handlerSendTo.get(handler);
 			if (replyTo != null) {
-				result = new MessagingMessageListenerAdapter.ResultHolder(result, replyTo);
+				result = new AbstractAdaptableMessageListener.ResultHolder(result, replyTo);
 			}
 		}
 		return result;
@@ -223,6 +223,17 @@ public class DelegatingInvocableHandler {
 	public String getMethodNameFor(Object payload) {
 		InvocableHandlerMethod handlerForPayload = getHandlerForPayload(payload.getClass());
 		return handlerForPayload == null ? "no match" : handlerForPayload.getMethod().toGenericString(); //NOSONAR
+	}
+
+	/**
+	 * Return the method that will be invoked for this payload.
+	 * @param payload the payload.
+	 * @return the method.
+	 * @since 2.0
+	 */
+	public Method getMethodFor(Object payload) {
+		InvocableHandlerMethod handlerForPayload = getHandlerForPayload(payload.getClass());
+		return handlerForPayload == null ? null : handlerForPayload.getMethod();
 	}
 
 }

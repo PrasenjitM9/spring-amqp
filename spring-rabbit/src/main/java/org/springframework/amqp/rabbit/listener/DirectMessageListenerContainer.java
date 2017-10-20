@@ -1,5 +1,5 @@
 /*
- * Copyright 2016 the original author or authors.
+ * Copyright 2016-2017 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -20,9 +20,11 @@ import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
+import java.util.Collections;
 import java.util.Date;
 import java.util.LinkedList;
 import java.util.List;
+import java.util.Objects;
 import java.util.Properties;
 import java.util.Set;
 import java.util.concurrent.CountDownLatch;
@@ -40,19 +42,20 @@ import org.springframework.amqp.AmqpIOException;
 import org.springframework.amqp.ImmediateAcknowledgeAmqpException;
 import org.springframework.amqp.core.Message;
 import org.springframework.amqp.core.MessageProperties;
-import org.springframework.amqp.core.Queue;
 import org.springframework.amqp.rabbit.connection.Connection;
 import org.springframework.amqp.rabbit.connection.ConnectionFactory;
 import org.springframework.amqp.rabbit.connection.ConnectionFactoryUtils;
 import org.springframework.amqp.rabbit.connection.ConsumerChannelRegistry;
 import org.springframework.amqp.rabbit.connection.RabbitResourceHolder;
 import org.springframework.amqp.rabbit.connection.RabbitUtils;
+import org.springframework.amqp.rabbit.connection.SimpleResourceHolder;
 import org.springframework.amqp.rabbit.core.RabbitAdmin;
 import org.springframework.amqp.rabbit.transaction.RabbitTransactionManager;
 import org.springframework.scheduling.TaskScheduler;
 import org.springframework.scheduling.concurrent.ThreadPoolTaskScheduler;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.interceptor.TransactionAttribute;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 import org.springframework.transaction.support.TransactionTemplate;
 import org.springframework.util.Assert;
 import org.springframework.util.CollectionUtils;
@@ -75,13 +78,16 @@ import com.rabbitmq.client.ShutdownSignalException;
  *
  * @author Gary Russell
  * @author Artem Bilan
+ * @author Nicolas Ristock
  *
  * @since 2.0
  *
  */
 public class DirectMessageListenerContainer extends AbstractMessageListenerContainer {
 
-	private static final int DEFAULT_MONITOR_INTERVAL = 10000;
+	private static final int DEFAULT_MONITOR_INTERVAL = 10_000;
+
+	private static final int DEFAULT_ACK_TIMEOUT = 20_000;
 
 	protected final List<SimpleConsumer> consumers = new LinkedList<>(); // NOSONAR
 
@@ -96,6 +102,10 @@ public class DirectMessageListenerContainer extends AbstractMessageListenerConta
 	private boolean taskSchedulerSet;
 
 	private long monitorInterval = DEFAULT_MONITOR_INTERVAL;
+
+	private int messagesPerAck;
+
+	private long ackTimeout = DEFAULT_ACK_TIMEOUT;
 
 	private volatile boolean started;
 
@@ -193,10 +203,27 @@ public class DirectMessageListenerContainer extends AbstractMessageListenerConta
 		super.setMissingQueuesFatal(missingQueuesFatal);
 	}
 
-	@Override
-	public void setQueues(Queue... queues) {
-		Assert.state(!isRunning(), "Cannot set queue names while running, use add/remove");
-		super.setQueues(queues);
+	/**
+	 * Set the number of messages to receive before acknowledging (success).
+	 * A failed message will short-circuit this counter.
+	 * @param messagesPerAck the number of messages.
+	 * @see #setAckTimeout(long)
+	 */
+	public void setMessagesPerAck(int messagesPerAck) {
+		this.messagesPerAck = messagesPerAck;
+	}
+
+	/**
+	 * An approximate timeout; when {@link #setMessagesPerAck(int) messagesPerAck} is
+	 * greater than 1, and this time elapses since the last ack, the pending acks will be
+	 * sent either when the next message arrives, or a short time later if no additional
+	 * messages arrive. In that case, the actual time depends on the
+	 * {@link #setMonitorInterval(long) monitorInterval}.
+	 * @param ackTimeout the timeout in milliseconds (default 20000);
+	 * @see #setMessagesPerAck(int)
+	 */
+	public void setAckTimeout(long ackTimeout) {
+		this.ackTimeout = ackTimeout;
 	}
 
 	@Override
@@ -208,18 +235,6 @@ public class DirectMessageListenerContainer extends AbstractMessageListenerConta
 			throw new AmqpIOException("Failed to add " + Arrays.asList(queueNames), e.getCause());
 		}
 		super.addQueueNames(queueNames);
-	}
-
-	@Override
-	public void addQueues(Queue... queues) {
-		try {
-			addQueues(Arrays.stream(queues)
-					.map(Queue::getName));
-		}
-		catch (AmqpIOException e) {
-			throw new AmqpIOException("Failed to add " + Arrays.asList(queues), e.getCause());
-		}
-		super.addQueues(queues);
 	}
 
 	private void addQueues(Stream<String> queueNameStream) {
@@ -246,21 +261,14 @@ public class DirectMessageListenerContainer extends AbstractMessageListenerConta
 		return super.removeQueueNames(queueNames);
 	}
 
-	@Override
-	public boolean removeQueues(Queue... queues) {
-		removeQueues(Arrays.stream(queues)
-				.map(Queue::getName));
-		return super.removeQueues(queues);
-	}
-
 	private void removeQueues(Stream<String> queueNames) {
 		if (isRunning()) {
 			synchronized (this.consumersMonitor) {
 				checkStartState();
 				queueNames.map(this.consumersByQueue::remove)
-					.filter(consumersOnQueue -> consumersOnQueue != null)
-					.flatMap(Collection::stream)
-					.forEach(this::cancelConsumer);
+						.filter(Objects::nonNull)
+						.flatMap(Collection::stream)
+						.forEach(this::cancelConsumer);
 			}
 		}
 	}
@@ -307,6 +315,9 @@ public class DirectMessageListenerContainer extends AbstractMessageListenerConta
 			threadPoolTaskScheduler.afterPropertiesSet();
 			this.taskScheduler = threadPoolTaskScheduler;
 		}
+		if (this.messagesPerAck > 0) {
+			Assert.state(!isChannelTransacted(), "'messagesPerAck' is not allowed with transactions");
+		}
 	}
 
 	@Override
@@ -328,6 +339,9 @@ public class DirectMessageListenerContainer extends AbstractMessageListenerConta
 	protected void actualStart() throws Exception {
 		this.aborted = false;
 		this.hasStopped = false;
+		if (getPrefetchCount() < this.messagesPerAck) {
+			setPrefetchCount(this.messagesPerAck);
+		}
 		super.doStart();
 		final String[] queueNames = getQueueNames();
 		checkMissingQueues(queueNames);
@@ -353,10 +367,34 @@ public class DirectMessageListenerContainer extends AbstractMessageListenerConta
 					this.lastAlertAt = now;
 				}
 			}
-			this.consumers.stream()
-					.filter(c -> !c.getChannel().isOpen())
-					.collect(Collectors.toList()) // needed to avoid ConcurrentModificationException in cancelConsumer()
+			final List<SimpleConsumer> consumersToCancel;
+			synchronized (this.consumersMonitor) {
+				consumersToCancel = this.consumers.stream()
+						.filter(c -> {
+							boolean open = c.getChannel().isOpen();
+							if (open && this.messagesPerAck > 1) {
+								try {
+									c.ackIfNecessary(now);
+								}
+								catch (IOException e) {
+									this.logger.error("Exception while sending delayed ack", e);
+								}
+							}
+							return !open;
+						})
+						.collect(Collectors.toList());
+			}
+			consumersToCancel
 					.forEach(c -> {
+						try {
+							RabbitUtils.closeMessageConsumer(c.getChannel(),
+									Collections.singletonList(c.getConsumerTag()), isChannelTransacted());
+						}
+						catch (Exception e) {
+							if (logger.isDebugEnabled()) {
+								logger.debug("Error closing consumer " + c, e);
+							}
+						}
 						this.logger.error("Consumer canceled - channel closed " + c);
 						c.cancelConsumer("Consumer " + c + " channel closed");
 					});
@@ -366,7 +404,7 @@ public class DirectMessageListenerContainer extends AbstractMessageListenerConta
 					this.consumersToRestart.clear();
 					if (this.started) {
 						if (restartableConsumers.size() > 0) {
-							redeclareElementsIfNecessary();
+							doRedeclareElementsIfNecessary();
 						}
 						for (SimpleConsumer consumer : restartableConsumers) {
 							if (this.logger.isDebugEnabled() && restartableConsumers.size() > 0) {
@@ -391,12 +429,7 @@ public class DirectMessageListenerContainer extends AbstractMessageListenerConta
 			processMonitorTask();
 		}, this.monitorInterval);
 		if (queueNames.length > 0) {
-			try {
-				redeclareElementsIfNecessary();
-			}
-			catch (Exception e) {
-				this.logger.error("Failed to redeclare elements", e);
-			}
+			doRedeclareElementsIfNecessary();
 			getTaskExecutor().execute(() -> {
 
 				synchronized (this.consumersMonitor) {
@@ -451,6 +484,24 @@ public class DirectMessageListenerContainer extends AbstractMessageListenerConta
 		}
 	}
 
+	protected void doRedeclareElementsIfNecessary() {
+		String routingLookupKey = getRoutingLookupKey();
+		if (routingLookupKey != null) {
+			SimpleResourceHolder.bind(getRoutingConnectionFactory(), routingLookupKey);
+		}
+		try {
+			redeclareElementsIfNecessary();
+		}
+		catch (Exception e) {
+			this.logger.error("Failed to redeclare elements", e);
+		}
+		finally {
+			if (routingLookupKey != null) {
+				SimpleResourceHolder.unbind(getRoutingConnectionFactory());
+			}
+		}
+	}
+
 	/**
 	 * Subclasses can override this to take additional actions when the monitor task runs.
 	 */
@@ -494,13 +545,24 @@ public class DirectMessageListenerContainer extends AbstractMessageListenerConta
 			}
 			return;
 		}
+		String routingLookupKey = getRoutingLookupKey();
+		if (routingLookupKey != null) {
+			SimpleResourceHolder.bind(getRoutingConnectionFactory(), routingLookupKey);
+		}
 		Connection connection = null; // NOSONAR (close)
 		try {
 			connection = getConnectionFactory().createConnection();
 		}
 		catch (Exception e) {
-			this.consumersToRestart.add(new SimpleConsumer(null, null, queue));
-			throw new AmqpConnectException(e);
+			addConsumerToRestart(new SimpleConsumer(null, null, queue));
+				throw e instanceof AmqpConnectException
+						? (AmqpConnectException) e
+						: new AmqpConnectException(e);
+		}
+		finally {
+			if (routingLookupKey != null) {
+				SimpleResourceHolder.unbind(getRoutingConnectionFactory());
+			}
 		}
 		Channel channel = null;
 		SimpleConsumer consumer = null;
@@ -512,12 +574,12 @@ public class DirectMessageListenerContainer extends AbstractMessageListenerConta
 			consumer.consumerTag = channel.basicConsume(queue, getAcknowledgeMode().isAutoAck(),
 					(getConsumerTagStrategy() != null
 							? getConsumerTagStrategy().createConsumerTag(queue) : ""),
-					false, isExclusive(), getConsumerArguments(), consumer);
+					isNoLocal(), isExclusive(), getConsumerArguments(), consumer);
 		}
 		catch (AmqpApplicationContextClosedException e) {
 			throw new AmqpConnectException(e);
 		}
-		catch (IOException e) {
+		catch (IOException | AmqpConnectException e) {
 			RabbitUtils.closeChannel(channel);
 			RabbitUtils.closeConnection(connection);
 
@@ -527,12 +589,21 @@ public class DirectMessageListenerContainer extends AbstractMessageListenerConta
 						"Exclusive consumer failure", e.getCause());
 				publishConsumerFailedEvent("Consumer raised exception, attempting restart", false, e);
 			}
-			else if (this.logger.isDebugEnabled()) {
-				this.logger.debug(
-						"Queue not present or basicConsume failed, scheduling consumer " + consumer + " for restart");
+			else if (e.getCause() instanceof ShutdownSignalException
+					&& RabbitUtils.isPassiveDeclarationChannelClose((ShutdownSignalException) e.getCause())) {
+				this.logger.error("Queue not present, scheduling consumer " + consumer + " for restart", e);
 			}
-			this.consumersToRestart.add(consumer);
-			consumer = null;
+			else if (this.logger.isWarnEnabled()) {
+				this.logger.warn("basicConsume failed, scheduling consumer " + consumer + " for restart", e);
+			}
+
+			if (consumer == null) {
+				addConsumerToRestart(new SimpleConsumer(null, null, queue));
+			}
+			else {
+				addConsumerToRestart(consumer);
+				consumer = null;
+			}
 		}
 		synchronized (this.consumersMonitor) {
 			if (consumer != null) {
@@ -542,16 +613,22 @@ public class DirectMessageListenerContainer extends AbstractMessageListenerConta
 				if (this.logger.isInfoEnabled()) {
 					this.logger.info(consumer + " started");
 				}
+				if (getApplicationEventPublisher() != null) {
+					getApplicationEventPublisher().publishEvent(new AsyncConsumerStartedEvent(this, consumer));
+				}
 			}
 		}
 	}
 
 	@Override
 	protected void doShutdown() {
+		LinkedList<SimpleConsumer> canceledConsumers = null;
 		boolean waitForConsumers = false;
 		synchronized (this.consumersMonitor) {
 			if (this.started || this.aborted) {
-				actualShutDown();
+				// Copy in the same order to avoid ConcurrentModificationException during remove in the cancelConsumer().
+				canceledConsumers = new LinkedList<>(this.consumers);
+				actualShutDown(canceledConsumers);
 				waitForConsumers = true;
 			}
 		}
@@ -562,6 +639,15 @@ public class DirectMessageListenerContainer extends AbstractMessageListenerConta
 				}
 				else {
 					this.logger.info("Consumers not finished.");
+					if (isForceCloseChannel()) {
+						canceledConsumers.forEach(consumer -> {
+							String eventMessage = "Closing channel for unresponsive consumer: " + consumer;
+							if (logger.isWarnEnabled()) {
+								logger.warn(eventMessage);
+							}
+							consumer.cancelConsumer(eventMessage);
+						});
+					}
 				}
 			}
 			catch (InterruptedException e) {
@@ -578,13 +664,13 @@ public class DirectMessageListenerContainer extends AbstractMessageListenerConta
 	}
 
 	/**
-	 * Must hold this.consumersMonitor
+	 * Must hold this.consumersMonitor.
+	 * @param consumers a copy of this.consumers.
 	 */
-	private void actualShutDown() {
+	private void actualShutDown(List<SimpleConsumer> consumers) {
 		Assert.state(getTaskExecutor() != null, "Cannot shut down if not initialized");
 		this.logger.debug("Shutting down");
-		// Copy in the same order to avoid ConcurrentModificationException during remove in the cancelConsumer().
-		new LinkedList<>(this.consumers).forEach(this::cancelConsumer);
+		consumers.forEach(this::cancelConsumer);
 		this.consumers.clear();
 		this.consumersByQueue.clear();
 		this.logger.debug("All consumers canceled");
@@ -599,6 +685,12 @@ public class DirectMessageListenerContainer extends AbstractMessageListenerConta
 			if (this.logger.isDebugEnabled()) {
 				this.logger.debug("Canceling " + consumer);
 			}
+			synchronized (consumer) {
+				consumer.canceled = true;
+				if (this.messagesPerAck > 1) {
+					consumer.ackIfNecessary(0L);
+				}
+			}
 			consumer.getChannel().basicCancel(consumer.getConsumerTag());
 		}
 		catch (IOException e) {
@@ -610,6 +702,12 @@ public class DirectMessageListenerContainer extends AbstractMessageListenerConta
 		}
 	}
 
+	private void addConsumerToRestart(SimpleConsumer consumer) {
+		if (this.started) {
+			this.consumersToRestart.add(consumer);
+		}
+	}
+
 	/**
 	 * Called whenever a consumer is removed.
 	 * @param consumer the consumer.
@@ -618,6 +716,9 @@ public class DirectMessageListenerContainer extends AbstractMessageListenerConta
 		// default empty
 	}
 
+	/**
+	 * The consumer object.
+	 */
 	final class SimpleConsumer extends DefaultConsumer {
 
 		private final Log logger = DirectMessageListenerContainer.this.logger;
@@ -636,11 +737,25 @@ public class DirectMessageListenerContainer extends AbstractMessageListenerConta
 
 		private final boolean isRabbitTxManager = this.transactionManager instanceof RabbitTransactionManager;
 
+		private final int messagesPerAck = DirectMessageListenerContainer.this.messagesPerAck;
+
+		private final long ackTimeout = DirectMessageListenerContainer.this.ackTimeout;
+
+		private int pendingAcks;
+
+		private long lastAck = System.currentTimeMillis();
+
+		private long lastDeliveryComplete = this.lastAck;
+
+		private long deliveryTag;
+
 		private volatile String consumerTag;
 
 		private volatile int epoch;
 
 		private volatile TransactionTemplate transactionTemplate;
+
+		private volatile boolean canceled;
 
 		private SimpleConsumer(Connection connection, Channel channel, String queue) {
 			super(channel);
@@ -698,15 +813,17 @@ public class DirectMessageListenerContainer extends AbstractMessageListenerConta
 								new TransactionTemplate(this.transactionManager, this.transactionAttribute);
 					}
 					this.transactionTemplate.execute(s -> {
-						RabbitResourceHolder resourceHolder = new RabbitResourceHolder(getChannel(), false);
-						resourceHolder.addDeliveryTag(getChannel(), deliveryTag);
-						ConnectionFactoryUtils.bindResourceToTransaction(resourceHolder,
-								this.connectionFactory, true);
+						RabbitResourceHolder resourceHolder = ConnectionFactoryUtils.bindResourceToTransaction(
+								new RabbitResourceHolder(getChannel(), false), this.connectionFactory, true);
+						if (resourceHolder != null) {
+							resourceHolder.addDeliveryTag(getChannel(), deliveryTag);
+						}
 						// unbound in ResourceHolderSynchronization.beforeCompletion()
 						try {
 							callExecuteListener(message, deliveryTag);
 						}
 						catch (RuntimeException e1) {
+							prepareHolderForRollback(resourceHolder, e1);
 							throw e1;
 						}
 						catch (Throwable e2) { //NOSONAR ok to catch Throwable here because we re-throw it below
@@ -715,7 +832,7 @@ public class DirectMessageListenerContainer extends AbstractMessageListenerConta
 						return null;
 					});
 				}
-				catch (Throwable e) {
+				catch (Throwable e) { // NOSONAR - errors are rethrown
 					if (e instanceof WrappedTransactionException) {
 						if (e.getCause() instanceof Error) {
 							throw (Error) e.getCause();
@@ -746,7 +863,9 @@ public class DirectMessageListenerContainer extends AbstractMessageListenerConta
 			}
 			catch (ImmediateAcknowledgeAmqpException e) {
 				if (this.logger.isDebugEnabled()) {
-					this.logger.debug("User requested ack for failed delivery: " + deliveryTag);
+					this.logger.debug("User requested ack for failed delivery '"
+							+ e.getMessage() + "': "
+							+ deliveryTag);
 				}
 				handleAck(deliveryTag, channelLocallyTransacted);
 			}
@@ -761,6 +880,15 @@ public class DirectMessageListenerContainer extends AbstractMessageListenerConta
 					this.logger.error("Failed to invoke listener", e);
 					if (this.transactionManager != null) {
 						if (this.transactionAttribute.rollbackOn(e)) {
+							RabbitResourceHolder resourceHolder = (RabbitResourceHolder) TransactionSynchronizationManager
+									.getResource(getConnectionFactory());
+							if (resourceHolder == null) {
+								/*
+								 * If we don't actually have a transaction, we have to roll back
+								 * manually. See prepareHolderForRollback().
+								 */
+								rollback(deliveryTag, e);
+							}
 							throw e; // encompassing transaction will handle the rollback.
 						}
 						else {
@@ -778,18 +906,46 @@ public class DirectMessageListenerContainer extends AbstractMessageListenerConta
 		}
 
 		private void handleAck(long deliveryTag, boolean channelLocallyTransacted) throws IOException {
+			/*
+			 * If we have a TX Manager, but no TX, act like we are locally transacted.
+			 */
+			boolean isLocallyTransacted =
+					channelLocallyTransacted ||
+							(isChannelTransacted() &&
+									TransactionSynchronizationManager.getResource(this.connectionFactory) == null);
 			try {
 				if (this.ackRequired) {
-					if (!isChannelTransacted() || channelLocallyTransacted) {
+					if (this.messagesPerAck > 1) {
+						synchronized (this) {
+							this.deliveryTag = deliveryTag;
+							this.pendingAcks++;
+							this.lastDeliveryComplete = System.currentTimeMillis();
+							ackIfNecessary(this.lastDeliveryComplete);
+						}
+					}
+					else if (!isChannelTransacted() || isLocallyTransacted) {
 						getChannel().basicAck(deliveryTag, false);
 					}
 				}
-				if (channelLocallyTransacted) {
+				if (isLocallyTransacted) {
 					RabbitUtils.commitIfNecessary(getChannel());
 				}
 			}
 			catch (Exception e) {
 				this.logger.error("Error acking", e);
+			}
+		}
+
+		/**
+		 * Send the ack if we've reached the threshold (count or time) or immediately if
+		 * we are processing deliveries after a cancel has been issued.
+		 * @param now the current time.
+		 * @throws IOException if one occurs.
+		 */
+		private synchronized void ackIfNecessary(long now) throws IOException {
+			if (this.pendingAcks >= this.messagesPerAck || (
+					this.pendingAcks > 0 && (now - this.lastAck > this.ackTimeout || this.canceled))) {
+				sendAck(now);
 			}
 		}
 
@@ -799,6 +955,13 @@ public class DirectMessageListenerContainer extends AbstractMessageListenerConta
 			}
 			if (this.ackRequired) {
 				try {
+					if (this.messagesPerAck > 1) {
+						synchronized (this) {
+							if (this.pendingAcks > 0) {
+								sendAck(System.currentTimeMillis());
+							}
+						}
+					}
 					getChannel().basicNack(deliveryTag, true,
 							RabbitUtils.shouldRequeue(isDefaultRequeueRejected(), e, this.logger));
 				}
@@ -809,6 +972,12 @@ public class DirectMessageListenerContainer extends AbstractMessageListenerConta
 			if (isChannelTransacted()) {
 				RabbitUtils.commitIfNecessary(getChannel());
 			}
+		}
+
+		protected synchronized void sendAck(long now) throws IOException {
+			getChannel().basicAck(this.deliveryTag, true);
+			this.lastAck = now;
+			this.pendingAcks = 0;
 		}
 
 		@Override
@@ -841,13 +1010,13 @@ public class DirectMessageListenerContainer extends AbstractMessageListenerConta
 					list.remove(this);
 				}
 				DirectMessageListenerContainer.this.consumers.remove(this);
-				DirectMessageListenerContainer.this.consumersToRestart.add(this);
+				addConsumerToRestart(this);
 			}
 			finalizeConsumer();
 		}
 
 		private void finalizeConsumer() {
-			RabbitUtils.setPhysicalCloseRequired(true);
+			RabbitUtils.setPhysicalCloseRequired(getChannel(), true);
 			RabbitUtils.closeChannel(getChannel());
 			RabbitUtils.closeConnection(this.connection);
 			DirectMessageListenerContainer.this.cancellationLock.release(this);

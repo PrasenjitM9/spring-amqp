@@ -1,5 +1,5 @@
 /*
- * Copyright 2016 the original author or authors.
+ * Copyright 2016-2017 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -18,11 +18,12 @@ package org.springframework.amqp.rabbit.log4j2;
 
 import java.io.Serializable;
 import java.io.UnsupportedEncodingException;
+import java.net.URI;
 import java.nio.charset.Charset;
 import java.util.Calendar;
 import java.util.Map;
 import java.util.Map.Entry;
-import java.util.Set;
+import java.util.Optional;
 import java.util.Timer;
 import java.util.TimerTask;
 import java.util.UUID;
@@ -46,6 +47,7 @@ import org.apache.logging.log4j.core.config.plugins.PluginConfiguration;
 import org.apache.logging.log4j.core.config.plugins.PluginElement;
 import org.apache.logging.log4j.core.config.plugins.PluginFactory;
 import org.apache.logging.log4j.core.layout.PatternLayout;
+import org.apache.logging.log4j.core.util.Integers;
 
 import org.springframework.amqp.AmqpException;
 import org.springframework.amqp.core.DirectExchange;
@@ -65,6 +67,9 @@ import org.springframework.amqp.rabbit.core.RabbitTemplate;
 import org.springframework.amqp.rabbit.support.LogAppenderUtils;
 import org.springframework.core.io.Resource;
 import org.springframework.core.io.support.PathMatchingResourcePatternResolver;
+import org.springframework.retry.RetryPolicy;
+import org.springframework.retry.policy.SimpleRetryPolicy;
+import org.springframework.retry.support.RetryTemplate;
 
 import com.rabbitmq.client.ConnectionFactory;
 
@@ -74,6 +79,8 @@ import com.rabbitmq.client.ConnectionFactory;
  * @author Gary Russell
  * @author Stephen Oakey
  * @author Artem Bilan
+ * @author Dominique Villard
+ * @author Nicolas Ristock
  *
  * @since 1.6
  */
@@ -86,14 +93,19 @@ public class AmqpAppender extends AbstractAppender {
 	public static final String APPLICATION_ID = "applicationId";
 
 	/**
-	 * Key name for the logger category name in the message properties
+	 * Key name for the logger category name in the message properties.
 	 */
 	public static final String CATEGORY_NAME = "categoryName";
 
 	/**
-	 * Key name for the logger level name in the message properties
+	 * Key name for the logger level name in the message properties.
 	 */
 	public static final String CATEGORY_LEVEL = "level";
+
+	/**
+	 * Key name for the thread name in the message properties.
+	 */
+	public static final String THREAD_NAME = "thread";
 
 	/**
 	 * Tha manager.
@@ -128,8 +140,9 @@ public class AmqpAppender extends AbstractAppender {
 			@PluginElement("Layout") Layout<? extends Serializable> layout,
 			@PluginElement("Filter") Filter filter,
 			@PluginAttribute("ignoreExceptions") boolean ignoreExceptions,
+			@PluginAttribute("uri") URI uri,
 			@PluginAttribute("host") String host,
-			@PluginAttribute("port") int port,
+			@PluginAttribute("port") String port,
 			@PluginAttribute("addresses") String addresses,
 			@PluginAttribute("user") String user,
 			@PluginAttribute("password") String password,
@@ -157,6 +170,7 @@ public class AmqpAppender extends AbstractAppender {
 			@PluginAttribute("contentType") String contentType,
 			@PluginAttribute("contentEncoding") String contentEncoding,
 			@PluginAttribute("clientConnectionProperties") String clientConnectionProperties,
+			@PluginAttribute("async") boolean async,
 			@PluginAttribute("charset") String charset) {
 		if (name == null) {
 			LOGGER.error("No name for AmqpAppender");
@@ -166,8 +180,9 @@ public class AmqpAppender extends AbstractAppender {
 			theLayout = PatternLayout.createDefaultLayout();
 		}
 		AmqpManager manager = new AmqpManager(configuration.getLoggerContext(), name);
+		manager.uri = uri;
 		manager.host = host;
-		manager.port = port;
+		Optional.ofNullable(port).ifPresent(v -> manager.port = Integers.parseInt(v));
 		manager.addresses = addresses;
 		manager.username = user;
 		manager.password = password;
@@ -196,6 +211,7 @@ public class AmqpAppender extends AbstractAppender {
 		manager.contentEncoding = contentEncoding;
 		manager.clientConnectionProperties = clientConnectionProperties;
 		manager.charset = charset;
+		manager.async = async;
 		AmqpAppender appender = new AmqpAppender(name, filter, theLayout, ignoreExceptions, manager);
 		if (manager.activateOptions()) {
 			appender.startSenders();
@@ -208,14 +224,29 @@ public class AmqpAppender extends AbstractAppender {
 	 * Submit the required number of senders into the pool.
 	 */
 	private void startSenders() {
-		for (int i = 0; i < this.manager.senderPoolSize; i++) {
-			this.manager.senderPool.submit(new EventSender());
+		this.rabbitTemplate.setConnectionFactory(this.manager.connectionFactory);
+		if (this.manager.async) {
+			for (int i = 0; i < this.manager.senderPoolSize; i++) {
+				this.manager.senderPool.submit(new EventSender());
+			}
+		}
+		else if (this.manager.maxSenderRetries > 0) {
+			RetryTemplate retryTemplate = new RetryTemplate();
+			RetryPolicy retryPolicy = new SimpleRetryPolicy(this.manager.maxSenderRetries);
+			retryTemplate.setRetryPolicy(retryPolicy);
+			this.rabbitTemplate.setRetryTemplate(retryTemplate);
 		}
 	}
 
 	@Override
 	public void append(LogEvent event) {
-		this.events.add(new Event(event, event.getContextData().toMap()));
+		Event appenderEvent = new Event(event, event.getContextData().toMap());
+		if (this.manager.async) {
+			this.events.add(appenderEvent);
+		}
+		else {
+			sendEvent(appenderEvent, appenderEvent.getProperties());
+		}
 	}
 
 	/**
@@ -229,6 +260,107 @@ public class AmqpAppender extends AbstractAppender {
 		return message;
 	}
 
+	private void sendEvent(Event event, Map<?, ?> properties) {
+		LogEvent logEvent = event.getEvent();
+		String name = logEvent.getLoggerName();
+		Level level = logEvent.getLevel();
+
+		MessageProperties amqpProps = new MessageProperties();
+		amqpProps.setDeliveryMode(this.manager.deliveryMode);
+		amqpProps.setContentType(this.manager.contentType);
+		if (null != this.manager.contentEncoding) {
+			amqpProps.setContentEncoding(this.manager.contentEncoding);
+		}
+		amqpProps.setHeader(CATEGORY_NAME, name);
+		amqpProps.setHeader(THREAD_NAME, logEvent.getThreadName());
+		amqpProps.setHeader(CATEGORY_LEVEL, level.toString());
+		if (this.manager.generateId) {
+			amqpProps.setMessageId(UUID.randomUUID().toString());
+		}
+
+		// Set applicationId, if we're using one
+		if (null != this.manager.applicationId) {
+			amqpProps.setAppId(this.manager.applicationId);
+		}
+
+		// Set timestamp
+		Calendar tstamp = Calendar.getInstance();
+		tstamp.setTimeInMillis(logEvent.getTimeMillis());
+		amqpProps.setTimestamp(tstamp.getTime());
+
+		// Copy properties in from MDC
+		for (Entry<?, ?> entry : properties.entrySet()) {
+			amqpProps.setHeader(entry.getKey().toString(), entry.getValue());
+		}
+		if (logEvent.getSource() != null) {
+			amqpProps.setHeader(
+					"location",
+					String.format("%s.%s()[%s]", logEvent.getSource().getClassName(),
+							logEvent.getSource().getMethodName(),
+							logEvent.getSource().getLineNumber()));
+		}
+
+		StringBuilder msgBody;
+		String routingKey;
+
+		// Send a message
+		try {
+			synchronized (this.layoutMutex) {
+				msgBody = new StringBuilder(new String(getLayout().toByteArray(logEvent), "UTF-8"));
+				routingKey = new String(this.manager.routingKeyLayout.toByteArray(logEvent),
+						"UTF-8");
+			}
+			Message message = null;
+			if (this.manager.charset != null) {
+				try {
+					message = new Message(msgBody.toString().getBytes(this.manager.charset),
+							amqpProps);
+				}
+				catch (UnsupportedEncodingException e) { /* fall back to default */ }
+			}
+			if (message == null) {
+				message = new Message(msgBody.toString().getBytes(), amqpProps); //NOSONAR (default charset)
+			}
+			message = postProcessMessageBeforeSend(message, event);
+			this.rabbitTemplate.send(this.manager.exchangeName, routingKey, message);
+		}
+		catch (AmqpException e) {
+			int retries = event.incrementRetries();
+			if (this.manager.async && retries < this.manager.maxSenderRetries) {
+				// Schedule a retry based on the number of times I've tried to re-send this
+				this.manager.retryTimer.schedule(new TimerTask() {
+
+					@Override
+					public void run() {
+						AmqpAppender.this.events.add(event);
+					}
+
+				}, (long) (Math.pow(retries, Math.log(retries)) * 1000));
+			}
+			else {
+				getHandler().error("Could not send log message " + logEvent.getMessage()
+						+ " after " + this.manager.maxSenderRetries + " retries", logEvent, e);
+			}
+		}
+		catch (Exception e) {
+			getHandler().error("Could not send log message " + logEvent.getMessage(), logEvent, e);
+		}
+	}
+
+	@Override
+	protected boolean stop(long timeout, TimeUnit timeUnit, boolean changeLifeCycleState) {
+		boolean stopped = super.stop(timeout, timeUnit, changeLifeCycleState);
+		return stopped & this.manager.stop(timeout, timeUnit);
+	}
+
+	/**
+	 * Return the number of events waiting to be sent.
+	 * @return the number of events waiting to be sent.
+	 */
+	public int getQueuedEventCount() {
+		return this.events.size();
+	}
+
 	/**
 	 * Helper class to actually send LoggingEvents asynchronously.
 	 */
@@ -237,96 +369,10 @@ public class AmqpAppender extends AbstractAppender {
 		@Override
 		public void run() {
 			try {
-				RabbitTemplate rabbitTemplate = AmqpAppender.this.rabbitTemplate;
-				rabbitTemplate.setConnectionFactory(AmqpAppender.this.manager.connectionFactory);
+				// We leave the loop when thread is interrupted by the ExecutorService.shutdownNow()
 				while (true) {
 					final Event event = AmqpAppender.this.events.take();
-					LogEvent logEvent = event.getEvent();
-
-					String name = logEvent.getLoggerName();
-					Level level = logEvent.getLevel();
-
-					MessageProperties amqpProps = new MessageProperties();
-					amqpProps.setDeliveryMode(AmqpAppender.this.manager.deliveryMode);
-					amqpProps.setContentType(AmqpAppender.this.manager.contentType);
-					if (null != AmqpAppender.this.manager.contentEncoding) {
-						amqpProps.setContentEncoding(AmqpAppender.this.manager.contentEncoding);
-					}
-					amqpProps.setHeader(CATEGORY_NAME, name);
-					amqpProps.setHeader(CATEGORY_LEVEL, level.toString());
-					if (AmqpAppender.this.manager.generateId) {
-						amqpProps.setMessageId(UUID.randomUUID().toString());
-					}
-
-					// Set applicationId, if we're using one
-					if (null != AmqpAppender.this.manager.applicationId) {
-						amqpProps.setAppId(AmqpAppender.this.manager.applicationId);
-					}
-
-					// Set timestamp
-					Calendar tstamp = Calendar.getInstance();
-					tstamp.setTimeInMillis(logEvent.getTimeMillis());
-					amqpProps.setTimestamp(tstamp.getTime());
-
-					// Copy properties in from MDC
-					@SuppressWarnings("rawtypes")
-					Map props = event.getProperties();
-					@SuppressWarnings("unchecked")
-					Set<Entry<?, ?>> entrySet = props.entrySet();
-					for (Entry<?, ?> entry : entrySet) {
-						amqpProps.setHeader(entry.getKey().toString(), entry.getValue());
-					}
-					if (logEvent.getSource() != null) {
-						amqpProps.setHeader(
-								"location",
-								String.format("%s.%s()[%s]", logEvent.getSource().getClassName(),
-										logEvent.getSource().getMethodName(),
-										logEvent.getSource().getLineNumber()));
-					}
-
-					StringBuilder msgBody;
-					String routingKey;
-
-					// Send a message
-					try {
-						synchronized (AmqpAppender.this.layoutMutex) {
-							msgBody = new StringBuilder(new String(getLayout().toByteArray(logEvent), "UTF-8"));
-							routingKey = new String(AmqpAppender.this.manager.routingKeyLayout.toByteArray(logEvent),
-									"UTF-8");
-						}
-						Message message = null;
-						if (AmqpAppender.this.manager.charset != null) {
-							try {
-								message = new Message(msgBody.toString().getBytes(AmqpAppender.this.manager.charset),
-										amqpProps);
-							}
-							catch (UnsupportedEncodingException e) { /* fall back to default */ }
-						}
-						if (message == null) {
-							message = new Message(msgBody.toString().getBytes(), amqpProps); //NOSONAR (default charset)
-						}
-						message = postProcessMessageBeforeSend(message, event);
-						rabbitTemplate.send(AmqpAppender.this.manager.exchangeName, routingKey, message);
-					}
-					catch (AmqpException e) {
-						int retries = event.incrementRetries();
-						if (retries < AmqpAppender.this.manager.maxSenderRetries) {
-							// Schedule a retry based on the number of times I've tried to re-send this
-							AmqpAppender.this.manager.retryTimer.schedule(new TimerTask() {
-								@Override
-								public void run() {
-									AmqpAppender.this.events.add(event);
-								}
-							}, (long) (Math.pow(retries, Math.log(retries)) * 1000));
-						}
-						else {
-							getHandler().error("Could not send log message " + logEvent.getMessage()
-									+ " after " + AmqpAppender.this.manager.maxSenderRetries + " retries", logEvent, e);
-						}
-					}
-					catch (Exception e) {
-						getHandler().error("Could not send log message " + logEvent.getMessage(), logEvent, e);
-					}
+					sendEvent(event, event.getProperties());
 				}
 			}
 			catch (InterruptedException e) {
@@ -338,16 +384,15 @@ public class AmqpAppender extends AbstractAppender {
 	/**
 	 * Helper class to encapsulate a LoggingEvent, its MDC properties, and the number of retries.
 	 */
-	@SuppressWarnings("rawtypes")
 	protected static class Event {
 
 		private final LogEvent event;
 
-		private final Map properties;
+		private final Map<?, ?> properties;
 
 		private final AtomicInteger retries = new AtomicInteger(0);
 
-		public Event(LogEvent event, Map properties) {
+		public Event(LogEvent event, Map<?, ?> properties) {
 			this.event = event;
 			this.properties = properties;
 		}
@@ -356,7 +401,7 @@ public class AmqpAppender extends AbstractAppender {
 			return this.event;
 		}
 
-		public Map getProperties() {
+		public Map<?, ?> getProperties() {
 			return this.properties;
 		}
 
@@ -366,7 +411,15 @@ public class AmqpAppender extends AbstractAppender {
 
 	}
 
+	/**
+	 * Manager class for the appender.
+	 */
 	protected static class AmqpManager extends AbstractManager {
+
+		/**
+		 * True to send events on separate threads.
+		 */
+		private boolean async;
 
 		/**
 		 * Name of the exchange to publish log events to.
@@ -411,7 +464,12 @@ public class AmqpAppender extends AbstractAppender {
 		/**
 		 * RabbitMQ host to connect to.
 		 */
-		private String host = "localhost";
+		private URI uri;
+
+		/**
+		 * RabbitMQ host to connect to.
+		 */
+		private String host;
 
 		/**
 		 * A comma-delimited list of broker addresses: host:port[,host:port]*.
@@ -421,22 +479,22 @@ public class AmqpAppender extends AbstractAppender {
 		/**
 		 * RabbitMQ virtual host to connect to.
 		 */
-		private String virtualHost = "/";
+		private String virtualHost;
 
 		/**
 		 * RabbitMQ port to connect to.
 		 */
-		private int port = 5672;
+		private Integer port;
 
 		/**
 		 * RabbitMQ user to connect as.
 		 */
-		private String username = "guest";
+		private String username;
 
 		/**
 		 * RabbitMQ password for this user.
 		 */
-		private String password = "guest";
+		private String password;
 
 		/**
 		 * Use an SSL connection.
@@ -539,9 +597,12 @@ public class AmqpAppender extends AbstractAppender {
 		private boolean activateOptions() {
 			ConnectionFactory rabbitConnectionFactory = createRabbitConnectionFactory();
 			if (rabbitConnectionFactory != null) {
-				this.routingKeyLayout = PatternLayout.createLayout(this.routingKeyPattern
-						.replaceAll("%X\\{applicationId\\}", this.applicationId),
-						null, null, null, Charset.forName(this.charset), false, true, null, null);
+				this.routingKeyLayout = PatternLayout.newBuilder()
+						.withPattern(this.routingKeyPattern.replaceAll("%X\\{applicationId\\}", this.applicationId))
+						.withCharset(Charset.forName(this.charset))
+						.withAlwaysWriteExceptions(false)
+						.withNoConsoleNoAnsi(true)
+						.build();
 				this.connectionFactory = new CachingConnectionFactory(createRabbitConnectionFactory());
 				if (this.addresses != null) {
 					this.connectionFactory.setAddresses(this.addresses);
@@ -583,11 +644,15 @@ public class AmqpAppender extends AbstractAppender {
 		 * @param factoryBean the {@link RabbitConnectionFactoryBean}.
 		 */
 		protected void configureRabbitConnectionFactory(RabbitConnectionFactoryBean factoryBean) {
-			factoryBean.setHost(this.host);
-			factoryBean.setPort(this.port);
-			factoryBean.setUsername(this.username);
-			factoryBean.setPassword(this.password);
-			factoryBean.setVirtualHost(this.virtualHost);
+
+			Optional.ofNullable(this.host).ifPresent(factoryBean::setHost);
+			Optional.ofNullable(this.port).ifPresent(factoryBean::setPort);
+			Optional.ofNullable(this.username).ifPresent(factoryBean::setUsername);
+			Optional.ofNullable(this.password).ifPresent(factoryBean::setPassword);
+			Optional.ofNullable(this.virtualHost).ifPresent(factoryBean::setVirtualHost);
+			// overrides all preceding items when set
+			Optional.ofNullable(this.uri).ifPresent(factoryBean::setUri);
+
 			if (this.useSsl) {
 				factoryBean.setUseSSL(true);
 				if (this.sslAlgorithm != null) {

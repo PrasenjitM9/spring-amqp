@@ -1,5 +1,5 @@
 /*
- * Copyright 2016 the original author or authors.
+ * Copyright 2016-2017 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,14 +16,19 @@
 
 package org.springframework.amqp.rabbit.log4j2;
 
+import static org.hamcrest.Matchers.instanceOf;
+import static org.hamcrest.Matchers.is;
+import static org.hamcrest.Matchers.startsWith;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
+import static org.junit.Assert.assertNull;
+import static org.junit.Assert.assertThat;
 import static org.junit.Assert.assertTrue;
-import static org.mockito.Matchers.any;
-import static org.mockito.Matchers.anyBoolean;
-import static org.mockito.Matchers.anyString;
-import static org.mockito.Matchers.eq;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyBoolean;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
@@ -58,6 +63,8 @@ import org.springframework.test.util.ReflectionTestUtils;
  * @author Gary Russell
  * @author Stephen Oakey
  * @author Artem Bilan
+ * @author Dominique Villard
+ * @author Nicolas Ristock
  *
  * @since 1.6
  */
@@ -81,7 +88,7 @@ public class AmqpAppenderTests {
 		LOGGER_CONTEXT.setConfigLocation(ORIGINAL_LOGGER_CONFIG);
 		LOGGER_CONTEXT.reconfigure();
 		brokerRunning.deleteQueues("log4jTest", "log4j2Test");
-		brokerRunning.deleteExchanges("log4j2Test");
+		brokerRunning.deleteExchanges("log4j2Test", "log4j2Test_uri");
 	}
 
 	@Test
@@ -96,10 +103,21 @@ public class AmqpAppenderTests {
 		admin.declareBinding(BindingBuilder.bind(queue).to(fanout));
 		Logger logger = LogManager.getLogger("foo");
 		logger.info("foo");
+		logger.info("bar");
 		template.setReceiveTimeout(10000);
 		Message received = template.receive(queue.getName());
 		assertNotNull(received);
 		assertEquals("testAppId.foo.INFO", received.getMessageProperties().getReceivedRoutingKey());
+		// Cross-platform string comparison. Windows expects \n\r in the end of line
+		assertThat(new String(received.getBody()), startsWith("foo"));
+		received = template.receive(queue.getName());
+		assertNotNull(received);
+		assertEquals("testAppId.foo.INFO", received.getMessageProperties().getReceivedRoutingKey());
+		assertThat(new String(received.getBody()), startsWith("bar"));
+		Object threadName = received.getMessageProperties().getHeaders().get("thread");
+		assertNotNull(threadName);
+		assertThat(threadName, instanceOf(String.class));
+		assertThat(threadName, is(Thread.currentThread().getName()));
 	}
 
 	@Test
@@ -117,6 +135,7 @@ public class AmqpAppenderTests {
 		// contentType="text/plain" contentEncoding="UTF-8" generateId="true"
 		// deliveryMode="NON_PERSISTENT"
 		// charset="UTF-8"
+		// async="false"
 		// senderPoolSize="3" maxSenderRetries="5">
 		// </RabbitMQ>
 		assertEquals("localhost:5672", TestUtils.getPropertyValue(manager, "addresses"));
@@ -139,6 +158,23 @@ public class AmqpAppenderTests {
 		assertEquals("UTF-8", TestUtils.getPropertyValue(manager, "contentEncoding"));
 		assertEquals(3, TestUtils.getPropertyValue(manager, "senderPoolSize"));
 		assertEquals(5, TestUtils.getPropertyValue(manager, "maxSenderRetries"));
+		// change the property to true and this fails and test() randomly fails too.
+		assertFalse(TestUtils.getPropertyValue(manager, "async", Boolean.class));
+	}
+
+	@Test
+	public void testUriProperties() {
+		Logger logger = LogManager.getLogger("bar");
+		AmqpAppender appender = (AmqpAppender) TestUtils.getPropertyValue(logger, "context.configuration.appenders",
+				Map.class).get("rabbitmq_uri");
+		Object manager = TestUtils.getPropertyValue(appender, "manager");
+		assertEquals("amqp://guest:guest@localhost:5672/", TestUtils.getPropertyValue(manager, "uri").toString());
+
+		assertNull(TestUtils.getPropertyValue(manager, "host"));
+		assertNull(TestUtils.getPropertyValue(manager, "port"));
+		assertNull(TestUtils.getPropertyValue(manager, "username"));
+		assertNull(TestUtils.getPropertyValue(manager, "password"));
+		assertNull(TestUtils.getPropertyValue(manager, "virtualHost"));
 	}
 
 	@Test
@@ -277,11 +313,11 @@ public class AmqpAppenderTests {
 	}
 
 	private void verifyDefaultHostProperties(RabbitConnectionFactoryBean bean) {
-		verify(bean).setHost("localhost");
-		verify(bean).setPort(5672);
-		verify(bean).setUsername("guest");
-		verify(bean).setPassword("guest");
-		verify(bean).setVirtualHost("/");
+		verify(bean, never()).setHost("localhost");
+		verify(bean, never()).setPort(5672);
+		verify(bean, never()).setUsername("guest");
+		verify(bean, never()).setPassword("guest");
+		verify(bean, never()).setVirtualHost("/");
 	}
 
 }

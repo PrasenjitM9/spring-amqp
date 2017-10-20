@@ -1,5 +1,5 @@
 /*
- * Copyright 2016 the original author or authors.
+ * Copyright 2016-2017 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -17,13 +17,16 @@
 package org.springframework.amqp.rabbit.logback;
 
 import static org.junit.Assert.assertFalse;
-import static org.mockito.Matchers.any;
-import static org.mockito.Matchers.anyBoolean;
-import static org.mockito.Matchers.anyString;
-import static org.mockito.Matchers.eq;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyBoolean;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
+
+import java.net.URI;
+import java.net.URISyntaxException;
 
 import org.junit.Test;
 
@@ -51,7 +54,7 @@ public class AmqpAppenderTests {
 	}
 
 	@Test
-	public void testCustomHostInformation() {
+	public void testCustomHostInformation() throws URISyntaxException {
 		AmqpAppender appender = new AmqpAppender();
 
 		String host = "rabbitmq.com";
@@ -59,12 +62,14 @@ public class AmqpAppenderTests {
 		String username = "user";
 		String password = "password";
 		String virtualHost = "vhost";
+		URI uri = new URI("amqps://user:password@rabbitmq.com/vhost");
 
 		appender.setHost(host);
 		appender.setPassword(password);
 		appender.setPort(port);
 		appender.setUsername(username);
 		appender.setVirtualHost(virtualHost);
+		appender.setUri(uri);
 
 		RabbitConnectionFactoryBean bean = mock(RabbitConnectionFactoryBean.class);
 		appender.configureRabbitConnectionFactory(bean);
@@ -74,6 +79,7 @@ public class AmqpAppenderTests {
 		verify(bean).setUsername(username);
 		verify(bean).setPassword(password);
 		verify(bean).setVirtualHost(virtualHost);
+		verify(bean).setUri(uri);
 	}
 
 	@Test
@@ -184,11 +190,11 @@ public class AmqpAppenderTests {
 	}
 
 	private void verifyDefaultHostProperties(RabbitConnectionFactoryBean bean) {
-		verify(bean).setHost("localhost");
-		verify(bean).setPort(5672);
-		verify(bean).setUsername("guest");
-		verify(bean).setPassword("guest");
-		verify(bean).setVirtualHost("/");
+		verify(bean, never()).setHost("localhost");
+		verify(bean, never()).setPort(5672);
+		verify(bean, never()).setUsername("guest");
+		verify(bean, never()).setPassword("guest");
+		verify(bean, never()).setVirtualHost("/");
 	}
 
 }

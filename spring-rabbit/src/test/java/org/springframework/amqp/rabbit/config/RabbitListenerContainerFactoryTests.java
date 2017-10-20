@@ -1,5 +1,5 @@
 /*
- * Copyright 2002-2015 the original author or authors.
+ * Copyright 2002-2017 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -17,10 +17,12 @@
 package org.springframework.amqp.rabbit.config;
 
 
+import static org.junit.Assert.assertArrayEquals;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertSame;
 import static org.mockito.Mockito.mock;
 
+import java.util.List;
 import java.util.concurrent.Executor;
 
 import org.aopalliance.aop.Advice;
@@ -30,6 +32,7 @@ import org.junit.rules.ExpectedException;
 
 import org.springframework.amqp.core.AcknowledgeMode;
 import org.springframework.amqp.core.MessageListener;
+import org.springframework.amqp.core.MessagePostProcessor;
 import org.springframework.amqp.rabbit.connection.ConnectionFactory;
 import org.springframework.amqp.rabbit.listener.AbstractMessageListenerContainer;
 import org.springframework.amqp.rabbit.listener.DirectMessageListenerContainer;
@@ -47,6 +50,8 @@ import org.springframework.util.backoff.ExponentialBackOff;
 /**
  * @author Stephane Nicoll
  * @author Artem Bilan
+ * @author Joris Kuipers
+ *
  */
 public class RabbitListenerContainerFactoryTests {
 
@@ -84,6 +89,7 @@ public class RabbitListenerContainerFactoryTests {
 		Executor executor = mock(Executor.class);
 		PlatformTransactionManager transactionManager = mock(PlatformTransactionManager.class);
 		Advice advice = mock(Advice.class);
+		MessagePostProcessor afterReceivePostProcessor = mock(MessagePostProcessor.class);
 
 		setBasicConfig(this.factory);
 		this.factory.setTaskExecutor(executor);
@@ -102,6 +108,9 @@ public class RabbitListenerContainerFactoryTests {
 		BackOff recoveryBackOff = new ExponentialBackOff();
 		this.factory.setRecoveryBackOff(recoveryBackOff);
 		this.factory.setMissingQueuesFatal(true);
+		this.factory.setAfterReceivePostProcessors(afterReceivePostProcessor);
+
+		assertArrayEquals(new Advice[] {advice}, this.factory.getAdviceChain());
 
 		SimpleRabbitListenerEndpoint endpoint = new SimpleRabbitListenerEndpoint();
 
@@ -130,6 +139,9 @@ public class RabbitListenerContainerFactoryTests {
 		assertEquals(true, fieldAccessor.getPropertyValue("missingQueuesFatal"));
 		assertEquals(messageListener, container.getMessageListener());
 		assertEquals("myQueue", container.getQueueNames()[0]);
+		List<?> actualAfterReceivePostProcessors = (List<?>) fieldAccessor.getPropertyValue("afterReceivePostProcessors");
+		assertEquals("Wrong number of afterReceivePostProcessors", 1, actualAfterReceivePostProcessors.size());
+		assertSame("Wrong advice", afterReceivePostProcessor, actualAfterReceivePostProcessors.get(0));
 	}
 
 	@Test
@@ -138,6 +150,7 @@ public class RabbitListenerContainerFactoryTests {
 		TaskScheduler scheduler = mock(TaskScheduler.class);
 		PlatformTransactionManager transactionManager = mock(PlatformTransactionManager.class);
 		Advice advice = mock(Advice.class);
+		MessagePostProcessor afterReceivePostProcessor = mock(MessagePostProcessor.class);
 
 		setBasicConfig(this.direct);
 		this.direct.setTaskExecutor(executor);
@@ -152,6 +165,9 @@ public class RabbitListenerContainerFactoryTests {
 		this.direct.setTaskScheduler(scheduler);
 		this.direct.setMonitorInterval(1234L);
 		this.direct.setConsumersPerQueue(42);
+		this.direct.setAfterReceivePostProcessors(afterReceivePostProcessor);
+
+		assertArrayEquals(new Advice[] {advice}, this.direct.getAdviceChain());
 
 		SimpleRabbitListenerEndpoint endpoint = new SimpleRabbitListenerEndpoint();
 
@@ -176,6 +192,9 @@ public class RabbitListenerContainerFactoryTests {
 		assertSame(scheduler, fieldAccessor.getPropertyValue("taskScheduler"));
 		assertEquals(1234L, fieldAccessor.getPropertyValue("monitorInterval"));
 		assertEquals(42, fieldAccessor.getPropertyValue("consumersPerQueue"));
+		List<?> actualAfterReceivePostProcessors = (List<?>) fieldAccessor.getPropertyValue("afterReceivePostProcessors");
+		assertEquals("Wrong number of afterReceivePostProcessors", 1, actualAfterReceivePostProcessors.size());
+		assertSame("Wrong afterReceivePostProcessor", afterReceivePostProcessor, actualAfterReceivePostProcessors.get(0));
 	}
 
 	private void setBasicConfig(AbstractRabbitListenerContainerFactory<?> factory) {

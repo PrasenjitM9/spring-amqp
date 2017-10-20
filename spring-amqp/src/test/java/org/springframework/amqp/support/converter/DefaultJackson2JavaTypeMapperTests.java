@@ -1,5 +1,5 @@
 /*
- * Copyright 2002-2016 the original author or authors.
+ * Copyright 2002-2017 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -27,10 +27,11 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.Map;
 
+import org.junit.Before;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.mockito.Spy;
-import org.mockito.runners.MockitoJUnitRunner;
+import org.mockito.junit.MockitoJUnitRunner;
 
 import org.springframework.amqp.core.MessageProperties;
 
@@ -44,10 +45,12 @@ import com.fasterxml.jackson.databind.type.TypeFactory;
  * @author Sam Nelson
  * @author Andreas Asplund
  * @author Gary Russell
+ * @author Artem Bilan
  */
 
 @RunWith(MockitoJUnitRunner.class)
 public class DefaultJackson2JavaTypeMapperTests {
+
 	@Spy
 	DefaultJackson2JavaTypeMapper javaTypeMapper = new DefaultJackson2JavaTypeMapper();
 
@@ -58,6 +61,11 @@ public class DefaultJackson2JavaTypeMapperTests {
 
 	@SuppressWarnings("rawtypes")
 	private final Class<HashMap> mapClass = HashMap.class;
+
+	@Before
+	public void setup() {
+		this.javaTypeMapper.setTrustedPackages("org.springframework.amqp.support.converter");
+	}
 
 	@Test
 	public void getAnObjectWhenClassIdNotPresent() {

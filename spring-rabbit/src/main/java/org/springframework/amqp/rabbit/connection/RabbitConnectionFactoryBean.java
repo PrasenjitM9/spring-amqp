@@ -1,5 +1,5 @@
 /*
- * Copyright 2002-2016 the original author or authors.
+ * Copyright 2002-2017 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -68,6 +68,7 @@ import com.rabbitmq.client.impl.nio.NioParams;
  * @author Heath Abelson
  * @author Arnaud Cogoluègnes
  * @author Hareendran
+ * @author Dominique Villard
  *
  * @since 1.4
  */
@@ -125,6 +126,9 @@ public class RabbitConnectionFactoryBean extends AbstractFactoryBean<ConnectionF
 
 	private boolean skipServerCertificateValidation;
 
+	public RabbitConnectionFactoryBean() {
+		this.connectionFactory.setAutomaticRecoveryEnabled(false);
+	}
 
 	/**
 	 * Whether or not Server Side certificate has to be validated or not.
@@ -140,9 +144,9 @@ public class RabbitConnectionFactoryBean extends AbstractFactoryBean<ConnectionF
 	 * This would be used if useSSL is set to true and should only be used on dev or Qa regions
 	 * skipServerCertificateValidation should <b> never be set to true in production</b>
 	 * @param skipServerCertificateValidation Flag to override Server side certificate checks;
-	 * if set to {@code true} {@link com.rabbitmq.client.NullTrustManager} would be used.
+	 * if set to {@code true} {@link com.rabbitmq.client.TrustEverythingTrustManager} would be used.
 	 * @since 1.6.6
-	 * @see com.rabbitmq.client.NullTrustManager
+	 * @see com.rabbitmq.client.TrustEverythingTrustManager
 	 */
 	public void setSkipServerCertificateValidation(boolean skipServerCertificateValidation) {
 		this.skipServerCertificateValidation = skipServerCertificateValidation;
@@ -313,7 +317,7 @@ public class RabbitConnectionFactoryBean extends AbstractFactoryBean<ConnectionF
 
 	/**
 	 * Get the key store type - this defaults to PKCS12 if not overridden by
-	 * {@link #setSslPropertiesLocation(Resource)} or {@link #setKeyStoreType}
+	 * {@link #setSslPropertiesLocation(Resource)} or {@link #setKeyStoreType}.
 	 * @return the key store type.
 	 * @since 1.6.2
 	 */
@@ -333,8 +337,8 @@ public class RabbitConnectionFactoryBean extends AbstractFactoryBean<ConnectionF
 	 * Set the key store type - overrides
 	 * the property in {@link #setSslPropertiesLocation(Resource)}.
 	 * @param keyStoreType the key store type.
-	 * @see java.security.KeyStore#getInstance(String)
 	 * @since 1.6.2
+	 * @see java.security.KeyStore#getInstance(String)
 	 */
 	public void setKeyStoreType(String keyStoreType) {
 		this.keyStoreType = keyStoreType;
@@ -342,7 +346,7 @@ public class RabbitConnectionFactoryBean extends AbstractFactoryBean<ConnectionF
 
 	/**
 	 * Get the trust store type - this defaults to JKS if not overridden by
-	 * {@link #setSslPropertiesLocation(Resource)} or {@link #setTrustStoreType}
+	 * {@link #setSslPropertiesLocation(Resource)} or {@link #setTrustStoreType}.
 	 * @return the trust store type.
 	 * @since 1.6.2
 	 */
@@ -362,8 +366,8 @@ public class RabbitConnectionFactoryBean extends AbstractFactoryBean<ConnectionF
 	 * Set the trust store type - overrides
 	 * the property in {@link #setSslPropertiesLocation(Resource)}.
 	 * @param trustStoreType the trust store type.
-	 * @see java.security.KeyStore#getInstance(String)
 	 * @since 1.6.2
+	 * @see java.security.KeyStore#getInstance(String)
 	 */
 	public void setTrustStoreType(String trustStoreType) {
 		this.trustStoreType = trustStoreType;
@@ -377,8 +381,8 @@ public class RabbitConnectionFactoryBean extends AbstractFactoryBean<ConnectionF
 	 * Set the secure random to use when initializing the {@link SSLContext}.
 	 * Defaults to null, in which case the default implementation is used.
 	 * @param secureRandom the secure random.
-	 * @see SSLContext#init(KeyManager[], TrustManager[], SecureRandom)
 	 * @since 1.6.4
+	 * @see SSLContext#init(KeyManager[], TrustManager[], SecureRandom)
 	 */
 	public void setSecureRandom(SecureRandom secureRandom) {
 		this.secureRandom = secureRandom;
@@ -426,24 +430,28 @@ public class RabbitConnectionFactoryBean extends AbstractFactoryBean<ConnectionF
 
 	/**
 	 * @param uri the uri.
-	 * @throws URISyntaxException invalid syntax.
-	 * @throws NoSuchAlgorithmException no such algorithm.
-	 * @throws KeyManagementException key management.
 	 * @see com.rabbitmq.client.ConnectionFactory#setUri(java.net.URI)
 	 */
-	public void setUri(URI uri) throws URISyntaxException, NoSuchAlgorithmException, KeyManagementException {
-		this.connectionFactory.setUri(uri);
+	public void setUri(URI uri) {
+		try {
+			this.connectionFactory.setUri(uri);
+		}
+		catch (URISyntaxException | NoSuchAlgorithmException | KeyManagementException e) {
+			throw new IllegalArgumentException("Unable to set uri", e);
+		}
 	}
 
 	/**
 	 * @param uriString the uri.
-	 * @throws URISyntaxException invalid syntax.
-	 * @throws NoSuchAlgorithmException no such algorithm.
-	 * @throws KeyManagementException key management.
 	 * @see com.rabbitmq.client.ConnectionFactory#setUri(java.lang.String)
 	 */
-	public void setUri(String uriString) throws URISyntaxException, NoSuchAlgorithmException, KeyManagementException {
-		this.connectionFactory.setUri(uriString);
+	public void setUri(String uriString) {
+		try {
+			this.connectionFactory.setUri(uriString);
+		}
+		catch (URISyntaxException | NoSuchAlgorithmException | KeyManagementException e) {
+			throw new IllegalArgumentException("Unable to set uri", e);
+		}
 	}
 
 	/**
@@ -563,6 +571,36 @@ public class RabbitConnectionFactoryBean extends AbstractFactoryBean<ConnectionF
 	 */
 	public void setMetricsCollector(MetricsCollector metricsCollector) {
 		this.connectionFactory.setMetricsCollector(metricsCollector);
+	}
+
+	/**
+	 * Set to true to enable amqp-client automatic recovery. Note: Spring AMQP
+	 * implements its own connection recovery and this is generally not needed.
+	 * @param automaticRecoveryEnabled true to enable.
+	 * @since 1.7.1
+	 */
+	public void setAutomaticRecoveryEnabled(boolean automaticRecoveryEnabled) {
+		this.connectionFactory.setAutomaticRecoveryEnabled(automaticRecoveryEnabled);
+	}
+
+	/**
+	 * Set to true to enable amqp-client topology recovery. Note: if there is a
+	 * Rabbit admin in the application context, Spring AMQP
+	 * implements its own recovery and this is generally not needed.
+	 * @param topologyRecoveryEnabled true to enable.
+	 * @since 1.7.1
+	 */
+	public void setTopologyRecoveryEnabled(boolean topologyRecoveryEnabled) {
+		this.connectionFactory.setTopologyRecoveryEnabled(topologyRecoveryEnabled);
+	}
+
+	/**
+	 * @param channelRpcTimeout continuation timeout for RPC calls in channels
+	 * @since 2.0
+	 * @see com.rabbitmq.client.ConnectionFactory#setChannelRpcTimeout(int)
+	 */
+	public void setChannelRpcTimeout(int channelRpcTimeout) {
+		this.connectionFactory.setChannelRpcTimeout(channelRpcTimeout);
 	}
 
 	@Override

@@ -1,5 +1,5 @@
 /*
- * Copyright 2002-2016 the original author or authors.
+ * Copyright 2002-2017 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,6 +16,7 @@
 
 package org.springframework.amqp.rabbit.core;
 
+import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.instanceOf;
 import static org.hamcrest.Matchers.sameInstance;
@@ -26,15 +27,17 @@ import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertThat;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
-import static org.mockito.Matchers.any;
-import static org.mockito.Matchers.anyString;
-import static org.mockito.Mockito.doAnswer;
-import static org.mockito.Mockito.doReturn;
-import static org.mockito.Mockito.doThrow;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.BDDMockito.given;
+import static org.mockito.BDDMockito.willDoNothing;
+import static org.mockito.BDDMockito.willReturn;
+import static org.mockito.BDDMockito.willThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyZeroInteractions;
 import static org.mockito.Mockito.when;
 
 import java.util.ArrayList;
@@ -49,12 +52,10 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.TimeoutException;
 
 import org.apache.commons.logging.Log;
-import org.hamcrest.Matchers;
 import org.junit.Rule;
 import org.junit.Test;
 import org.junit.rules.ExpectedException;
 import org.mockito.ArgumentCaptor;
-import org.mockito.internal.stubbing.answers.DoesNothing;
 
 import org.springframework.amqp.core.AnonymousQueue;
 import org.springframework.amqp.core.Binding;
@@ -65,6 +66,7 @@ import org.springframework.amqp.core.DirectExchange;
 import org.springframework.amqp.core.Exchange;
 import org.springframework.amqp.core.Queue;
 import org.springframework.amqp.rabbit.connection.CachingConnectionFactory;
+import org.springframework.amqp.rabbit.connection.Connection;
 import org.springframework.amqp.rabbit.connection.ConnectionFactory;
 import org.springframework.amqp.rabbit.connection.SingleConnectionFactory;
 import org.springframework.amqp.rabbit.junit.BrokerRunning;
@@ -81,9 +83,21 @@ import org.springframework.context.annotation.Configuration;
 import org.springframework.context.annotation.Scope;
 import org.springframework.context.support.GenericApplicationContext;
 
+import com.rabbitmq.client.AMQP.Queue.DeclareOk;
 import com.rabbitmq.client.Channel;
 import com.rabbitmq.client.DefaultConsumer;
 
+/**
+ * @author Mark Pollack
+ * @author Mark Fisher
+ * @author Dave Syer
+ * @author Gary Russell
+ * @author Artem Bilan
+ * @author Artem Yakshin
+ *
+ * @since 1.4.1
+ *
+ */
 public class RabbitAdminTests {
 
 	@Rule
@@ -193,21 +207,21 @@ public class RabbitAdminTests {
 			rabbitAdmin.setApplicationContext(ctx);
 			rabbitAdmin.afterPropertiesSet();
 			Log logger = spy(TestUtils.getPropertyValue(rabbitAdmin, "logger", Log.class));
-			doReturn(true).when(logger).isInfoEnabled();
-			doAnswer(new DoesNothing()).when(logger).info(anyString());
+			willReturn(true).given(logger).isInfoEnabled();
+			willDoNothing().given(logger).info(anyString());
 			new DirectFieldAccessor(rabbitAdmin).setPropertyValue("logger", logger);
 			connectionFactory.createConnection().close(); // force declarations
 			ArgumentCaptor<String> log = ArgumentCaptor.forClass(String.class);
 			verify(logger, times(7)).info(log.capture());
 			List<String> logs = log.getAllValues();
 			Collections.sort(logs);
-			assertThat(logs.get(0), Matchers.containsString("(testex.ad) durable:true, auto-delete:true"));
-			assertThat(logs.get(1), Matchers.containsString("(testex.all) durable:false, auto-delete:true"));
-			assertThat(logs.get(2), Matchers.containsString("(testex.nonDur) durable:false, auto-delete:false"));
-			assertThat(logs.get(3), Matchers.containsString("(testq.ad) durable:true, auto-delete:true, exclusive:false"));
-			assertThat(logs.get(4), Matchers.containsString("(testq.all) durable:false, auto-delete:true, exclusive:true"));
-			assertThat(logs.get(5), Matchers.containsString("(testq.excl) durable:true, auto-delete:false, exclusive:true"));
-			assertThat(logs.get(6), Matchers.containsString("(testq.nonDur) durable:false, auto-delete:false, exclusive:false"));
+			assertThat(logs.get(0), containsString("(testex.ad) durable:true, auto-delete:true"));
+			assertThat(logs.get(1), containsString("(testex.all) durable:false, auto-delete:true"));
+			assertThat(logs.get(2), containsString("(testex.nonDur) durable:false, auto-delete:false"));
+			assertThat(logs.get(3), containsString("(testq.ad) durable:true, auto-delete:true, exclusive:false"));
+			assertThat(logs.get(4), containsString("(testq.all) durable:false, auto-delete:true, exclusive:true"));
+			assertThat(logs.get(5), containsString("(testq.excl) durable:true, auto-delete:false, exclusive:true"));
+			assertThat(logs.get(6), containsString("(testq.nonDur) durable:false, auto-delete:false, exclusive:false"));
 		}
 		finally {
 			cleanQueuesAndExchanges(rabbitAdmin);
@@ -246,7 +260,7 @@ public class RabbitAdminTests {
 		admin.deleteExchange("e2");
 		admin.deleteExchange("e3");
 		admin.deleteExchange("e4");
-		assertNull(admin.getQueueProperties(ctx.getBean(Config.class).protypeQueueName));
+		assertNull(admin.getQueueProperties(ctx.getBean(Config.class).prototypeQueueName));
 		ctx.close();
 	}
 
@@ -270,12 +284,13 @@ public class RabbitAdminTests {
 	}
 
 	@Test
-	public void testIgnoreDeclarationExeptionsTimeout() throws Exception {
+	public void testIgnoreDeclarationExceptionsTimeout() throws Exception {
 		com.rabbitmq.client.ConnectionFactory rabbitConnectionFactory = mock(
 				com.rabbitmq.client.ConnectionFactory.class);
 		TimeoutException toBeThrown = new TimeoutException("test");
-		doThrow(toBeThrown).when(rabbitConnectionFactory).newConnection(any(ExecutorService.class), anyString());
+		willThrow(toBeThrown).given(rabbitConnectionFactory).newConnection(any(ExecutorService.class), anyString());
 		CachingConnectionFactory ccf = new CachingConnectionFactory(rabbitConnectionFactory);
+		ccf.setExecutor(mock(ExecutorService.class));
 		RabbitAdmin admin = new RabbitAdmin(ccf);
 		List<DeclarationExceptionEvent> events = new ArrayList<DeclarationExceptionEvent>();
 		admin.setApplicationEventPublisher(new EventPublisher(events));
@@ -298,10 +313,36 @@ public class RabbitAdminTests {
 		assertSame(events.get(3), admin.getLastDeclarationExceptionEvent());
 	}
 
+	@Test
+	public void testWithinInvoke() throws Exception {
+		ConnectionFactory connectionFactory = mock(ConnectionFactory.class);
+		Connection connection = mock(Connection.class);
+		given(connectionFactory.createConnection()).willReturn(connection);
+		Channel channel1 = mock(Channel.class);
+		Channel channel2 = mock(Channel.class);
+		given(connection.createChannel(false)).willReturn(channel1, channel2);
+		DeclareOk declareOk = mock(DeclareOk.class);
+		given(channel1.queueDeclare()).willReturn(declareOk);
+		given(declareOk.getQueue()).willReturn("foo");
+		RabbitTemplate template = new RabbitTemplate(connectionFactory);
+		RabbitAdmin admin = new RabbitAdmin(template);
+		template.invoke(o -> {
+			admin.declareQueue();
+			admin.declareQueue();
+			admin.declareQueue();
+			admin.declareQueue();
+			return null;
+		});
+		verify(connection, times(1)).createChannel(false);
+		verify(channel1, times(4)).queueDeclare();
+		verify(channel1, times(1)).close();
+		verifyZeroInteractions(channel2);
+	}
+
 	@Configuration
 	public static class Config {
 
-		public String protypeQueueName = UUID.randomUUID().toString();
+		public String prototypeQueueName = UUID.randomUUID().toString();
 
 		@Bean
 		public ConnectionFactory cf() {
@@ -353,7 +394,7 @@ public class RabbitAdminTests {
 		@Scope(ConfigurableBeanFactory.SCOPE_PROTOTYPE)
 		public List<Queue> prototypes() {
 			return Arrays.asList(
-					new Queue(this.protypeQueueName, false, false, true)
+					new Queue(this.prototypeQueueName, false, false, true)
 			);
 		}
 

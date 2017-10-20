@@ -1,5 +1,5 @@
 /*
- * Copyright 2002-2016 the original author or authors.
+ * Copyright 2002-2017 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -22,6 +22,7 @@ import java.net.InetAddress;
 import org.springframework.amqp.rabbit.support.RabbitExceptionTranslator;
 import org.springframework.util.ObjectUtils;
 
+import com.rabbitmq.client.BlockedListener;
 import com.rabbitmq.client.Channel;
 import com.rabbitmq.client.impl.NetworkConnection;
 import com.rabbitmq.client.impl.recovery.AutorecoveringConnection;
@@ -31,9 +32,9 @@ import com.rabbitmq.client.impl.recovery.AutorecoveringConnection;
  *
  * @author Dave Syer
  * @author Gary Russell
+ * @author Artem Bilan
  *
  * @since 1.0
- *
  */
 public class SimpleConnection implements Connection, NetworkConnection {
 
@@ -107,6 +108,16 @@ public class SimpleConnection implements Connection, NetworkConnection {
 	}
 
 	@Override
+	public void addBlockedListener(BlockedListener listener) {
+		this.delegate.addBlockedListener(listener);
+	}
+
+	@Override
+	public boolean removeBlockedListener(BlockedListener listener) {
+		return this.delegate.removeBlockedListener(listener);
+	}
+
+	@Override
 	public InetAddress getLocalAddress() {
 		if (this.delegate instanceof NetworkConnection) {
 			return ((NetworkConnection) this.delegate).getLocalAddress();
@@ -122,6 +133,10 @@ public class SimpleConnection implements Connection, NetworkConnection {
 	@Override
 	public int getPort() {
 		return this.delegate.getPort();
+	}
+
+	com.rabbitmq.client.Connection getDelegate() {
+		return this.delegate;
 	}
 
 	@Override

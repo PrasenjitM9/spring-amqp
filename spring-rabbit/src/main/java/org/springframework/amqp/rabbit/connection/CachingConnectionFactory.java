@@ -1,5 +1,5 @@
 /*
- * Copyright 2002-2016 the original author or authors.
+ * Copyright 2002-2017 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -22,6 +22,7 @@ import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
 import java.lang.reflect.Proxy;
 import java.net.URI;
+import java.util.Arrays;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedList;
@@ -48,13 +49,7 @@ import org.springframework.amqp.AmqpTimeoutException;
 import org.springframework.amqp.rabbit.support.PublisherCallbackChannel;
 import org.springframework.amqp.rabbit.support.PublisherCallbackChannelImpl;
 import org.springframework.amqp.support.ConditionalExceptionLogger;
-import org.springframework.beans.BeansException;
 import org.springframework.beans.factory.InitializingBean;
-import org.springframework.context.ApplicationContext;
-import org.springframework.context.ApplicationContextAware;
-import org.springframework.context.ApplicationListener;
-import org.springframework.context.SmartLifecycle;
-import org.springframework.context.event.ContextClosedEvent;
 import org.springframework.jmx.export.annotation.ManagedAttribute;
 import org.springframework.jmx.export.annotation.ManagedResource;
 import org.springframework.util.Assert;
@@ -62,6 +57,7 @@ import org.springframework.util.ObjectUtils;
 import org.springframework.util.StringUtils;
 
 import com.rabbitmq.client.AlreadyClosedException;
+import com.rabbitmq.client.BlockedListener;
 import com.rabbitmq.client.Channel;
 import com.rabbitmq.client.ShutdownListener;
 import com.rabbitmq.client.ShutdownSignalException;
@@ -96,43 +92,50 @@ import com.rabbitmq.client.ShutdownSignalException;
  */
 @ManagedResource
 public class CachingConnectionFactory extends AbstractConnectionFactory
-		implements InitializingBean, ShutdownListener, ApplicationContextAware, ApplicationListener<ContextClosedEvent>,
-				PublisherCallbackChannelConnectionFactory, SmartLifecycle {
+		implements InitializingBean, ShutdownListener, PublisherCallbackChannelConnectionFactory {
 
 	private static final int DEFAULT_CHANNEL_CACHE_SIZE = 25;
 
+	private static final Set<String> txStarts = new HashSet<>(Arrays.asList("basicPublish", "basicAck", "basicNack",
+			"basicReject"));
+
+	private static final Set<String> txEnds = new HashSet<>(Arrays.asList("txCommit", "txRollback"));
+
 	private final ChannelCachingConnectionProxy connection = new ChannelCachingConnectionProxy(null);
 
+	/**
+	 * The cache mode.
+	 */
 	public enum CacheMode {
 		/**
-		 * Cache channels - single connection
+		 * Cache channels - single connection.
 		 */
 		CHANNEL,
 		/**
-		 * Cache connections and channels within each connection
+		 * Cache connections and channels within each connection.
 		 */
 		CONNECTION
 	}
 
-	private final Set<ChannelCachingConnectionProxy> allocatedConnections =
-			new HashSet<ChannelCachingConnectionProxy>();
+	private final Set<ChannelCachingConnectionProxy> allocatedConnections = new HashSet<>();
 
 	private final Map<ChannelCachingConnectionProxy, LinkedList<ChannelProxy>>
-		allocatedConnectionNonTransactionalChannels = new HashMap<ChannelCachingConnectionProxy, LinkedList<ChannelProxy>>();
+		allocatedConnectionNonTransactionalChannels = new HashMap<>();
 
 	private final Map<ChannelCachingConnectionProxy, LinkedList<ChannelProxy>>
-		allocatedConnectionTransactionalChannels = new HashMap<ChannelCachingConnectionProxy, LinkedList<ChannelProxy>>();
+		allocatedConnectionTransactionalChannels = new HashMap<>();
 
-	private final BlockingDeque<ChannelCachingConnectionProxy> idleConnections =
-			new LinkedBlockingDeque<ChannelCachingConnectionProxy>();
+	private final BlockingDeque<ChannelCachingConnectionProxy> idleConnections = new LinkedBlockingDeque<>();
 
-	private final Map<Connection, Semaphore> checkoutPermits = new HashMap<Connection, Semaphore>();
+	private final LinkedList<ChannelProxy> cachedChannelsNonTransactional = new LinkedList<>();
 
-	private final Map<String, AtomicInteger> channelHighWaterMarks = new HashMap<String, AtomicInteger>();
+	private final LinkedList<ChannelProxy> cachedChannelsTransactional = new LinkedList<>();
+
+	private final Map<Connection, Semaphore> checkoutPermits = new HashMap<>();
+
+	private final Map<String, AtomicInteger> channelHighWaterMarks = new HashMap<>();
 
 	private final AtomicInteger connectionHighWaterMark = new AtomicInteger();
-
-	private ApplicationContext applicationContext;
 
 	private volatile long channelCheckoutTimeout = 0;
 
@@ -144,10 +147,6 @@ public class CachingConnectionFactory extends AbstractConnectionFactory
 
 	private volatile int connectionLimit = Integer.MAX_VALUE;
 
-	private final LinkedList<ChannelProxy> cachedChannelsNonTransactional = new LinkedList<ChannelProxy>();
-
-	private final LinkedList<ChannelProxy> cachedChannelsTransactional = new LinkedList<ChannelProxy>();
-
 	private volatile boolean active = true;
 
 	private volatile boolean publisherConfirms;
@@ -156,17 +155,11 @@ public class CachingConnectionFactory extends AbstractConnectionFactory
 
 	private volatile boolean initialized;
 
-	private volatile boolean contextStopped;
-
 	private volatile boolean stopped;
-
-	private volatile boolean running;
-
-	private int phase = Integer.MIN_VALUE + 1000;
 
 	private volatile ConditionalExceptionLogger closeExceptionLogger = new DefaultChannelCloseLogger();
 
-	/** Synchronization monitor for the shared Connection */
+	/** Synchronization monitor for the shared Connection. */
 	private final Object connectionMonitor = new Object();
 
 	/** Executor used for deferred close if no explicit executor set. */
@@ -188,7 +181,7 @@ public class CachingConnectionFactory extends AbstractConnectionFactory
 	 * @param port the port number
 	 */
 	public CachingConnectionFactory(String hostname, int port) {
-		super(new com.rabbitmq.client.ConnectionFactory());
+		super(newRabbitConnectionFactory());
 		if (!StringUtils.hasText(hostname)) {
 			hostname = getDefaultHostName();
 		}
@@ -202,7 +195,7 @@ public class CachingConnectionFactory extends AbstractConnectionFactory
 	 * @since 1.5
 	 */
 	public CachingConnectionFactory(URI uri) {
-		super(new com.rabbitmq.client.ConnectionFactory());
+		super(newRabbitConnectionFactory());
 		setUri(uri);
 	}
 
@@ -229,6 +222,18 @@ public class CachingConnectionFactory extends AbstractConnectionFactory
 	 */
 	public CachingConnectionFactory(com.rabbitmq.client.ConnectionFactory rabbitConnectionFactory) {
 		super(rabbitConnectionFactory);
+		if (rabbitConnectionFactory.isAutomaticRecoveryEnabled()) {
+			logger.warn("***\nAutomatic Recovery is Enabled in the provided connection factory;\n"
+					+ "while Spring AMQP is compatible with this feature, it\n"
+					+ "prefers to use its own recovery mechanisms; when this option is true, you may receive\n"
+					+ "'AutoRecoverConnectionNotCurrentlyOpenException's until the connection is recovered.");
+		}
+	}
+
+	private static com.rabbitmq.client.ConnectionFactory newRabbitConnectionFactory() {
+		com.rabbitmq.client.ConnectionFactory connectionFactory = new com.rabbitmq.client.ConnectionFactory();
+		connectionFactory.setAutomaticRecoveryEnabled(false);
+		return connectionFactory;
 	}
 
 	/**
@@ -306,8 +311,8 @@ public class CachingConnectionFactory extends AbstractConnectionFactory
 	 * <p>
 	 * Since 1.5.5, also applies to getting a connection when the cache mode is CONNECTION.
 	 * @param channelCheckoutTimeout the timeout in milliseconds; default 0 (channel limiting not enabled).
-	 * @see #setConnectionLimit(int)
 	 * @since 1.4.2
+	 * @see #setConnectionLimit(int)
 	 */
 	public void setChannelCheckoutTimeout(long channelCheckoutTimeout) {
 		this.channelCheckoutTimeout = channelCheckoutTimeout;
@@ -374,21 +379,10 @@ public class CachingConnectionFactory extends AbstractConnectionFactory
 
 	}
 
-	@Override
-	public void setApplicationContext(ApplicationContext applicationContext) throws BeansException {
-		this.applicationContext = applicationContext;
-	}
-
-	@Override
-	public void onApplicationEvent(ContextClosedEvent event) {
-		if (this.applicationContext == event.getApplicationContext()) {
-			this.contextStopped = true;
-		}
-	}
-
 	private Channel getChannel(ChannelCachingConnectionProxy connection, boolean transactional) {
+		Semaphore checkoutPermits = null;
 		if (this.channelCheckoutTimeout > 0) {
-			Semaphore checkoutPermits = this.checkoutPermits.get(connection);
+			checkoutPermits = this.checkoutPermits.get(connection);
 			if (checkoutPermits != null) {
 				try {
 					if (!checkoutPermits.tryAcquire(this.channelCheckoutTimeout, TimeUnit.MILLISECONDS)) {
@@ -468,7 +462,19 @@ public class CachingConnectionFactory extends AbstractConnectionFactory
 			}
 		}
 		if (channel == null) {
-			channel = getCachedChannelProxy(connection, channelList, transactional);
+			try {
+				channel = getCachedChannelProxy(connection, channelList, transactional);
+			}
+			catch (RuntimeException e) {
+				if (checkoutPermits != null) {
+					checkoutPermits.release();
+					if (logger.isDebugEnabled()) {
+						logger.debug("Could not get channel; released permit for " + connection + ", remaining:"
+							+ checkoutPermits.availablePermits());
+					}
+				}
+				throw e;
+			}
 		}
 		return channel;
 	}
@@ -659,14 +665,22 @@ public class CachingConnectionFactory extends AbstractConnectionFactory
 	}
 
 	/**
-	 * Close the underlying shared connection. The provider of this ConnectionFactory needs to care for proper shutdown.
+	 * Close the underlying shared connection. Use {@link #resetConnection()} to close the
+	 * connection while the application is still running.
 	 * <p>
-	 * As this bean implements DisposableBean, a bean factory will automatically invoke this on destruction of its
-	 * cached singletons.
+	 * As this bean implements DisposableBean, a bean factory will automatically invoke
+	 * this on destruction of its cached singletons.
+	 * <p>
+	 * If called after the context is closed, the connection factory can no longer server
+	 * up connections.
 	 */
 	@Override
 	public final void destroy() {
 		resetConnection();
+		if (getContextStopped()) {
+			this.stopped = true;
+			this.deferredCloseExecutor.shutdownNow();
+		}
 	}
 
 	/**
@@ -688,60 +702,6 @@ public class CachingConnectionFactory extends AbstractConnectionFactory
 			}
 			this.connectionHighWaterMark.set(0);
 		}
-	}
-
-	@Override
-	public void start() {
-		this.running = true;
-	}
-
-	@Override
-	public boolean isRunning() {
-		return this.running;
-	}
-
-	@Override
-	public int getPhase() {
-		return this.phase;
-	}
-
-	/**
-	 * Defaults to phase {@link Integer#MIN_VALUE - 1000} so the factory is
-	 * stopped in a very late phase, allowing other beans to use the connection
-	 * to clean up.
-	 * @see #getPhase()
-	 * @param phase the phase.
-	 * @since 1.5.3
-	 */
-	public void setPhase(int phase) {
-		this.phase = phase;
-	}
-
-	@Override
-	public boolean isAutoStartup() {
-		return true;
-	}
-
-	/**
-	 * Stop the connection factory to prevent its connection from being used.
-	 * Note: ignored unless the application context is in the process of being stopped.
-	 */
-	@Override
-	public void stop() {
-		if (this.contextStopped) {
-			this.running = false;
-			this.stopped = true;
-			this.deferredCloseExecutor.shutdownNow();
-		}
-		else {
-			logger.warn("stop() is ignored unless the application context is being stopped");
-		}
-	}
-
-	@Override
-	public void stop(Runnable callback) {
-		stop();
-		callback.run();
 	}
 
 	/*
@@ -785,6 +745,9 @@ public class CachingConnectionFactory extends AbstractConnectionFactory
 				props.setProperty("openConnections", Integer.toString(countOpenConnections()));
 				props.setProperty("idleConnections", Integer.toString(this.idleConnections.size()));
 				props.setProperty("idleConnectionsHighWater",  Integer.toString(this.connectionHighWaterMark.get()));
+				for (ChannelCachingConnectionProxy proxy : this.allocatedConnections) {
+					putConnectionName(props, proxy, ":" + proxy.getLocalPort());
+				}
 				for (Entry<ChannelCachingConnectionProxy, LinkedList<ChannelProxy>> entry :
 										this.allocatedConnectionTransactionalChannels.entrySet()) {
 					int port = entry.getKey().getLocalPort();
@@ -815,9 +778,20 @@ public class CachingConnectionFactory extends AbstractConnectionFactory
 						.get(ObjectUtils.getIdentityHexString(this.cachedChannelsTransactional)).get()));
 				props.setProperty("idleChannelsNotTxHighWater", Integer.toString(this.channelHighWaterMarks
 						.get(ObjectUtils.getIdentityHexString(this.cachedChannelsNonTransactional)).get()));
+				putConnectionName(props, this.connection, "");
 			}
 		}
 		return props;
+	}
+
+	private void putConnectionName(Properties props, ConnectionProxy connection, String keySuffix) {
+		Connection targetConnection = connection.getTargetConnection(); // NOSONAR (close())
+		if (targetConnection instanceof SimpleConnection) {
+			String name = ((SimpleConnection) targetConnection).getDelegate().getClientProvidedName();
+			if (name != null) {
+				props.put("connectionName" + keySuffix, name);
+			}
+		}
 	}
 
 	private int countOpenConnections() {
@@ -841,8 +815,6 @@ public class CachingConnectionFactory extends AbstractConnectionFactory
 
 		private final ChannelCachingConnectionProxy theConnection;
 
-		private volatile Channel target;
-
 		private final LinkedList<ChannelProxy> channelList;
 
 		private final String channelListIdentity;
@@ -850,6 +822,10 @@ public class CachingConnectionFactory extends AbstractConnectionFactory
 		private final Object targetMonitor = new Object();
 
 		private final boolean transactional;
+
+		private volatile Channel target;
+
+		private volatile boolean txStarted;
 
 		CachedChannelInvocationHandler(ChannelCachingConnectionProxy connection,
 				Channel target,
@@ -915,13 +891,26 @@ public class CachingConnectionFactory extends AbstractConnectionFactory
 						this.target.close();
 						throw new InvocationTargetException(new AmqpException("PublisherCallbackChannel is closed"));
 					}
+					else if (this.txStarted) {
+						this.txStarted = false;
+						throw new IllegalStateException("Channel closed during transaction");
+					}
 					this.target = null;
 				}
 				synchronized (this.targetMonitor) {
 					if (this.target == null) {
 						this.target = createBareChannel(this.theConnection, this.transactional);
 					}
-					return method.invoke(this.target, args);
+					Object result = method.invoke(this.target, args);
+					if (this.transactional) {
+						if (txStarts.contains(methodName)) {
+							this.txStarted = true;
+						}
+						else if (txEnds.contains(methodName)) {
+							this.txStarted = false;
+						}
+					}
+					return result;
 				}
 			}
 			catch (InvocationTargetException ex) {
@@ -957,7 +946,7 @@ public class CachingConnectionFactory extends AbstractConnectionFactory
 				if (checkoutPermits != null) {
 					checkoutPermits.release();
 					if (logger.isDebugEnabled()) {
-						logger.debug("Released permit for " + this.theConnection + ", remaining:"
+						logger.debug("Released permit for '" + this.theConnection + "', remaining: "
 							+ checkoutPermits.availablePermits());
 					}
 				}
@@ -968,8 +957,9 @@ public class CachingConnectionFactory extends AbstractConnectionFactory
 		}
 
 		/**
-		 * GUARDED by channelList
-		 * @param proxy the channel to close
+		 * GUARDED by channelList.
+		 * @param proxy the channel to close.
+		 * @throws Exception an exception.
 		 */
 		private void logicalClose(ChannelProxy proxy) throws Exception {
 			if (this.target == null) {
@@ -1058,36 +1048,52 @@ public class CachingConnectionFactory extends AbstractConnectionFactory
 				catch (Exception e2) { }
 				finally {
 					try {
-						if (channel.isOpen()) {
-							channel.close();
-						}
+						channel.close();
 					}
 					catch (IOException e3) { }
 					catch (AlreadyClosedException e4) { }
 					catch (TimeoutException e5) { }
+					catch (ShutdownSignalException e6) {
+						if (!RabbitUtils.isNormalShutdown(e6)) {
+							logger.debug("Unexpected exception on deferred close", e6);
+						}
+					}
 				}
 			});
 		}
 
 	}
 
-	private class ChannelCachingConnectionProxy implements Connection, ConnectionProxy { // NOSONAR - final (tests spy)
-
-		private volatile Connection target;
+	private class ChannelCachingConnectionProxy implements ConnectionProxy { // NOSONAR - final (tests spy)
 
 		private final AtomicBoolean closeNotified = new AtomicBoolean(false);
+
+		private volatile Connection target;
 
 		ChannelCachingConnectionProxy(Connection target) {
 			this.target = target;
 		}
 
 		private Channel createBareChannel(boolean transactional) {
+			Assert.state(this.target != null, "Can't create channel - no target connection.");
 			return this.target.createChannel(transactional);
 		}
 
 		@Override
 		public Channel createChannel(boolean transactional) {
 			return getChannel(this, transactional);
+		}
+
+		@Override
+		public void addBlockedListener(BlockedListener listener) {
+			Assert.state(this.target != null, "Can't add blocked listener - no target connection.");
+			this.target.addBlockedListener(listener);
+		}
+
+		@Override
+		public boolean removeBlockedListener(BlockedListener listener) {
+			Assert.state(this.target != null, "Can't remove blocked listener - no target connection.");
+			return this.target.removeBlockedListener(listener);
 		}
 
 		@Override
@@ -1098,7 +1104,7 @@ public class CachingConnectionFactory extends AbstractConnectionFactory
 					 * Only connectionCacheSize open idle connections are allowed.
 					 */
 					if (!CachingConnectionFactory.this.idleConnections.contains(this)) {
-						if (!this.target.isOpen()
+						if (!isOpen()
 								|| countOpenIdleConnections() >= CachingConnectionFactory.this.connectionCacheSize) {
 							if (logger.isDebugEnabled()) {
 								logger.debug("Completely closing connection '" + this + "'");

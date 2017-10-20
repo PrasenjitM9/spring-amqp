@@ -1,5 +1,5 @@
 /*
- * Copyright 2002-2016 the original author or authors.
+ * Copyright 2002-2017 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -29,9 +29,11 @@ import org.springframework.amqp.rabbit.support.RabbitExceptionTranslator;
 import org.springframework.util.Assert;
 
 import com.rabbitmq.client.AMQP;
+import com.rabbitmq.client.AlreadyClosedException;
 import com.rabbitmq.client.Channel;
 import com.rabbitmq.client.Method;
 import com.rabbitmq.client.ShutdownSignalException;
+import com.rabbitmq.client.impl.recovery.AutorecoveringChannel;
 
 /**
  * @author Mark Fisher
@@ -56,6 +58,9 @@ public abstract class RabbitUtils {
 			try {
 				connection.close();
 			}
+			catch (AlreadyClosedException ace) {
+				// empty
+			}
 			catch (Exception ex) {
 				logger.debug("Ignoring Connection exception - assuming already closed: " + ex.getMessage(), ex);
 			}
@@ -71,6 +76,9 @@ public abstract class RabbitUtils {
 		if (channel != null) {
 			try {
 				channel.close();
+			}
+			catch (AlreadyClosedException ace) {
+				// empty
 			}
 			catch (IOException ex) {
 				logger.debug("Could not close RabbitMQ Channel", ex);
@@ -111,12 +119,26 @@ public abstract class RabbitUtils {
 	}
 
 	public static void closeMessageConsumer(Channel channel, Collection<String> consumerTags, boolean transactional) {
-		if (!channel.isOpen()) {
+		if (!channel.isOpen() && !(channel instanceof ChannelProxy
+					&& ((ChannelProxy) channel).getTargetChannel() instanceof AutorecoveringChannel)
+				&& !(channel instanceof AutorecoveringChannel)) {
 			return;
 		}
 		try {
 			for (String consumerTag : consumerTags) {
-				channel.basicCancel(consumerTag);
+				try {
+					channel.basicCancel(consumerTag);
+				}
+				catch (IOException e) {
+					if (logger.isDebugEnabled()) {
+						logger.debug("Error performing 'basicCancel'", e);
+					}
+				}
+				catch (AlreadyClosedException e) {
+					if (logger.isTraceEnabled()) {
+						logger.trace(channel + " is already closed");
+					}
+				}
 			}
 			if (transactional) {
 				/*
@@ -151,10 +173,13 @@ public abstract class RabbitUtils {
 
 	/**
 	 * Sets a ThreadLocal indicating the channel MUST be physically closed.
-	 * @param b true if the channel must be closed.
+	 * @param channel the channel.
+	 * @param b true if the channel must be closed (if it's a proxy).
 	 */
-	public static void setPhysicalCloseRequired(boolean b) {
-		physicalCloseRequired.set(b);
+	public static void setPhysicalCloseRequired(Channel channel, boolean b) {
+		if (channel instanceof ChannelProxy) {
+			physicalCloseRequired.set(b);
+		}
 	}
 
 	/**
