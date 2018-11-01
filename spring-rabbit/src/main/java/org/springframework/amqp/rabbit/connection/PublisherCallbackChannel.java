@@ -1,5 +1,5 @@
 /*
- * Copyright 2002-2017 the original author or authors.
+ * Copyright 2002-2018 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -14,10 +14,11 @@
  * limitations under the License.
  */
 
-package org.springframework.amqp.rabbit.support;
+package org.springframework.amqp.rabbit.connection;
 
 import java.io.IOException;
 import java.util.Collection;
+import java.util.function.Consumer;
 
 import com.rabbitmq.client.AMQP;
 import com.rabbitmq.client.Channel;
@@ -26,13 +27,23 @@ import com.rabbitmq.client.Channel;
  * Instances of this interface support a single listener being
  * registered for publisher confirms with multiple channels,
  * by adding context to the callbacks.
+ *
  * @author Gary Russell
+ *
  * @since 1.0.1
  *
  */
 public interface PublisherCallbackChannel extends Channel {
 
-	String RETURN_CORRELATION_KEY = "spring_listener_return_correlation";
+	/**
+	 * Header used to determine which listener to invoke for a returned message.
+	 */
+	String RETURN_LISTENER_CORRELATION_KEY = "spring_listener_return_correlation";
+
+	/**
+	 * Header used to locate a pending confirm to which to attach a returned message.
+	 */
+	String RETURNED_MESSAGE_CORRELATION_KEY = "spring_returned_message_correlation";
 
 	/**
 	 * Adds a {@link Listener}.
@@ -49,13 +60,19 @@ public interface PublisherCallbackChannel extends Channel {
 	 */
 	Collection<PendingConfirm> expire(Listener listener, long cutoffTime);
 
-    /**
-     * Get the {@link PendingConfirm}s count.
-     * @param listener the listener.
-     * @return Count of the pending confirms.
-     */
+	/**
+	 * Get the {@link PendingConfirm}s count.
+	 * @param listener the listener.
+	 * @return Count of the pending confirms.
+	 */
+	int getPendingConfirmsCount(Listener listener);
 
-    int getPendingConfirmsCount(Listener listener);
+	/**
+	 * Get the total pending confirms count.
+	 * @return the count.
+	 * @since 2.1
+	 */
+	int getPendingConfirmsCount();
 
 	/**
 	 * Adds a pending confirmation to this channel's map.
@@ -75,13 +92,20 @@ public interface PublisherCallbackChannel extends Channel {
 	Channel getDelegate();
 
 	/**
+	 * Set a callback to be invoked after the ack/nack has been handled.
+	 * @param callback the callback.
+	 * @since 2.1
+	 */
+	void setAfterAckCallback(Consumer<Channel> callback);
+
+	/**
 	 * Listeners implementing this interface can participate
 	 * in publisher confirms received from multiple channels,
 	 * by invoking addListener on each channel. Standard
 	 * AMQP channels do not support a listener being
 	 * registered on multiple channels.
 	 */
-	public interface Listener {
+	interface Listener {
 
 		/**
 		 * Invoked by the channel when a confirm is received.

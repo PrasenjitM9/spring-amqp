@@ -1,5 +1,5 @@
 /*
- * Copyright 2002-2017 the original author or authors.
+ * Copyright 2002-2018 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -22,6 +22,7 @@ import java.net.URI;
 import java.net.URISyntaxException;
 import java.net.UnknownHostException;
 import java.security.GeneralSecurityException;
+import java.util.Arrays;
 import java.util.List;
 import java.util.concurrent.Executor;
 import java.util.concurrent.ExecutorService;
@@ -57,10 +58,13 @@ import com.rabbitmq.client.impl.recovery.AutorecoveringConnection;
  * @author Gary Russell
  * @author Steve Powell
  * @author Artem Bilan
+ * @author Will Droste
  *
  */
 public abstract class AbstractConnectionFactory implements ConnectionFactory, DisposableBean, BeanNameAware,
 		ApplicationContextAware, ApplicationEventPublisherAware, ApplicationListener<ContextClosedEvent> {
+
+	private static final String PUBLISHER_SUFFIX = ".publisher";
 
 	public static final int DEFAULT_CLOSE_TIMEOUT = 30000;
 
@@ -75,6 +79,8 @@ public abstract class AbstractConnectionFactory implements ConnectionFactory, Di
 	private final CompositeChannelListener channelListener = new CompositeChannelListener();
 
 	private final AtomicInteger defaultConnectionNameStrategyCounter = new AtomicInteger();
+
+	private AbstractConnectionFactory publisherConnectionFactory;
 
 	private RecoveryListener recoveryListener = new RecoveryListener() {
 
@@ -114,7 +120,8 @@ public abstract class AbstractConnectionFactory implements ConnectionFactory, Di
 	private volatile boolean contextStopped;
 
 	/**
-	 * Create a new AbstractConnectionFactory for the given target ConnectionFactory.
+	 * Create a new AbstractConnectionFactory for the given target ConnectionFactory,
+	 * with no publisher connection factory.
 	 * @param rabbitConnectionFactory the target ConnectionFactory
 	 */
 	public AbstractConnectionFactory(com.rabbitmq.client.ConnectionFactory rabbitConnectionFactory) {
@@ -122,9 +129,17 @@ public abstract class AbstractConnectionFactory implements ConnectionFactory, Di
 		this.rabbitConnectionFactory = rabbitConnectionFactory;
 	}
 
+	protected final void setPublisherConnectionFactory(
+			AbstractConnectionFactory publisherConnectionFactory) {
+		this.publisherConnectionFactory = publisherConnectionFactory;
+	}
+
 	@Override
 	public void setApplicationContext(ApplicationContext applicationContext) {
 		this.applicationContext = applicationContext;
+		if (this.publisherConnectionFactory != null) {
+			this.publisherConnectionFactory.setApplicationContext(applicationContext);
+		}
 	}
 
 	protected ApplicationContext getApplicationContext() {
@@ -134,6 +149,9 @@ public abstract class AbstractConnectionFactory implements ConnectionFactory, Di
 	@Override
 	public void setApplicationEventPublisher(ApplicationEventPublisher applicationEventPublisher) {
 		this.applicationEventPublisher = applicationEventPublisher;
+		if (this.publisherConnectionFactory != null) {
+			this.publisherConnectionFactory.setApplicationEventPublisher(applicationEventPublisher);
+		}
 	}
 
 	protected ApplicationEventPublisher getApplicationEventPublisher() {
@@ -144,6 +162,9 @@ public abstract class AbstractConnectionFactory implements ConnectionFactory, Di
 	public void onApplicationEvent(ContextClosedEvent event) {
 		if (getApplicationContext() == event.getApplicationContext()) {
 			this.contextStopped = true;
+		}
+		if (this.publisherConnectionFactory != null) {
+			this.publisherConnectionFactory.onApplicationEvent(event);
 		}
 	}
 
@@ -260,6 +281,9 @@ public abstract class AbstractConnectionFactory implements ConnectionFactory, Di
 			Address[] addressArray = Address.parseAddresses(addresses);
 			if (addressArray.length > 0) {
 				this.addresses = addressArray;
+				if (this.publisherConnectionFactory != null) {
+					this.publisherConnectionFactory.setAddresses(addresses);
+				}
 				return;
 			}
 		}
@@ -287,21 +311,34 @@ public abstract class AbstractConnectionFactory implements ConnectionFactory, Di
 
 	public void setConnectionListeners(List<? extends ConnectionListener> listeners) {
 		this.connectionListener.setDelegates(listeners);
+		if (this.publisherConnectionFactory != null) {
+			this.publisherConnectionFactory.setConnectionListeners(listeners);
+		}
 	}
 
 	@Override
 	public void addConnectionListener(ConnectionListener listener) {
 		this.connectionListener.addDelegate(listener);
+		if (this.publisherConnectionFactory != null) {
+			this.publisherConnectionFactory.addConnectionListener(listener);
+		}
 	}
 
 	@Override
 	public boolean removeConnectionListener(ConnectionListener listener) {
-		return this.connectionListener.removeDelegate(listener);
+		boolean result = this.connectionListener.removeDelegate(listener);
+		if (this.publisherConnectionFactory != null) {
+			this.publisherConnectionFactory.removeConnectionListener(listener); // NOSONAR
+		}
+		return result;
 	}
 
 	@Override
 	public void clearConnectionListeners() {
 		this.connectionListener.clearDelegates();
+		if (this.publisherConnectionFactory != null) {
+			this.publisherConnectionFactory.clearConnectionListeners();
+		}
 	}
 
 	public void setChannelListeners(List<? extends ChannelListener> listeners) {
@@ -315,10 +352,16 @@ public abstract class AbstractConnectionFactory implements ConnectionFactory, Di
 	 */
 	public void setRecoveryListener(RecoveryListener recoveryListener) {
 		this.recoveryListener = recoveryListener;
+		if (this.publisherConnectionFactory != null) {
+			this.publisherConnectionFactory.setRecoveryListener(recoveryListener);
+		}
 	}
 
 	public void addChannelListener(ChannelListener listener) {
 		this.channelListener.addDelegate(listener);
+		if (this.publisherConnectionFactory != null) {
+			this.publisherConnectionFactory.addChannelListener(listener);
+		}
 	}
 
 	/**
@@ -339,6 +382,9 @@ public abstract class AbstractConnectionFactory implements ConnectionFactory, Di
 		else {
 			this.executorService = ((ThreadPoolTaskExecutor) executor).getThreadPoolExecutor();
 		}
+		if (this.publisherConnectionFactory != null) {
+			this.publisherConnectionFactory.setExecutor(executor);
+		}
 	}
 
 	protected ExecutorService getExecutorService() {
@@ -352,6 +398,9 @@ public abstract class AbstractConnectionFactory implements ConnectionFactory, Di
 	 */
 	public void setCloseTimeout(int closeTimeout) {
 		this.closeTimeout = closeTimeout;
+		if (this.publisherConnectionFactory != null) {
+			this.publisherConnectionFactory.setCloseTimeout(closeTimeout);
+		}
 	}
 
 	public int getCloseTimeout() {
@@ -366,11 +415,34 @@ public abstract class AbstractConnectionFactory implements ConnectionFactory, Di
 	 */
 	public void setConnectionNameStrategy(ConnectionNameStrategy connectionNameStrategy) {
 		this.connectionNameStrategy = connectionNameStrategy;
+		if (this.publisherConnectionFactory != null) {
+			this.publisherConnectionFactory.setConnectionNameStrategy(
+					cf -> connectionNameStrategy.obtainNewConnectionName(cf) + PUBLISHER_SUFFIX);
+		}
 	}
 
 	@Override
 	public void setBeanName(String name) {
 		this.beanName = name;
+		if (this.publisherConnectionFactory != null) {
+			this.publisherConnectionFactory.setBeanName(name + PUBLISHER_SUFFIX);
+		}
+	}
+
+	/**
+	 * Return a bean name of the component or null if not a bean.
+	 * @return the bean name or null.
+	 * @since 1.7.9
+	 */
+	protected String getBeanName() {
+		return this.beanName;
+	}	public boolean hasPublisherConnectionFactory() {
+		return this.publisherConnectionFactory != null;
+	}
+
+	@Override
+	public ConnectionFactory getPublisherConnectionFactory() {
+		return this.publisherConnectionFactory;
 	}
 
 	protected final Connection createBareConnection() {
@@ -379,15 +451,42 @@ public abstract class AbstractConnectionFactory implements ConnectionFactory, Di
 
 			com.rabbitmq.client.Connection rabbitConnection;
 			if (this.addresses != null) {
+				if (this.logger.isInfoEnabled()) {
+					this.logger.info("Attempting to connect to: " + Arrays.toString(this.addresses));
+				}
 				rabbitConnection = this.rabbitConnectionFactory.newConnection(this.executorService, this.addresses,
 						connectionName);
 
 			}
 			else {
+				if (this.logger.isInfoEnabled()) {
+					this.logger.info("Attempting to connect to: " + this.rabbitConnectionFactory.getHost()
+							+ ":" + this.rabbitConnectionFactory.getPort());
+				}
 				rabbitConnection = this.rabbitConnectionFactory.newConnection(this.executorService, connectionName);
 			}
 
 			Connection connection = new SimpleConnection(rabbitConnection, this.closeTimeout);
+			if (rabbitConnection instanceof AutorecoveringConnection) {
+				((AutorecoveringConnection) rabbitConnection).addRecoveryListener(new RecoveryListener() {
+
+					@Override
+					public void handleRecoveryStarted(Recoverable recoverable) {
+						handleRecovery(recoverable);
+					}
+
+					@Override
+					public void handleRecovery(Recoverable recoverable) {
+						try {
+							connection.close();
+						}
+						catch (Exception e) {
+							AbstractConnectionFactory.this.logger.error("Failed to close auto-recover connection", e);
+						}
+					}
+
+				});
+			}
 			if (this.logger.isInfoEnabled()) {
 				this.logger.info("Created new connection: " + connectionName + "/" + connection);
 			}
@@ -422,6 +521,9 @@ public abstract class AbstractConnectionFactory implements ConnectionFactory, Di
 
 	@Override
 	public void destroy() {
+		if (this.publisherConnectionFactory != null) {
+			this.publisherConnectionFactory.destroy();
+		}
 	}
 
 	@Override

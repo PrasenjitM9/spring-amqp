@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2017 the original author or authors.
+ * Copyright 2014-2018 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,14 +16,21 @@
 
 package org.springframework.amqp.rabbit.listener;
 
+import java.util.List;
+import java.util.Map;
+
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 
 import org.springframework.amqp.AmqpRejectAndDontRequeueException;
+import org.springframework.amqp.ImmediateAcknowledgeAmqpException;
+import org.springframework.amqp.core.Message;
 import org.springframework.amqp.rabbit.listener.exception.ListenerExecutionFailedException;
 import org.springframework.amqp.support.converter.MessageConversionException;
+import org.springframework.messaging.MessagingException;
 import org.springframework.messaging.handler.annotation.support.MethodArgumentNotValidException;
 import org.springframework.messaging.handler.annotation.support.MethodArgumentTypeMismatchException;
+import org.springframework.messaging.handler.invocation.MethodArgumentResolutionException;
 import org.springframework.util.ErrorHandler;
 
 /**
@@ -52,6 +59,8 @@ public class ConditionalRejectingErrorHandler implements ErrorHandler {
 
 	private final FatalExceptionStrategy exceptionStrategy;
 
+	private boolean discardFatalsWithXDeath = true;
+
 	/**
 	 * Create a handler with the {@link ConditionalRejectingErrorHandler.DefaultExceptionStrategy}.
 	 */
@@ -67,22 +76,58 @@ public class ConditionalRejectingErrorHandler implements ErrorHandler {
 		this.exceptionStrategy = exceptionStrategy;
 	}
 
+	/**
+	 * Set to false to disable the (now) default behavior of logging and discarding
+	 * messages that cause fatal exceptions and have an `x-death` header; which
+	 * usually means that the message has been republished after previously being
+	 * sent to a DLQ.
+	 * @param discardFatalsWithXDeath false to disable.
+	 * @since 2.1
+	 */
+	public void setDiscardFatalsWithXDeath(boolean discardFatalsWithXDeath) {
+		this.discardFatalsWithXDeath = discardFatalsWithXDeath;
+	}
+
 	@Override
 	public void handleError(Throwable t) {
-		if (this.logger.isWarnEnabled()) {
-			this.logger.warn("Execution of Rabbit message listener failed.", t);
-		}
+		log(t);
 		if (!this.causeChainContainsARADRE(t) && this.exceptionStrategy.isFatal(t)) {
+			if (this.discardFatalsWithXDeath && t instanceof ListenerExecutionFailedException) {
+				Message failed = ((ListenerExecutionFailedException) t).getFailedMessage();
+				if (failed != null) {
+					List<Map<String, ?>> xDeath = failed.getMessageProperties().getXDeathHeader();
+					if (xDeath != null && xDeath.size() > 0) {
+						this.logger.error("x-death header detected on a message with a fatal exception; "
+								+ "perhaps requeued from a DLQ? - discarding: " + failed);
+						throw new ImmediateAcknowledgeAmqpException("Fatal and x-death present");
+					}
+				}
+			}
 			throw new AmqpRejectAndDontRequeueException("Error Handler converted exception to fatal", t);
 		}
 	}
 
 	/**
+	 * Log the throwable at WARN level, including stack trace.
+	 * Subclasses can override this behavior.
+	 * @param t the {@link Throwable}.
+	 * @since 1.7.8
+	 */
+	protected void log(Throwable t) {
+		if (this.logger.isWarnEnabled()) {
+			this.logger.warn("Execution of Rabbit message listener failed.", t);
+		}
+	}
+
+	/**
+	 * Return true if there is already an {@link AmqpRejectAndDontRequeueException}
+	 * present in the cause chain.
 	 * @param t a {@link Throwable}.
 	 * @return true if the cause chain already contains an
 	 * {@link AmqpRejectAndDontRequeueException}.
+	 * @since 1.7.8
 	 */
-	private boolean causeChainContainsARADRE(Throwable t) {
+	protected boolean causeChainContainsARADRE(Throwable t) {
 		Throwable cause = t.getCause();
 		while (cause != null) {
 			if (cause instanceof AmqpRejectAndDontRequeueException) {
@@ -103,13 +148,19 @@ public class ConditionalRejectingErrorHandler implements ErrorHandler {
 
 		@Override
 		public boolean isFatal(Throwable t) {
-			if (t instanceof ListenerExecutionFailedException
-					&& isCauseFatal(t.getCause())) {
+			Throwable cause = t.getCause();
+			while (cause instanceof MessagingException
+					&& !(cause instanceof
+					org.springframework.messaging.converter.MessageConversionException)
+					&& !(cause instanceof MethodArgumentResolutionException)) {
+				cause = cause.getCause();
+			}
+			if (t instanceof ListenerExecutionFailedException && isCauseFatal(cause)) {
 				if (this.logger.isWarnEnabled()) {
 					this.logger.warn(
 							"Fatal message conversion error; message rejected; "
-							+ "it will be dropped or routed to a dead letter exchange, if so configured: "
-							+ ((ListenerExecutionFailedException) t).getFailedMessage());
+									+ "it will be dropped or routed to a dead letter exchange, if so configured: "
+									+ ((ListenerExecutionFailedException) t).getFailedMessage());
 				}
 				return true;
 			}
@@ -119,8 +170,7 @@ public class ConditionalRejectingErrorHandler implements ErrorHandler {
 		private boolean isCauseFatal(Throwable cause) {
 			return cause instanceof MessageConversionException
 					|| cause instanceof org.springframework.messaging.converter.MessageConversionException
-					|| cause instanceof MethodArgumentNotValidException
-					|| cause instanceof MethodArgumentTypeMismatchException
+					|| cause instanceof MethodArgumentResolutionException
 					|| cause instanceof NoSuchMethodException
 					|| cause instanceof ClassCastException
 					|| isUserCauseFatal(cause);

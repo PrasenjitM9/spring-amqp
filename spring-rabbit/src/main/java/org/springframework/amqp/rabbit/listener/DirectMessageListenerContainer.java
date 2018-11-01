@@ -1,5 +1,5 @@
 /*
- * Copyright 2016-2017 the original author or authors.
+ * Copyright 2016-2018 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -17,13 +17,16 @@
 package org.springframework.amqp.rabbit.listener;
 
 import java.io.IOException;
+import java.lang.reflect.Constructor;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.Date;
+import java.util.Iterator;
 import java.util.LinkedList;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 import java.util.Properties;
 import java.util.Set;
@@ -40,8 +43,10 @@ import org.springframework.amqp.AmqpConnectException;
 import org.springframework.amqp.AmqpException;
 import org.springframework.amqp.AmqpIOException;
 import org.springframework.amqp.ImmediateAcknowledgeAmqpException;
+import org.springframework.amqp.core.AmqpAdmin;
 import org.springframework.amqp.core.Message;
 import org.springframework.amqp.core.MessageProperties;
+import org.springframework.amqp.core.Queue;
 import org.springframework.amqp.rabbit.connection.Connection;
 import org.springframework.amqp.rabbit.connection.ConnectionFactory;
 import org.springframework.amqp.rabbit.connection.ConnectionFactoryUtils;
@@ -49,7 +54,6 @@ import org.springframework.amqp.rabbit.connection.ConsumerChannelRegistry;
 import org.springframework.amqp.rabbit.connection.RabbitResourceHolder;
 import org.springframework.amqp.rabbit.connection.RabbitUtils;
 import org.springframework.amqp.rabbit.connection.SimpleResourceHolder;
-import org.springframework.amqp.rabbit.core.RabbitAdmin;
 import org.springframework.amqp.rabbit.transaction.RabbitTransactionManager;
 import org.springframework.scheduling.TaskScheduler;
 import org.springframework.scheduling.concurrent.ThreadPoolTaskScheduler;
@@ -58,10 +62,12 @@ import org.springframework.transaction.interceptor.TransactionAttribute;
 import org.springframework.transaction.support.TransactionSynchronizationManager;
 import org.springframework.transaction.support.TransactionTemplate;
 import org.springframework.util.Assert;
+import org.springframework.util.ClassUtils;
 import org.springframework.util.CollectionUtils;
 import org.springframework.util.LinkedMultiValueMap;
 import org.springframework.util.MultiValueMap;
 import org.springframework.util.ObjectUtils;
+import org.springframework.util.StringUtils;
 import org.springframework.util.backoff.BackOffExecution;
 
 import com.rabbitmq.client.AMQP.BasicProperties;
@@ -228,13 +234,28 @@ public class DirectMessageListenerContainer extends AbstractMessageListenerConta
 
 	@Override
 	public void addQueueNames(String... queueNames) {
+		Assert.notNull(queueNames, "'queueNames' cannot be null");
+		Assert.noNullElements(queueNames, "'queueNames' cannot contain null elements");
 		try {
 			addQueues(Arrays.stream(queueNames));
 		}
 		catch (AmqpIOException e) {
-			throw new AmqpIOException("Failed to add " + Arrays.asList(queueNames), e.getCause());
+			throw new AmqpIOException("Failed to add " + Arrays.toString(queueNames), e.getCause());
 		}
 		super.addQueueNames(queueNames);
+	}
+
+	@Override
+	public void addQueues(Queue... queues) {
+		Assert.notNull(queues, "'queues' cannot be null");
+		Assert.noNullElements(queues, "'queues' cannot contain null elements");
+		try {
+			addQueues(Arrays.stream(queues).map(q -> q.getName()));
+		}
+		catch (AmqpIOException e) {
+			throw new AmqpIOException("Failed to add " + Arrays.toString(queues), e.getCause());
+		}
+		super.addQueues(queues);
 	}
 
 	private void addQueues(Stream<String> queueNameStream) {
@@ -261,6 +282,12 @@ public class DirectMessageListenerContainer extends AbstractMessageListenerConta
 		return super.removeQueueNames(queueNames);
 	}
 
+	@Override
+	public boolean removeQueues(Queue... queues) {
+		removeQueues(Arrays.stream(queues).map(q -> q.getActualName()));
+		return super.removeQueues(queues);
+	}
+
 	private void removeQueues(Stream<String> queueNames) {
 		if (isRunning()) {
 			synchronized (this.consumersMonitor) {
@@ -284,14 +311,29 @@ public class DirectMessageListenerContainer extends AbstractMessageListenerConta
 				}
 				List<SimpleConsumer> consumerList = this.consumersByQueue.get(queue);
 				if (consumerList != null && consumerList.size() > newCount) {
-					int currentCount = consumerList.size();
-					for (int i = newCount; i < currentCount; i++) {
-						SimpleConsumer consumer = consumerList.remove(i);
-						cancelConsumer(consumer);
+					int delta = consumerList.size() - newCount;
+					for (int i = 0; i < delta; i++) {
+						int index = findIdleConsumer();
+						if (index >= 0) {
+							SimpleConsumer consumer = consumerList.remove(index);
+							if (consumer != null) {
+								cancelConsumer(consumer);
+							}
+						}
 					}
 				}
 			}
 		}
+	}
+
+	/**
+	 * When adjusting down, return a consumer that can be canceled. Called while
+	 * synchronized on consumersMonitor.
+	 * @return the consumer index or -1 if non idle.
+	 * @since 2.0.6
+	 */
+	protected int findIdleConsumer() {
+		return 0;
 	}
 
 	private void checkStartState() {
@@ -358,6 +400,7 @@ public class DirectMessageListenerContainer extends AbstractMessageListenerConta
 		if (getFailedDeclarationRetryInterval() < this.monitorInterval) {
 			this.monitorInterval = getFailedDeclarationRetryInterval();
 		}
+		final Map<String, Queue> namesToQueues = getQueueNamesToQueues();
 		this.lastRestartAttempt = System.currentTimeMillis();
 		this.consumerMonitorTask = this.taskScheduler.scheduleAtFixedRate(() -> {
 			long now = System.currentTimeMillis();
@@ -406,9 +449,29 @@ public class DirectMessageListenerContainer extends AbstractMessageListenerConta
 						if (restartableConsumers.size() > 0) {
 							doRedeclareElementsIfNecessary();
 						}
-						for (SimpleConsumer consumer : restartableConsumers) {
-							if (this.logger.isDebugEnabled() && restartableConsumers.size() > 0) {
+						Iterator<SimpleConsumer> iterator = restartableConsumers.iterator();
+						while (iterator.hasNext()) {
+							SimpleConsumer consumer = iterator.next();
+							iterator.remove();
+							if (!DirectMessageListenerContainer.this.consumersByQueue
+									.containsKey(consumer.getQueue())) {
+								if (this.logger.isDebugEnabled()) {
+									this.logger.debug("Skipping restart of consumer " + consumer);
+								}
+								continue;
+							}
+							if (this.logger.isDebugEnabled()) {
 								this.logger.debug("Attempting to restart consumer " + consumer);
+							}
+							Queue queue = namesToQueues.get(consumer.getQueue());
+							if (queue != null && !StringUtils.hasText(queue.getName())) {
+								// check to see if a broker-declared queue name has changed
+								String actualName = queue.getActualName();
+								if (StringUtils.hasText(actualName)) {
+									namesToQueues.remove(consumer.getQueue());
+									namesToQueues.put(actualName, queue);
+									consumer = new SimpleConsumer(null, null, actualName);
+								}
 							}
 							try {
 								doConsumeFromQueue(consumer.getQueue());
@@ -418,6 +481,10 @@ public class DirectMessageListenerContainer extends AbstractMessageListenerConta
 								if (e.getCause() instanceof AmqpApplicationContextClosedException) {
 									this.logger.error("Application context is closed, terminating");
 									this.taskScheduler.schedule(this::stop, new Date());
+								}
+								this.consumersToRestart.addAll(restartableConsumers);
+								if (this.logger.isTraceEnabled()) {
+									this.logger.trace("After restart exception, consumers to restart now: " + this.consumersToRestart);
 								}
 								break;
 							}
@@ -460,7 +527,7 @@ public class DirectMessageListenerContainer extends AbstractMessageListenerConta
 								this.logger.error("Error creating consumer; retrying in " + nextBackOff, e);
 								doShutdown();
 								try {
-									Thread.sleep(nextBackOff);
+									Thread.sleep(nextBackOff); // NOSONAR
 								}
 								catch (InterruptedException e1) {
 									Thread.currentThread().interrupt();
@@ -511,18 +578,33 @@ public class DirectMessageListenerContainer extends AbstractMessageListenerConta
 
 	private void checkMissingQueues(String[] queueNames) {
 		if (isMissingQueuesFatal()) {
-			RabbitAdmin checkAdmin = getRabbitAdmin();
+			AmqpAdmin checkAdmin = getAmqpAdmin();
 			if (checkAdmin == null) {
 				/*
 				 * Checking queue existence doesn't require an admin in the context or injected into
 				 * the container. If there's no such admin, just create a local one here.
+				 * Use reflection to avoid class tangles.
 				 */
-				checkAdmin = new RabbitAdmin(getConnectionFactory());
+				try {
+					Class<?> clazz = ClassUtils.forName("org.springframework.amqp.rabbit.core.RabbitAdmin",
+							getClass().getClassLoader());
+
+					@SuppressWarnings("unchecked")
+					Constructor<AmqpAdmin> ctor = (Constructor<AmqpAdmin>) clazz
+							.getConstructor(ConnectionFactory.class);
+					checkAdmin = ctor.newInstance(getConnectionFactory());
+					setAmqpAdmin(checkAdmin);
+				}
+				catch (Exception e) {
+					this.logger.error("Failed to create a RabbitAdmin", e);
+				}
 			}
-			for (String queue : queueNames) {
-				Properties queueProperties = checkAdmin.getQueueProperties(queue);
-				if (queueProperties == null && isMissingQueuesFatal()) {
-					throw new IllegalStateException("At least one of the configured queues is missing");
+			if (checkAdmin != null) {
+				for (String queue : queueNames) {
+					Properties queueProperties = checkAdmin.getQueueProperties(queue);
+					if (queueProperties == null && isMissingQueuesFatal()) {
+						throw new IllegalStateException("At least one of the configured queues is missing");
+					}
 				}
 			}
 		}
@@ -555,9 +637,9 @@ public class DirectMessageListenerContainer extends AbstractMessageListenerConta
 		}
 		catch (Exception e) {
 			addConsumerToRestart(new SimpleConsumer(null, null, queue));
-				throw e instanceof AmqpConnectException
-						? (AmqpConnectException) e
-						: new AmqpConnectException(e);
+			throw e instanceof AmqpConnectException
+					? (AmqpConnectException) e
+					: new AmqpConnectException(e);
 		}
 		finally {
 			if (routingLookupKey != null) {
@@ -705,6 +787,9 @@ public class DirectMessageListenerContainer extends AbstractMessageListenerConta
 	private void addConsumerToRestart(SimpleConsumer consumer) {
 		if (this.started) {
 			this.consumersToRestart.add(consumer);
+			if (this.logger.isTraceEnabled()) {
+				this.logger.trace("Consumers to restart now: " + this.consumersToRestart);
+			}
 		}
 	}
 
@@ -963,7 +1048,7 @@ public class DirectMessageListenerContainer extends AbstractMessageListenerConta
 						}
 					}
 					getChannel().basicNack(deliveryTag, true,
-							RabbitUtils.shouldRequeue(isDefaultRequeueRejected(), e, this.logger));
+							ContainerUtils.shouldRequeue(isDefaultRequeueRejected(), e, this.logger));
 				}
 				catch (IOException e1) {
 					this.logger.error("Failed to nack message", e1);
@@ -985,6 +1070,9 @@ public class DirectMessageListenerContainer extends AbstractMessageListenerConta
 			super.handleConsumeOk(consumerTag);
 			if (this.logger.isDebugEnabled()) {
 				this.logger.debug("New " + this + " consumeOk");
+			}
+			if (getApplicationEventPublisher() != null) {
+				getApplicationEventPublisher().publishEvent(new ConsumeOkEvent(this, getQueue(), consumerTag));
 			}
 		}
 

@@ -1,5 +1,5 @@
 /*
- * Copyright 2017 the original author or authors.
+ * Copyright 2017-2018 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -17,13 +17,13 @@
 package org.springframework.amqp.core;
 
 /**
- * A message post processor that can also use/manipulate correlation data.
+ * A marker interface for data used to correlate information about sent messages.
+ * One example might be used to correlate a send confirmation.
  *
  * @author Gary Russell
  * @since 1.6.7
- * @deprecated in 2.0, the method has been moved to {@link MessagePostProcessor}.
+ *
  */
-@Deprecated
-public interface CorrelationAwareMessagePostProcessor extends MessagePostProcessor {
+public interface Correlation {
 
 }

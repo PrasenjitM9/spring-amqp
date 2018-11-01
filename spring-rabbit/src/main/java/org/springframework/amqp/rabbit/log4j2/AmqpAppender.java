@@ -1,5 +1,5 @@
 /*
- * Copyright 2016-2017 the original author or authors.
+ * Copyright 2016-2018 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -27,6 +27,7 @@ import java.util.Optional;
 import java.util.Timer;
 import java.util.TimerTask;
 import java.util.UUID;
+import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.LinkedBlockingQueue;
@@ -40,6 +41,7 @@ import org.apache.logging.log4j.core.LogEvent;
 import org.apache.logging.log4j.core.LoggerContext;
 import org.apache.logging.log4j.core.appender.AbstractAppender;
 import org.apache.logging.log4j.core.appender.AbstractManager;
+import org.apache.logging.log4j.core.async.BlockingQueueFactory;
 import org.apache.logging.log4j.core.config.Configuration;
 import org.apache.logging.log4j.core.config.plugins.Plugin;
 import org.apache.logging.log4j.core.config.plugins.PluginAttribute;
@@ -60,16 +62,17 @@ import org.springframework.amqp.core.MessageProperties;
 import org.springframework.amqp.core.TopicExchange;
 import org.springframework.amqp.rabbit.connection.AbstractConnectionFactory;
 import org.springframework.amqp.rabbit.connection.CachingConnectionFactory;
+import org.springframework.amqp.rabbit.connection.ConnectionFactoryConfigurationUtils;
 import org.springframework.amqp.rabbit.connection.RabbitConnectionFactoryBean;
 import org.springframework.amqp.rabbit.core.DeclareExchangeConnectionListener;
 import org.springframework.amqp.rabbit.core.RabbitAdmin;
 import org.springframework.amqp.rabbit.core.RabbitTemplate;
-import org.springframework.amqp.rabbit.support.LogAppenderUtils;
 import org.springframework.core.io.Resource;
 import org.springframework.core.io.support.PathMatchingResourcePatternResolver;
 import org.springframework.retry.RetryPolicy;
 import org.springframework.retry.policy.SimpleRetryPolicy;
 import org.springframework.retry.support.RetryTemplate;
+import org.springframework.util.StringUtils;
 
 import com.rabbitmq.client.ConnectionFactory;
 
@@ -120,7 +123,7 @@ public class AmqpAppender extends AbstractAppender {
 	/**
 	 * Where LoggingEvents are queued to send.
 	 */
-	private final LinkedBlockingQueue<Event> events = new LinkedBlockingQueue<Event>();
+	private final BlockingQueue<Event> events;
 
 	/**
 	 * Used to synchronize access to pattern layouts.
@@ -128,9 +131,10 @@ public class AmqpAppender extends AbstractAppender {
 	private final Object layoutMutex = new Object();
 
 	public AmqpAppender(String name, Filter filter, Layout<? extends Serializable> layout, boolean ignoreExceptions,
-			AmqpManager manager) {
+			AmqpManager manager, BlockingQueue<Event> eventQueue) {
 		super(name, filter, layout, ignoreExceptions);
 		this.manager = manager;
+		this.events = eventQueue;
 	}
 
 	@PluginFactory
@@ -169,9 +173,12 @@ public class AmqpAppender extends AbstractAppender {
 			@PluginAttribute("autoDelete") boolean autoDelete,
 			@PluginAttribute("contentType") String contentType,
 			@PluginAttribute("contentEncoding") String contentEncoding,
+			@PluginAttribute("connectionName") String connectionName,
 			@PluginAttribute("clientConnectionProperties") String clientConnectionProperties,
 			@PluginAttribute("async") boolean async,
-			@PluginAttribute("charset") String charset) {
+			@PluginAttribute("charset") String charset,
+			@PluginAttribute(value = "bufferSize", defaultInt = Integer.MAX_VALUE) int bufferSize,
+			@PluginElement(BlockingQueueFactory.ELEMENT_TYPE) BlockingQueueFactory<Event> blockingQueueFactory) {
 		if (name == null) {
 			LOGGER.error("No name for AmqpAppender");
 		}
@@ -209,10 +216,20 @@ public class AmqpAppender extends AbstractAppender {
 		manager.autoDelete = autoDelete;
 		manager.contentType = contentType;
 		manager.contentEncoding = contentEncoding;
+		manager.connectionName = connectionName;
 		manager.clientConnectionProperties = clientConnectionProperties;
 		manager.charset = charset;
 		manager.async = async;
-		AmqpAppender appender = new AmqpAppender(name, filter, theLayout, ignoreExceptions, manager);
+
+		BlockingQueue<Event> eventQueue;
+		if (blockingQueueFactory == null) {
+			eventQueue = new LinkedBlockingQueue<>(bufferSize);
+		}
+		else {
+			eventQueue = blockingQueueFactory.create(bufferSize);
+		}
+
+		AmqpAppender appender = new AmqpAppender(name, filter, theLayout, ignoreExceptions, manager, eventQueue);
 		if (manager.activateOptions()) {
 			appender.startSenders();
 			return appender;
@@ -256,7 +273,7 @@ public class AmqpAppender extends AbstractAppender {
 	 * @param event The event.
 	 * @return The modified message.
 	 */
-	public Message postProcessMessageBeforeSend(Message message, Event event) {
+	protected Message postProcessMessageBeforeSend(Message message, Event event) {
 		return message;
 	}
 
@@ -557,6 +574,11 @@ public class AmqpAppender extends AbstractAppender {
 		private boolean declareExchange = false;
 
 		/**
+		 * A name for the connection (appears on the RabbitMQ Admin UI).
+		 */
+		private String connectionName;
+
+		/**
 		 * Additional client connection properties to be added to the rabbit connection,
 		 * with the form {@code key:value[,key:value]...}.
 		 */
@@ -603,12 +625,15 @@ public class AmqpAppender extends AbstractAppender {
 						.withAlwaysWriteExceptions(false)
 						.withNoConsoleNoAnsi(true)
 						.build();
-				this.connectionFactory = new CachingConnectionFactory(createRabbitConnectionFactory());
+				this.connectionFactory = new CachingConnectionFactory(rabbitConnectionFactory);
+				if (StringUtils.hasText(this.connectionName)) {
+					this.connectionFactory.setConnectionNameStrategy(cf -> this.connectionName);
+				}
 				if (this.addresses != null) {
 					this.connectionFactory.setAddresses(this.addresses);
 				}
 				if (this.clientConnectionProperties != null) {
-					LogAppenderUtils.updateClientConnectionProperties(this.connectionFactory,
+					ConnectionFactoryConfigurationUtils.updateClientConnectionProperties(this.connectionFactory,
 							this.clientConnectionProperties);
 				}
 				setUpExchangeDeclaration();
@@ -702,7 +727,7 @@ public class AmqpAppender extends AbstractAppender {
 					x = new FanoutExchange(this.exchangeName, this.durable, this.autoDelete);
 				}
 				else if ("headers".equals(this.exchangeType)) {
-					x = new HeadersExchange(this.exchangeType, this.durable, this.autoDelete);
+					x = new HeadersExchange(this.exchangeName, this.durable, this.autoDelete);
 				}
 				else {
 					x = new TopicExchange(this.exchangeName, this.durable, this.autoDelete);

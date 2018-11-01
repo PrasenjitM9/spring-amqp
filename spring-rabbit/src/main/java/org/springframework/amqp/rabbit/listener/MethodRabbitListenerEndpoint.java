@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2016 the original author or authors.
+ * Copyright 2014-2018 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -21,8 +21,10 @@ import java.util.Arrays;
 
 import org.springframework.amqp.rabbit.listener.adapter.HandlerAdapter;
 import org.springframework.amqp.rabbit.listener.adapter.MessagingMessageListenerAdapter;
+import org.springframework.amqp.rabbit.listener.api.RabbitListenerErrorHandler;
 import org.springframework.amqp.support.converter.MessageConverter;
 import org.springframework.core.annotation.AnnotationUtils;
+import org.springframework.lang.Nullable;
 import org.springframework.messaging.handler.annotation.SendTo;
 import org.springframework.messaging.handler.annotation.support.MessageHandlerMethodFactory;
 import org.springframework.messaging.handler.invocation.InvocableHandlerMethod;
@@ -34,6 +36,8 @@ import org.springframework.util.Assert;
  *
  * @author Stephane Nicoll
  * @author Artem Bilan
+ * @author Gary Russell
+ *
  * @since 1.4
  */
 public class MethodRabbitListenerEndpoint extends AbstractRabbitListenerEndpoint {
@@ -109,17 +113,22 @@ public class MethodRabbitListenerEndpoint extends AbstractRabbitListenerEndpoint
 		return this.messageHandlerMethodFactory;
 	}
 
+	@SuppressWarnings("deprecation")
 	@Override
 	protected MessagingMessageListenerAdapter createMessageListener(MessageListenerContainer container) {
 		Assert.state(this.messageHandlerMethodFactory != null,
 				"Could not create message listener - MessageHandlerMethodFactory not set");
 		MessagingMessageListenerAdapter messageListener = createMessageListenerInstance();
-		messageListener.setHandlerMethod(configureListenerAdapter(messageListener));
+		messageListener.setHandlerAdapter(configureListenerAdapter(messageListener));
 		String replyToAddress = getDefaultReplyToAddress();
 		if (replyToAddress != null) {
 			messageListener.setResponseAddress(replyToAddress);
 		}
-		MessageConverter messageConverter = container.getMessageConverter();
+		MessageConverter messageConverter = getMessageConverter();
+		if (messageConverter == null) {
+			// fall back to the legacy converter holder in the container
+			messageConverter = container.getMessageConverter();
+		}
 		if (messageConverter != null) {
 			messageListener.setMessageConverter(messageConverter);
 		}
@@ -148,6 +157,7 @@ public class MethodRabbitListenerEndpoint extends AbstractRabbitListenerEndpoint
 		return new MessagingMessageListenerAdapter(this.bean, this.method, this.returnExceptions, this.errorHandler);
 	}
 
+	@Nullable
 	private String getDefaultReplyToAddress() {
 		Method method = getMethod();
 		if (method != null) {
@@ -165,8 +175,9 @@ public class MethodRabbitListenerEndpoint extends AbstractRabbitListenerEndpoint
 	}
 
 	private String resolve(String value) {
-		if (getResolver() != null) {
-			Object newValue = this.getResolver().evaluate(value, getBeanExpressionContext());
+		if (getBeanFactory() != null) {
+			value = getBeanExpressionContext().getBeanFactory().resolveEmbeddedValue(value);
+			Object newValue = getResolver().evaluate(value, getBeanExpressionContext());
 			Assert.isInstanceOf(String.class, newValue, "Invalid @SendTo expression");
 			return (String) newValue;
 		}

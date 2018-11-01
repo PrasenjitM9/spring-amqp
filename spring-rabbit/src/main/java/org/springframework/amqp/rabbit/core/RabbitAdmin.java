@@ -1,5 +1,5 @@
 /*
- * Copyright 2002-2017 the original author or authors.
+ * Copyright 2002-2018 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -19,6 +19,7 @@ package org.springframework.amqp.rabbit.core;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.LinkedList;
 import java.util.List;
@@ -35,21 +36,32 @@ import org.springframework.amqp.AmqpException;
 import org.springframework.amqp.core.AmqpAdmin;
 import org.springframework.amqp.core.Binding;
 import org.springframework.amqp.core.Declarable;
+import org.springframework.amqp.core.Declarables;
 import org.springframework.amqp.core.Exchange;
 import org.springframework.amqp.core.Queue;
 import org.springframework.amqp.rabbit.connection.CachingConnectionFactory;
 import org.springframework.amqp.rabbit.connection.CachingConnectionFactory.CacheMode;
 import org.springframework.amqp.rabbit.connection.ChannelProxy;
 import org.springframework.amqp.rabbit.connection.ConnectionFactory;
+import org.springframework.beans.factory.BeanNameAware;
 import org.springframework.beans.factory.InitializingBean;
 import org.springframework.context.ApplicationContext;
 import org.springframework.context.ApplicationContextAware;
 import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.context.ApplicationEventPublisherAware;
+import org.springframework.core.task.SimpleAsyncTaskExecutor;
+import org.springframework.core.task.TaskExecutor;
 import org.springframework.jmx.export.annotation.ManagedOperation;
+import org.springframework.jmx.export.annotation.ManagedResource;
+import org.springframework.lang.Nullable;
+import org.springframework.retry.backoff.ExponentialBackOffPolicy;
+import org.springframework.retry.policy.SimpleRetryPolicy;
+import org.springframework.retry.support.RetryTemplate;
 import org.springframework.util.Assert;
+import org.springframework.util.StringUtils;
 
 import com.rabbitmq.client.AMQP.Queue.DeclareOk;
+import com.rabbitmq.client.AMQP.Queue.PurgeOk;
 import com.rabbitmq.client.Channel;
 
 /**
@@ -62,8 +74,9 @@ import com.rabbitmq.client.Channel;
  * @author Gary Russell
  * @author Artem Bilan
  */
+@ManagedResource(description = "Admin Tasks")
 public class RabbitAdmin implements AmqpAdmin, ApplicationContextAware, ApplicationEventPublisherAware,
-		InitializingBean {
+		BeanNameAware, InitializingBean {
 
 	/**
 	 * The default exchange name.
@@ -95,19 +108,29 @@ public class RabbitAdmin implements AmqpAdmin, ApplicationContextAware, Applicat
 
 	private final RabbitTemplate rabbitTemplate;
 
-	private volatile boolean running = false;
-
-	private volatile boolean autoStartup = true;
-
-	private volatile ApplicationContext applicationContext;
-
-	private volatile boolean ignoreDeclarationExceptions;
-
 	private final Object lifecycleMonitor = new Object();
 
 	private final ConnectionFactory connectionFactory;
 
+	private String beanName;
+
+	private RetryTemplate retryTemplate;
+
+	private boolean retryDisabled;
+
+	private boolean autoStartup = true;
+
+	private ApplicationContext applicationContext;
+
+	private boolean ignoreDeclarationExceptions;
+
 	private ApplicationEventPublisher applicationEventPublisher;
+
+	private boolean declareCollections = false;
+
+	private TaskExecutor taskExecutor = new SimpleAsyncTaskExecutor();
+
+	private volatile boolean running = false;
 
 	private volatile DeclarationExceptionEvent lastDeclarationExceptionEvent;
 
@@ -155,12 +178,37 @@ public class RabbitAdmin implements AmqpAdmin, ApplicationContextAware, Applicat
 	}
 
 	/**
+	 * Set to false to disable declaring collections of {@link Declarable}.
+	 * Since the admin has to iterate over all Collection beans, this may
+	 * cause undesirable side-effects in some cases. Default true.
+	 * @param declareCollections set to false to prevent declarations of collections.
+	 * @since 1.7.7
+	 * @deprecated - users should use {@link Declarables} beans instead of collections of
+	 * {@link Declarable}.
+	 */
+	@Deprecated
+	public void setDeclareCollections(boolean declareCollections) {
+		this.declareCollections = declareCollections;
+	}
+
+	/**
 	 * @return the last {@link DeclarationExceptionEvent} that was detected in this admin.
 	 *
 	 * @since 1.6
 	 */
 	public DeclarationExceptionEvent getLastDeclarationExceptionEvent() {
 		return this.lastDeclarationExceptionEvent;
+	}
+
+	/**
+	 * Set a task executor to use for async operations. Currently only used
+	 * with {@link #purgeQueue(String, boolean)}.
+	 * @param taskExecutor the executor to use.
+	 * @since 2.1
+	 */
+	public void setTaskExecutor(TaskExecutor taskExecutor) {
+		Assert.notNull(taskExecutor, "'taskExecutor' cannot be null");
+		this.taskExecutor = taskExecutor;
 	}
 
 	public RabbitTemplate getRabbitTemplate() {
@@ -183,7 +231,7 @@ public class RabbitAdmin implements AmqpAdmin, ApplicationContextAware, Applicat
 	}
 
 	@Override
-	@ManagedOperation
+	@ManagedOperation(description = "Delete an exchange from the broker")
 	public boolean deleteExchange(final String exchangeName) {
 		return this.rabbitTemplate.execute(channel -> {
 			if (isDeletingDefaultExchange(exchangeName)) {
@@ -206,14 +254,15 @@ public class RabbitAdmin implements AmqpAdmin, ApplicationContextAware, Applicat
 	 * Declare the given queue.
 	 * If the queue doesn't have a value for 'name' property,
 	 * the queue name will be generated by Broker and returned from this method.
-	 * But the 'name' property of the queue remains as is.
+	 * The declaredName property of the queue will be updated to reflect this value.
 	 * @param queue the queue
 	 * @return the queue name if successful, null if not successful and
 	 * {@link #setIgnoreDeclarationExceptions(boolean) ignoreDeclarationExceptions} is
 	 * true.
 	 */
 	@Override
-	@ManagedOperation
+	@ManagedOperation(description =
+			"Declare a queue on the broker (this operation is not available remotely)")
 	public String declareQueue(final Queue queue) {
 		try {
 			return this.rabbitTemplate.execute(channel -> {
@@ -235,7 +284,8 @@ public class RabbitAdmin implements AmqpAdmin, ApplicationContextAware, Applicat
 	 * is true.
 	 */
 	@Override
-	@ManagedOperation
+	@ManagedOperation(description =
+			"Declare a queue with a broker-generated name (this operation is not available remotely)")
 	public Queue declareQueue() {
 		try {
 			DeclareOk declareOk = this.rabbitTemplate.execute(Channel::queueDeclare);
@@ -248,7 +298,7 @@ public class RabbitAdmin implements AmqpAdmin, ApplicationContextAware, Applicat
 	}
 
 	@Override
-	@ManagedOperation
+	@ManagedOperation(description = "Delete a queue from the broker")
 	public boolean deleteQueue(final String queueName) {
 		return this.rabbitTemplate.execute(channel -> {
 			try {
@@ -262,7 +312,8 @@ public class RabbitAdmin implements AmqpAdmin, ApplicationContextAware, Applicat
 	}
 
 	@Override
-	@ManagedOperation
+	@ManagedOperation(description =
+			"Delete a queue from the broker if unused and empty (when corresponding arguments are true")
 	public void deleteQueue(final String queueName, final boolean unused, final boolean empty) {
 		this.rabbitTemplate.execute(channel -> {
 			channel.queueDelete(queueName, unused, empty);
@@ -271,17 +322,32 @@ public class RabbitAdmin implements AmqpAdmin, ApplicationContextAware, Applicat
 	}
 
 	@Override
-	@ManagedOperation
+	@ManagedOperation(description = "Purge a queue and optionally don't wait for the purge to occur")
 	public void purgeQueue(final String queueName, final boolean noWait) {
-		this.rabbitTemplate.execute(channel -> {
-			channel.queuePurge(queueName);
-			return null;
+		if (noWait) {
+			this.taskExecutor.execute(() -> purgeQueue(queueName));
+		}
+		else {
+			purgeQueue(queueName);
+		}
+	}
+
+	@Override
+	@ManagedOperation(description = "Purge a queue and return the number of messages purged")
+	public int purgeQueue(final String queueName) {
+		return this.rabbitTemplate.execute(channel -> {
+			PurgeOk queuePurged = channel.queuePurge(queueName);
+			if (this.logger.isDebugEnabled()) {
+				this.logger.debug("Purged queue: " + queueName + ", " + queuePurged);
+			}
+			return queuePurged.getMessageCount();
 		});
 	}
 
 	// Binding
 	@Override
-	@ManagedOperation
+	@ManagedOperation(description =
+			"Declare a binding on the broker (this operation is not available remotely)")
 	public void declareBinding(final Binding binding) {
 		try {
 			this.rabbitTemplate.execute(channel -> {
@@ -295,7 +361,8 @@ public class RabbitAdmin implements AmqpAdmin, ApplicationContextAware, Applicat
 	}
 
 	@Override
-	@ManagedOperation
+	@ManagedOperation(description =
+			"Remove a binding from the broker (this operation is not available remotely)")
 	public void removeBinding(final Binding binding) {
 		this.rabbitTemplate.execute(channel -> {
 			if (binding.isDestinationQueue()) {
@@ -319,6 +386,7 @@ public class RabbitAdmin implements AmqpAdmin, ApplicationContextAware, Applicat
 	 * {@link #QUEUE_CONSUMER_COUNT}, or null if the queue doesn't exist.
 	 */
 	@Override
+	@ManagedOperation(description = "Get queue name, message count and consumer count")
 	public Properties getQueueProperties(final String queueName) {
 		Assert.hasText(queueName, "'queueName' cannot be null or empty");
 		return this.rabbitTemplate.execute(channel -> {
@@ -353,6 +421,34 @@ public class RabbitAdmin implements AmqpAdmin, ApplicationContextAware, Applicat
 		});
 	}
 
+	/**
+	 * Set a retry template for auto declarations. There is a race condition with
+	 * auto-delete, exclusive queues in that the queue might still exist for a short time,
+	 * preventing the redeclaration. The default retry configuration will try 5 times with
+	 * an exponential backOff starting at 1 second a multiplier of 2.0 and a max interval
+	 * of 5 seconds. To disable retry, set the argument to {@code null}. Note that this
+	 * retry is at the macro level - all declarations will be retried within the scope of
+	 * this template. If you supplied a {@link RabbitTemplate} that is configured with a
+	 * {@link RetryTemplate}, its template will retry each individual declaration.
+	 * @param retryTemplate the retry template.
+	 * @since 1.7.8
+	 */
+	public void setRetryTemplate(RetryTemplate retryTemplate) {
+		this.retryTemplate = retryTemplate;
+		if (retryTemplate == null) {
+			this.retryDisabled = true;
+		}
+	}
+
+	@Override
+	public void setBeanName(String name) {
+		this.beanName = name;
+	}
+
+	public String getBeanName() {
+		return this.beanName;
+	}
+
 	// Lifecycle implementation
 
 	public boolean isAutoStartup() {
@@ -377,6 +473,15 @@ public class RabbitAdmin implements AmqpAdmin, ApplicationContextAware, Applicat
 				return;
 			}
 
+			if (this.retryTemplate == null && !this.retryDisabled) {
+				this.retryTemplate = new RetryTemplate();
+				this.retryTemplate.setRetryPolicy(new SimpleRetryPolicy(5));
+				ExponentialBackOffPolicy backOffPolicy = new ExponentialBackOffPolicy();
+				backOffPolicy.setInitialInterval(1000);
+				backOffPolicy.setMultiplier(2.0);
+				backOffPolicy.setMaxInterval(5000);
+				this.retryTemplate.setBackOffPolicy(backOffPolicy);
+			}
 			if (this.connectionFactory instanceof CachingConnectionFactory &&
 					((CachingConnectionFactory) this.connectionFactory).getCacheMode() == CacheMode.CONNECTION) {
 				this.logger.warn("RabbitAdmin auto declaration is not supported with CacheMode.CONNECTION");
@@ -399,7 +504,15 @@ public class RabbitAdmin implements AmqpAdmin, ApplicationContextAware, Applicat
 					 * chatter). In fact it might even be a good thing: exclusive queues only make sense if they are
 					 * declared for every connection. If anyone has a problem with it: use auto-startup="false".
 					 */
-					initialize();
+					if (this.retryTemplate != null) {
+						this.retryTemplate.execute(c -> {
+							initialize();
+							return null;
+						});
+					}
+					else {
+						initialize();
+					}
 				}
 				finally {
 					initializing.compareAndSet(true, false);
@@ -416,6 +529,7 @@ public class RabbitAdmin implements AmqpAdmin, ApplicationContextAware, Applicat
 	 * Declares all the exchanges, queues and bindings in the enclosing application context, if any. It should be safe
 	 * (but unnecessary) to call this method more than once.
 	 */
+	@Override
 	public void initialize() {
 
 		if (this.applicationContext == null) {
@@ -431,11 +545,15 @@ public class RabbitAdmin implements AmqpAdmin, ApplicationContextAware, Applicat
 		Collection<Binding> contextBindings = new LinkedList<Binding>(
 				this.applicationContext.getBeansOfType(Binding.class).values());
 
+		// TODO: remove in 3.0
 		@SuppressWarnings("rawtypes")
-		Collection<Collection> collections = this.applicationContext.getBeansOfType(Collection.class, false, false)
-				.values();
+		Collection<Collection> collections = this.declareCollections
+			? this.applicationContext.getBeansOfType(Collection.class, false, false).values()
+			: Collections.emptyList();
+		boolean shouldWarn = false;
 		for (Collection<?> collection : collections) {
 			if (collection.size() > 0 && collection.iterator().next() instanceof Declarable) {
+				shouldWarn = true;
 				for (Object declarable : collection) {
 					if (declarable instanceof Exchange) {
 						contextExchanges.add((Exchange) declarable);
@@ -449,6 +567,27 @@ public class RabbitAdmin implements AmqpAdmin, ApplicationContextAware, Applicat
 				}
 			}
 		}
+		if (shouldWarn && this.logger.isWarnEnabled()) {
+			this.logger.warn("Beans of type Collection<Declarable> are discouraged, and deprecated, "
+					+ "use Declarables beans instead");
+		}
+		// end TODO
+
+		Collection<Declarables> declarables = this.applicationContext.getBeansOfType(Declarables.class, false, true)
+				.values();
+		declarables.forEach(d -> {
+			d.getDeclarables().forEach(declarable -> {
+				if (declarable instanceof Exchange) {
+					contextExchanges.add((Exchange) declarable);
+				}
+				else if (declarable instanceof Queue) {
+					contextQueues.add((Queue) declarable);
+				}
+				else if (declarable instanceof Binding) {
+					contextBindings.add((Binding) declarable);
+				}
+			});
+		});
 
 		final Collection<Exchange> exchanges = filterDeclarables(contextExchanges);
 		final Collection<Queue> queues = filterDeclarables(contextQueues);
@@ -475,6 +614,10 @@ public class RabbitAdmin implements AmqpAdmin, ApplicationContextAware, Applicat
 			}
 		}
 
+		if (exchanges.size() == 0 && queues.size() == 0 && bindings.size() == 0) {
+			this.logger.debug("Nothing to declare");
+			return;
+		}
 		this.rabbitTemplate.execute(channel -> {
 			declareExchanges(channel, exchanges.toArray(new Exchange[exchanges.size()]));
 			declareQueues(channel, queues.toArray(new Queue[queues.size()]));
@@ -495,7 +638,8 @@ public class RabbitAdmin implements AmqpAdmin, ApplicationContextAware, Applicat
 	private <T extends Declarable> Collection<T> filterDeclarables(Collection<T> declarables) {
 		return declarables.stream()
 				.filter(d -> d.shouldDeclare()
-						&& (d.getDeclaringAdmins().isEmpty() || d.getDeclaringAdmins().contains(this)))
+						&& (d.getDeclaringAdmins().isEmpty() || d.getDeclaringAdmins().contains(this)
+								|| (this.beanName != null && d.getDeclaringAdmins().contains(this.beanName))))
 				.collect(Collectors.toList());
 	}
 
@@ -545,6 +689,9 @@ public class RabbitAdmin implements AmqpAdmin, ApplicationContextAware, Applicat
 					try {
 						DeclareOk declareOk = channel.queueDeclare(queue.getName(), queue.isDurable(),
 								queue.isExclusive(), queue.isAutoDelete(), queue.getArguments());
+						if (StringUtils.hasText(declareOk.getQueue())) {
+							queue.setActualName(declareOk.getQueue());
+						}
 						declareOks.add(declareOk);
 					}
 					catch (IllegalArgumentException e) {
@@ -598,8 +745,9 @@ public class RabbitAdmin implements AmqpAdmin, ApplicationContextAware, Applicat
 		}
 	}
 
-	private <T extends Throwable> void logOrRethrowDeclarationException(Declarable element, String elementType, T t)
-			throws T {
+	private <T extends Throwable> void logOrRethrowDeclarationException(@Nullable Declarable element,
+			String elementType, T t) throws T {
+
 		DeclarationExceptionEvent event = new DeclarationExceptionEvent(this, element, t);
 		this.lastDeclarationExceptionEvent = event;
 		if (this.applicationEventPublisher != null) {

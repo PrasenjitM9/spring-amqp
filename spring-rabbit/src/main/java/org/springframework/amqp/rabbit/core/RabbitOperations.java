@@ -1,5 +1,5 @@
 /*
- * Copyright 2002-2017 the original author or authors.
+ * Copyright 2002-2018 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -21,14 +21,17 @@ import org.springframework.amqp.core.AmqpTemplate;
 import org.springframework.amqp.core.Message;
 import org.springframework.amqp.core.MessagePostProcessor;
 import org.springframework.amqp.rabbit.connection.ConnectionFactory;
-import org.springframework.amqp.rabbit.support.CorrelationData;
+import org.springframework.amqp.rabbit.connection.CorrelationData;
 import org.springframework.core.ParameterizedTypeReference;
+import org.springframework.lang.Nullable;
 
 /**
  * Rabbit specific methods for Amqp functionality.
+ *
  * @author Mark Pollack
  * @author Mark Fisher
  * @author Gary Russell
+ * @author Artem Bilan
  */
 public interface RabbitOperations extends AmqpTemplate {
 
@@ -52,7 +55,22 @@ public interface RabbitOperations extends AmqpTemplate {
 	 * @throws AmqpException if one occurs.
 	 * @since 2.0
 	 */
-	<T> T invoke(OperationsCallback<T> action) throws AmqpException;
+	default <T> T invoke(OperationsCallback<T> action) throws AmqpException {
+		return invoke(action, null, null);
+	}
+
+	/**
+	 * Invoke operations on the same channel.
+	 * If callbacks are needed, both callbacks must be supplied.
+	 * @param action the callback.
+	 * @param acks a confirm callback for acks.
+	 * @param nacks a confirm callback for nacks.
+	 * @param <T> the return type.
+	 * @return the result of the action method.
+	 * @since 2.1
+	 */
+	<T> T invoke(OperationsCallback<T> action, @Nullable com.rabbitmq.client.ConfirmCallback acks,
+			@Nullable com.rabbitmq.client.ConfirmCallback nacks);
 
 	/**
 	 * Delegate to the underlying dedicated channel to wait for confirms. The connection
@@ -318,8 +336,12 @@ public interface RabbitOperations extends AmqpTemplate {
 	 * @return the response if there is one
 	 * @throws AmqpException if there is a problem
 	 */
-	<T> T convertSendAndReceiveAsType(String exchange, String routingKey, Object message,
-			CorrelationData correlationData, ParameterizedTypeReference<T> responseType) throws AmqpException;
+	default <T> T convertSendAndReceiveAsType(String exchange, String routingKey, Object message,
+			@Nullable CorrelationData correlationData, ParameterizedTypeReference<T> responseType)
+					throws AmqpException {
+
+		return convertSendAndReceiveAsType(exchange, routingKey, message, null, correlationData, responseType);
+	}
 
 	/**
 	 * Basic RPC pattern with conversion. Send a Java object converted to a message to a
@@ -380,7 +402,7 @@ public interface RabbitOperations extends AmqpTemplate {
 	 * @throws AmqpException if there is a problem
 	 */
 	<T> T convertSendAndReceiveAsType(String exchange, String routingKey, Object message,
-			MessagePostProcessor messagePostProcessor, CorrelationData correlationData,
+			@Nullable MessagePostProcessor messagePostProcessor, CorrelationData correlationData,
 			ParameterizedTypeReference<T> responseType) throws AmqpException;
 
 	/**

@@ -1,5 +1,5 @@
 /*
- * Copyright 2016-2017 the original author or authors.
+ * Copyright 2016-2018 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -17,7 +17,6 @@
 package org.springframework.amqp.rabbit.listener;
 
 import static org.hamcrest.Matchers.greaterThanOrEqualTo;
-import static org.hamcrest.Matchers.instanceOf;
 import static org.junit.Assert.assertArrayEquals;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
@@ -55,20 +54,19 @@ import org.springframework.amqp.core.Queue;
 import org.springframework.amqp.rabbit.connection.CachingConnectionFactory;
 import org.springframework.amqp.rabbit.connection.Connection;
 import org.springframework.amqp.rabbit.connection.ConnectionFactory;
-import org.springframework.amqp.rabbit.core.ChannelAwareMessageListener;
 import org.springframework.amqp.rabbit.core.RabbitAdmin;
 import org.springframework.amqp.rabbit.core.RabbitTemplate;
 import org.springframework.amqp.rabbit.junit.BrokerRunning;
 import org.springframework.amqp.rabbit.listener.DirectReplyToMessageListenerContainer.ChannelHolder;
 import org.springframework.amqp.rabbit.listener.adapter.MessageListenerAdapter;
 import org.springframework.amqp.rabbit.listener.adapter.ReplyingMessageListener;
+import org.springframework.amqp.rabbit.listener.api.ChannelAwareMessageListener;
 import org.springframework.amqp.rabbit.support.ArgumentBuilder;
 import org.springframework.amqp.rabbit.test.LogLevelAdjuster;
 import org.springframework.amqp.support.ConsumerTagStrategy;
 import org.springframework.amqp.support.converter.MessageConversionException;
 import org.springframework.amqp.utils.test.TestUtils;
 import org.springframework.context.ApplicationContext;
-import org.springframework.context.ApplicationEvent;
 import org.springframework.context.event.ContextClosedEvent;
 import org.springframework.context.support.GenericApplicationContext;
 import org.springframework.scheduling.concurrent.ThreadPoolTaskExecutor;
@@ -277,7 +275,7 @@ public class DirectMessageListenerContainerIntegrationTests {
 		cf.setExecutor(executor);
 		DirectMessageListenerContainer container = new DirectMessageListenerContainer(cf);
 		container.setQueueNames(Q1, Q2);
-		container.setConsumersPerQueue(2);
+		container.setConsumersPerQueue(4);
 		container.setMessageListener(new MessageListenerAdapter((ReplyingMessageListener<String, String>) in -> {
 			if ("foo".equals(in) || "bar".equals(in)) {
 				return in.toUpperCase();
@@ -293,8 +291,8 @@ public class DirectMessageListenerContainerIntegrationTests {
 		RabbitTemplate template = new RabbitTemplate(cf);
 		assertEquals("FOO", template.convertSendAndReceive(Q1, "foo"));
 		assertEquals("BAR", template.convertSendAndReceive(Q2, "bar"));
-		assertTrue(consumersOnQueue(Q1, 2));
-		assertTrue(consumersOnQueue(Q2, 2));
+		assertTrue(consumersOnQueue(Q1, 4));
+		assertTrue(consumersOnQueue(Q2, 4));
 		container.setConsumersPerQueue(1);
 		assertTrue(consumersOnQueue(Q1, 1));
 		assertTrue(consumersOnQueue(Q2, 1));
@@ -317,15 +315,13 @@ public class DirectMessageListenerContainerIntegrationTests {
 		container.setQueueNames(EQ1, EQ2);
 		final List<Long> times = new ArrayList<>();
 		final CountDownLatch latch1 = new CountDownLatch(2);
-		final AtomicReference<ApplicationEvent> failEvent = new AtomicReference<>();
 		final CountDownLatch latch2 = new CountDownLatch(2);
 		container.setApplicationEventPublisher(event -> {
 			if (event instanceof ListenerContainerIdleEvent) {
 				times.add(System.currentTimeMillis());
 				latch1.countDown();
 			}
-			else {
-				failEvent.set((ApplicationEvent) event);
+			else if (event instanceof ListenerContainerConsumerTerminatedEvent) {
 				latch2.countDown();
 			}
 		});
@@ -339,8 +335,6 @@ public class DirectMessageListenerContainerIntegrationTests {
 		assertThat(times.get(1) - times.get(0), greaterThanOrEqualTo(50L));
 		brokerRunning.deleteQueues(EQ1, EQ2);
 		assertTrue(latch2.await(10, TimeUnit.SECONDS));
-		assertNotNull(failEvent.get());
-		assertThat(failEvent.get(), instanceOf(ListenerContainerConsumerTerminatedEvent.class));
 		container.stop();
 		cf.destroy();
 	}
@@ -382,7 +376,7 @@ public class DirectMessageListenerContainerIntegrationTests {
 	@Test
 	public void testContainerNotRecoveredAfterExhaustingRecoveryBackOff() throws Exception {
 		ConnectionFactory mockCF = mock(ConnectionFactory.class);
-		given(mockCF.createConnection()).willThrow(new RuntimeException("intended - backOff test"));
+		given(mockCF.createConnection()).willReturn(null).willThrow(new RuntimeException("intended - backOff test"));
 		DirectMessageListenerContainer container = new DirectMessageListenerContainer(mockCF);
 		container.setQueueNames("foo");
 		container.setRecoveryBackOff(new FixedBackOff(100, 3));
@@ -532,17 +526,22 @@ public class DirectMessageListenerContainerIntegrationTests {
 		CachingConnectionFactory cf = new CachingConnectionFactory("localhost");
 		DirectReplyToMessageListenerContainer container = new DirectReplyToMessageListenerContainer(cf);
 		container.setBeanName("releaseCancel");
+		final CountDownLatch consumeLatch = new CountDownLatch(1);
+		final CountDownLatch releaseLatch = new CountDownLatch(1);
+		container.setApplicationEventPublisher(e -> {
+			if (e instanceof ListenerContainerConsumerTerminatedEvent) {
+				releaseLatch.countDown();
+			}
+			else if (e instanceof ConsumeOkEvent) {
+				consumeLatch.countDown();
+			}
+		});
 		container.afterPropertiesSet();
 		container.start();
 		ChannelHolder channelHolder = container.getChannelHolder();
-		final CountDownLatch latch = new CountDownLatch(1);
-		container.setApplicationEventPublisher(e -> {
-			if (e instanceof ListenerContainerConsumerTerminatedEvent) {
-				latch.countDown();
-			}
-		});
+		assertTrue(consumeLatch.await(10, TimeUnit.SECONDS));
 		container.releaseConsumerFor(channelHolder, true, "foo");
-		assertTrue(latch.await(10, TimeUnit.SECONDS));
+		assertTrue(releaseLatch.await(10, TimeUnit.SECONDS));
 		container.stop();
 		cf.destroy();
 	}
@@ -552,12 +551,22 @@ public class DirectMessageListenerContainerIntegrationTests {
 		CachingConnectionFactory cf = new CachingConnectionFactory("localhost");
 		DirectReplyToMessageListenerContainer container = new DirectReplyToMessageListenerContainer(cf);
 		container.setBeanName("reducing");
-		container.setIdleEventInterval(500);
+		container.setIdleEventInterval(100);
+		CountDownLatch latch = new CountDownLatch(5);
+		container.setApplicationEventPublisher(e -> {
+			if (e instanceof ListenerContainerIdleEvent) {
+				latch.countDown();
+			}
+		});
 		container.afterPropertiesSet();
 		container.start();
-		ChannelHolder channelHolder = container.getChannelHolder();
-		assertTrue(activeConsumerCount(container, 1));
-		container.releaseConsumerFor(channelHolder, false, null);
+		ChannelHolder channelHolder1 = container.getChannelHolder();
+		ChannelHolder channelHolder2 = container.getChannelHolder();
+		assertTrue(activeConsumerCount(container, 2));
+		container.releaseConsumerFor(channelHolder2, false, null);
+		assertTrue(latch.await(10, TimeUnit.SECONDS));
+		assertTrue(channelHolder1.getChannel().isOpen());
+		container.releaseConsumerFor(channelHolder1, false, null);
 		assertTrue(activeConsumerCount(container, 0));
 		container.stop();
 		cf.destroy();

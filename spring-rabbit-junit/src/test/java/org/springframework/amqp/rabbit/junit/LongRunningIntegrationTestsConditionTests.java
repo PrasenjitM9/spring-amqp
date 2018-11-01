@@ -14,16 +14,20 @@
  * limitations under the License.
  */
 
-package org.springframework.amqp.support;
+package org.springframework.amqp.rabbit.junit;
+
+import org.junit.jupiter.api.Test;
 
 /**
- * A marker interface for data used to correlate information about sent messages.
- * One example might be used to correlate a send confirmation.
- *
  * @author Gary Russell
- * @since 1.6.7
+ * @since 2.0.2
  *
  */
-public interface Correlation {
+@LongRunning("LongRunningIntegrationTestsConditionTests")
+public class LongRunningIntegrationTestsConditionTests {
+
+	@Test
+	public void test() {
+	}
 
 }

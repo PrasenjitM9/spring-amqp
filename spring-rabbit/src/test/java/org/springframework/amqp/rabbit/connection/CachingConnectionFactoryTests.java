@@ -1,5 +1,5 @@
 /*
- * Copyright 2002-2017 the original author or authors.
+ * Copyright 2002-2018 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -61,6 +61,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 
+import org.apache.commons.logging.Log;
 import org.junit.Ignore;
 import org.junit.Test;
 import org.mockito.InOrder;
@@ -126,6 +127,43 @@ public class CachingConnectionFactoryTests extends AbstractConnectionFactoryTest
 		assertSame(channel, channel2);
 		verify(mockConnection, never()).close();
 		verify(mockChannel, never()).close();
+	}
+
+	@Test
+	public void testPublisherConnection() throws Exception {
+		com.rabbitmq.client.ConnectionFactory mockConnectionFactory = mock(com.rabbitmq.client.ConnectionFactory.class);
+		com.rabbitmq.client.Connection mockConnection = mock(com.rabbitmq.client.Connection.class);
+		Channel mockChannel = mock(Channel.class);
+
+		when(mockConnectionFactory.newConnection(any(ExecutorService.class), anyString())).thenReturn(mockConnection);
+		when(mockConnection.createChannel()).thenReturn(mockChannel);
+		when(mockChannel.isOpen()).thenReturn(true);
+		when(mockConnection.isOpen()).thenReturn(true);
+
+		CachingConnectionFactory ccf = new CachingConnectionFactory(mockConnectionFactory);
+		ccf.setExecutor(mock(ExecutorService.class));
+		Connection con = ccf.getPublisherConnectionFactory().createConnection();
+
+		Channel channel = con.createChannel(false);
+		channel.close(); // should be ignored, and placed into channel cache.
+		con.close(); // should be ignored
+
+		Connection con2 = ccf.getPublisherConnectionFactory().createConnection();
+		/*
+		 * will retrieve same channel object that was just put into channel cache
+		 */
+		Channel channel2 = con2.createChannel(false);
+		channel2.close(); // should be ignored
+		con2.close(); // should be ignored
+
+		assertSame(con, con2);
+		assertSame(channel, channel2);
+		verify(mockConnection, never()).close();
+		verify(mockChannel, never()).close();
+
+		assertNull(TestUtils.getPropertyValue(ccf, "connection.target"));
+		assertNotNull(TestUtils.getPropertyValue(ccf, "publisherConnectionFactory.connection.target"));
+		assertSame(con, TestUtils.getPropertyValue(ccf, "publisherConnectionFactory.connection"));
 	}
 
 	@Test
@@ -1474,6 +1512,7 @@ public class CachingConnectionFactoryTests extends AbstractConnectionFactoryTest
 				return null;
 			}).when(mockChannel).close();
 			channel.close();
+			RabbitUtils.setPhysicalCloseRequired(channel, false);
 			con.close(); // should be ignored
 
 			assertTrue(physicalCloseLatch.await(10, TimeUnit.SECONDS));
@@ -1507,6 +1546,11 @@ public class CachingConnectionFactoryTests extends AbstractConnectionFactoryTest
 		ccf.createConnection();
 		verify(mock).isAutomaticRecoveryEnabled();
 		verify(mock).setHost("abc");
+		Log logger = TestUtils.getPropertyValue(ccf, "logger", Log.class);
+		if (logger.isInfoEnabled()) {
+			verify(mock).getHost();
+			verify(mock).getPort();
+		}
 		verify(mock).newConnection(any(ExecutorService.class), anyString());
 		verifyNoMoreInteractions(mock);
 	}
@@ -1531,6 +1575,7 @@ public class CachingConnectionFactoryTests extends AbstractConnectionFactoryTest
 		ccf.setAddresses("mq1,mq2");
 		ccf.createConnection();
 		verify(mock).isAutomaticRecoveryEnabled();
+		verify(mock).setAutomaticRecoveryEnabled(false);
 		verify(mock).newConnection(isNull(),
 				aryEq(new Address[] { new Address("mq1"), new Address("mq2") }), anyString());
 		verifyNoMoreInteractions(mock);
@@ -1550,6 +1595,11 @@ public class CachingConnectionFactoryTests extends AbstractConnectionFactoryTest
 		InOrder order = inOrder(mock);
 		order.verify(mock).isAutomaticRecoveryEnabled();
 		order.verify(mock).setUri(uri);
+		Log logger = TestUtils.getPropertyValue(ccf, "logger", Log.class);
+		if (logger.isInfoEnabled()) {
+			order.verify(mock).getHost();
+			order.verify(mock).getPort();
+		}
 		order.verify(mock).newConnection(any(ExecutorService.class), anyString());
 		verifyNoMoreInteractions(mock);
 	}
@@ -1601,6 +1651,7 @@ public class CachingConnectionFactoryTests extends AbstractConnectionFactoryTest
 		Channel channel = conn.createChannel(false);
 		RabbitUtils.setPhysicalCloseRequired(channel, true);
 		channel.close();
+		RabbitUtils.setPhysicalCloseRequired(channel, false);
 		Thread.sleep(6000);
 	}
 

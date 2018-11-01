@@ -1,5 +1,5 @@
 /*
- * Copyright 2002-2017 the original author or authors.
+ * Copyright 2002-2018 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -31,7 +31,6 @@ import org.junit.Test;
 import org.junit.rules.ExpectedException;
 
 import org.springframework.amqp.core.AcknowledgeMode;
-import org.springframework.amqp.core.MessageListener;
 import org.springframework.amqp.core.MessagePostProcessor;
 import org.springframework.amqp.rabbit.connection.ConnectionFactory;
 import org.springframework.amqp.rabbit.listener.AbstractMessageListenerContainer;
@@ -51,6 +50,7 @@ import org.springframework.util.backoff.ExponentialBackOff;
  * @author Stephane Nicoll
  * @author Artem Bilan
  * @author Joris Kuipers
+ * @author Gary Russell
  *
  */
 public class RabbitListenerContainerFactoryTests {
@@ -68,7 +68,7 @@ public class RabbitListenerContainerFactoryTests {
 
 	private final MessageConverter messageConverter = new SimpleMessageConverter();
 
-	private final MessageListener messageListener = new MessageListenerAdapter();
+	private final MessageListenerAdapter messageListener = new MessageListenerAdapter();
 
 	@Test
 	public void createSimpleContainer() {
@@ -109,6 +109,7 @@ public class RabbitListenerContainerFactoryTests {
 		this.factory.setRecoveryBackOff(recoveryBackOff);
 		this.factory.setMissingQueuesFatal(true);
 		this.factory.setAfterReceivePostProcessors(afterReceivePostProcessor);
+		this.factory.setContainerConfigurer(c -> c.setShutdownTimeout(10_000));
 
 		assertArrayEquals(new Advice[] {advice}, this.factory.getAdviceChain());
 
@@ -131,6 +132,7 @@ public class RabbitListenerContainerFactoryTests {
 		assertEquals(6, fieldAccessor.getPropertyValue("consecutiveIdleTrigger"));
 		assertEquals(3, fieldAccessor.getPropertyValue("prefetchCount"));
 		assertEquals(1500L, fieldAccessor.getPropertyValue("receiveTimeout"));
+		assertEquals(10_000L, fieldAccessor.getPropertyValue("shutdownTimeout"));
 		assertEquals(false, fieldAccessor.getPropertyValue("defaultRequeueRejected"));
 		Advice[] actualAdviceChain = (Advice[]) fieldAccessor.getPropertyValue("adviceChain");
 		assertEquals("Wrong number of advice", 1, actualAdviceChain.length);
@@ -200,7 +202,7 @@ public class RabbitListenerContainerFactoryTests {
 	private void setBasicConfig(AbstractRabbitListenerContainerFactory<?> factory) {
 		factory.setConnectionFactory(this.connectionFactory);
 		factory.setErrorHandler(this.errorHandler);
-		factory.setMessageConverter(this.messageConverter);
+		this.messageListener.setMessageConverter(this.messageConverter);
 		factory.setAcknowledgeMode(AcknowledgeMode.MANUAL);
 		factory.setChannelTransacted(true);
 		factory.setAutoStartup(false);
@@ -211,7 +213,7 @@ public class RabbitListenerContainerFactoryTests {
 		DirectFieldAccessor fieldAccessor = new DirectFieldAccessor(container);
 		assertSame(connectionFactory, container.getConnectionFactory());
 		assertSame(errorHandler, fieldAccessor.getPropertyValue("errorHandler"));
-		assertSame(messageConverter, container.getMessageConverter());
+		assertSame(messageConverter, fieldAccessor.getPropertyValue("messageListener.messageConverter"));
 		assertEquals(AcknowledgeMode.MANUAL, container.getAcknowledgeMode());
 		assertEquals(true, container.isChannelTransacted());
 		assertEquals(false, container.isAutoStartup());

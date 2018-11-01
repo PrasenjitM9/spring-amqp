@@ -1,5 +1,5 @@
 /*
- * Copyright 2002-2017 the original author or authors.
+ * Copyright 2002-2018 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -83,6 +83,14 @@ public interface AmqpAdmin {
 	 */
 	void purgeQueue(String queueName, boolean noWait);
 
+	/**
+	 * Purges the contents of the given queue.
+	 * @param queueName the name of the queue.
+	 * @return the number of messages purged.
+	 * @since 2.1
+	 */
+	int purgeQueue(String queueName);
+
 	// Binding operations
 
 	/**
@@ -104,5 +112,13 @@ public interface AmqpAdmin {
 	 * @return the properties or null if the queue doesn't exist.
 	 */
 	Properties getQueueProperties(String queueName);
+
+	/**
+	 * Initialize the admin.
+	 * @since 2.1
+	 */
+	default void initialize() {
+		// no op
+	}
 
 }

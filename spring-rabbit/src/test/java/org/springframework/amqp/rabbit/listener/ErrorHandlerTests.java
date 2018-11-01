@@ -1,5 +1,5 @@
 /*
- * Copyright 2016-2017 the original author or authors.
+ * Copyright 2016-2018 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -27,12 +27,14 @@ import org.apache.commons.logging.Log;
 import org.junit.Test;
 
 import org.springframework.amqp.AmqpRejectAndDontRequeueException;
+import org.springframework.amqp.core.MessageProperties;
 import org.springframework.amqp.rabbit.listener.exception.ListenerExecutionFailedException;
 import org.springframework.amqp.support.converter.MessageConversionException;
 import org.springframework.amqp.utils.test.TestUtils;
 import org.springframework.beans.DirectFieldAccessor;
 import org.springframework.core.MethodParameter;
 import org.springframework.messaging.Message;
+import org.springframework.messaging.MessageHandlingException;
 import org.springframework.messaging.handler.annotation.support.MethodArgumentNotValidException;
 import org.springframework.messaging.handler.annotation.support.MethodArgumentTypeMismatchException;
 
@@ -52,11 +54,11 @@ public class ErrorHandlerTests {
 		willDoNothing().given(logger).warn(anyString(), any(Throwable.class));
 		new DirectFieldAccessor(handler).setPropertyValue("logger", logger);
 		handler.handleError(new ListenerExecutionFailedException("intended", new RuntimeException(),
-				mock(org.springframework.amqp.core.Message.class)));
+				new org.springframework.amqp.core.Message("".getBytes(), new MessageProperties())));
 
 		try {
 			handler.handleError(new ListenerExecutionFailedException("intended", new MessageConversionException(""),
-					mock(org.springframework.amqp.core.Message.class)));
+					new org.springframework.amqp.core.Message("".getBytes(), new MessageProperties())));
 			fail("Expected exception");
 		}
 		catch (AmqpRejectAndDontRequeueException e) {
@@ -65,7 +67,7 @@ public class ErrorHandlerTests {
 		try {
 			handler.handleError(new ListenerExecutionFailedException("intended",
 					new org.springframework.messaging.converter.MessageConversionException(""),
-					mock(org.springframework.amqp.core.Message.class)));
+					new org.springframework.amqp.core.Message("".getBytes(), new MessageProperties())));
 			fail("Expected exception");
 		}
 		catch (AmqpRejectAndDontRequeueException e) {
@@ -76,7 +78,7 @@ public class ErrorHandlerTests {
 		try {
 			handler.handleError(new ListenerExecutionFailedException("intended",
 					new MethodArgumentNotValidException(message, mp),
-					mock(org.springframework.amqp.core.Message.class)));
+					new org.springframework.amqp.core.Message("".getBytes(), new MessageProperties())));
 			fail("Expected exception");
 		}
 		catch (AmqpRejectAndDontRequeueException e) {
@@ -85,11 +87,44 @@ public class ErrorHandlerTests {
 		try {
 			handler.handleError(new ListenerExecutionFailedException("intended",
 					new MethodArgumentTypeMismatchException(message, mp, ""),
-					mock(org.springframework.amqp.core.Message.class)));
+					new org.springframework.amqp.core.Message("".getBytes(), new MessageProperties())));
 			fail("Expected exception");
 		}
 		catch (AmqpRejectAndDontRequeueException e) {
 		}
+	}
+
+	@Test
+	public void testSimple() {
+		Throwable cause = new ClassCastException();
+		try {
+			doTest(cause);
+			fail("Expected exception");
+		}
+		catch (AmqpRejectAndDontRequeueException e) {
+			// noop
+		}
+	}
+
+	@Test
+	public void testMessagingException() {
+		Throwable cause = new MessageHandlingException(null, "test",
+				new MessageHandlingException(null, "test", new ClassCastException()));
+		try {
+			doTest(cause);
+			fail("Expected exception");
+		}
+		catch (AmqpRejectAndDontRequeueException e) {
+			// noop
+		}
+	}
+
+	private void doTest(Throwable cause) {
+		ConditionalRejectingErrorHandler handler = new ConditionalRejectingErrorHandler();
+		handler.handleError(
+				new ListenerExecutionFailedException("test", cause,
+						new org.springframework.amqp.core.Message(new byte[0],
+				new MessageProperties())));
 	}
 
 	private static class Foo {

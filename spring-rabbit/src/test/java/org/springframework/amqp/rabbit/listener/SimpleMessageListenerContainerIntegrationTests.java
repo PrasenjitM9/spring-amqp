@@ -1,5 +1,5 @@
 /*
- * Copyright 2002-2016 the original author or authors.
+ * Copyright 2002-2018 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -43,12 +43,12 @@ import org.springframework.amqp.core.Message;
 import org.springframework.amqp.core.MessageListener;
 import org.springframework.amqp.core.Queue;
 import org.springframework.amqp.rabbit.connection.CachingConnectionFactory;
-import org.springframework.amqp.rabbit.core.ChannelAwareMessageListener;
 import org.springframework.amqp.rabbit.core.RabbitTemplate;
 import org.springframework.amqp.rabbit.junit.BrokerRunning;
 import org.springframework.amqp.rabbit.junit.BrokerTestUtils;
 import org.springframework.amqp.rabbit.junit.LongRunningIntegrationTest;
 import org.springframework.amqp.rabbit.listener.adapter.MessageListenerAdapter;
+import org.springframework.amqp.rabbit.listener.api.ChannelAwareMessageListener;
 import org.springframework.amqp.rabbit.test.LogLevelAdjuster;
 import org.springframework.beans.factory.DisposableBean;
 import org.springframework.transaction.TransactionDefinition;
@@ -170,7 +170,6 @@ public class SimpleMessageListenerContainerIntegrationTests {
 	@After
 	public void clear() throws Exception {
 		// Wait for broker communication to finish before trying to stop container
-		Thread.sleep(300L);
 		logger.debug("Shutting down at end of test");
 		if (container != null) {
 			container.shutdown();
@@ -218,16 +217,16 @@ public class SimpleMessageListenerContainerIntegrationTests {
 	@Test
 	public void testNullQueue() throws Exception {
 		exception.expect(IllegalArgumentException.class);
-		container = createContainer((MessageListener) (m) -> { }, (Queue) null);
+		container = createContainer(m -> { }, (Queue) null);
 	}
 
 	@Test
 	public void testNullQueueName() throws Exception {
 		exception.expect(IllegalArgumentException.class);
-		container = createContainer((MessageListener) (m) -> { }, (String) null);
+		container = createContainer(m -> { }, (String) null);
 	}
 
-	private void doSunnyDayTest(CountDownLatch latch, Object listener) throws Exception {
+	private void doSunnyDayTest(CountDownLatch latch, MessageListener listener) throws Exception {
 		container = createContainer(listener);
 		for (int i = 0; i < messageCount; i++) {
 			template.convertAndSend(queue.getName(), i + "foo");
@@ -237,7 +236,7 @@ public class SimpleMessageListenerContainerIntegrationTests {
 		assertNull(template.receiveAndConvert(queue.getName()));
 	}
 
-	private void doListenerWithExceptionTest(CountDownLatch latch, Object listener) throws Exception {
+	private void doListenerWithExceptionTest(CountDownLatch latch, MessageListener listener) throws Exception {
 		container = createContainer(listener);
 		if (acknowledgeMode.isTransactionAllowed()) {
 			// Should only need one message if it is going to fail
@@ -255,11 +254,7 @@ public class SimpleMessageListenerContainerIntegrationTests {
 			assertTrue("Timed out waiting for message", waited);
 		}
 		finally {
-			// Wait for broker communication to finish before trying to stop
-			// container
-			Thread.sleep(300L);
 			container.shutdown();
-			Thread.sleep(300L);
 		}
 		if (acknowledgeMode.isTransactionAllowed()) {
 			assertNotNull(template.receiveAndConvert(queue.getName()));
@@ -269,26 +264,26 @@ public class SimpleMessageListenerContainerIntegrationTests {
 		}
 	}
 
-	private SimpleMessageListenerContainer createContainer(Object listener) {
+	private SimpleMessageListenerContainer createContainer(MessageListener listener) {
 		SimpleMessageListenerContainer container = createContainer(listener, queue.getName());
 		container.afterPropertiesSet();
 		container.start();
 		return container;
 	}
 
-	private SimpleMessageListenerContainer createContainer(Object listener, String queue) {
+	private SimpleMessageListenerContainer createContainer(MessageListener listener, String queue) {
 		SimpleMessageListenerContainer container = doCreateContainer(listener);
 		container.setQueueNames(queue);
 		return container;
 	}
 
-	private SimpleMessageListenerContainer createContainer(Object listener, Queue queue) {
+	private SimpleMessageListenerContainer createContainer(MessageListener listener, Queue queue) {
 		SimpleMessageListenerContainer container = doCreateContainer(listener);
 		container.setQueues(queue);
 		return container;
 	}
 
-	private SimpleMessageListenerContainer doCreateContainer(Object listener) {
+	private SimpleMessageListenerContainer doCreateContainer(MessageListener listener) {
 		SimpleMessageListenerContainer container = new SimpleMessageListenerContainer(template.getConnectionFactory());
 		container.setMessageListener(listener);
 		container.setTxSize(txSize);
@@ -297,6 +292,7 @@ public class SimpleMessageListenerContainerIntegrationTests {
 		container.setChannelTransacted(transactional);
 		container.setAcknowledgeMode(acknowledgeMode);
 		container.setBeanName("integrationTestContainer");
+		container.setReceiveTimeout(50);
 		// requires RabbitMQ 3.2.x
 //		container.setConsumerArguments(Collections. <String, Object> singletonMap("x-priority", Integer.valueOf(10)));
 		if (externalTransaction) {

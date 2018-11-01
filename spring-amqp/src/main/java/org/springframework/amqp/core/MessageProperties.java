@@ -1,5 +1,5 @@
 /*
- * Copyright 2002-2017 the original author or authors.
+ * Copyright 2002-2018 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -21,6 +21,7 @@ import java.lang.reflect.Method;
 import java.lang.reflect.Type;
 import java.util.Date;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 
 /**
@@ -62,7 +63,7 @@ public class MessageProperties implements Serializable {
 
 	public static final Integer DEFAULT_PRIORITY = 0;
 
-	private final Map<String, Object> headers = new HashMap<String, Object>();
+	private final Map<String, Object> headers = new HashMap<>();
 
 	private volatile Date timestamp;
 
@@ -119,6 +120,8 @@ public class MessageProperties implements Serializable {
 	private volatile MessageDeliveryMode receivedDeliveryMode;
 
 	private volatile boolean finalRetryForMessageWithNoId;
+
+	private volatile long publishSequenceNumber;
 
 	private volatile transient Type inferredArgumentType;
 
@@ -221,26 +224,6 @@ public class MessageProperties implements Serializable {
 	 */
 	public String getCorrelationId() {
 		return this.correlationId;
-	}
-
-	/**
-	 * Get the correlation id.
-	 * @return the correlation id
-	 * @deprecated use {@link #getCorrelationId()}.
-	 */
-	@Deprecated
-	public String getCorrelationIdString() {
-		return this.correlationId;
-	}
-
-	/**
-	 * Set the correlation id.
-	 * @param correlationId the id.
-	 * @deprecated - use {@link #setCorrelationId(String)}.
-	 */
-	@Deprecated
-	public void setCorrelationIdString(String correlationId) {
-		this.correlationId = correlationId;
 	}
 
 	public void setReplyTo(String replyTo) {
@@ -461,6 +444,24 @@ public class MessageProperties implements Serializable {
 	}
 
 	/**
+	 * Return the publish sequence number if publisher confirms are enabled; set by the template.
+	 * @return the sequence number.
+	 * @since 2.1
+	 */
+	public long getPublishSequenceNumber() {
+		return this.publishSequenceNumber;
+	}
+
+	/**
+	 * Set the publish sequence number, if publisher confirms are enabled; set by the template.
+	 * @param publishSequenceNumber the sequence number.
+	 * @since 2.1
+	 */
+	public void setPublishSequenceNumber(long publishSequenceNumber) {
+		this.publishSequenceNumber = publishSequenceNumber;
+	}
+
+	/**
 	 * The inferred target argument type when using a method-level
 	 * {@code @RabbitListener}.
 	 * @return the type.
@@ -514,6 +515,20 @@ public class MessageProperties implements Serializable {
 	 */
 	public void setTargetBean(Object targetBean) {
 		this.targetBean = targetBean;
+	}
+
+	/**
+	 * Return the x-death header.
+	 * @return the header.
+	 */
+	@SuppressWarnings("unchecked")
+	public List<Map<String, ?>> getXDeathHeader() {
+		try {
+			return (List<Map<String, ?>>) this.headers.get("x-death");
+		}
+		catch (Exception e) {
+			return null;
+		}
 	}
 
 	@Override
@@ -590,9 +605,16 @@ public class MessageProperties implements Serializable {
 		else if (!this.contentType.equals(other.contentType)) {
 			return false;
 		}
-		if (!this.correlationId.equals(other.correlationId)) {
+
+		if (this.correlationId == null) {
+			if (other.correlationId != null) {
+				return false;
+			}
+		}
+		else if (!this.correlationId.equals(other.correlationId)) {
 			return false;
 		}
+
 		if (this.deliveryMode != other.deliveryMode) {
 			return false;
 		}

@@ -1,5 +1,5 @@
 /*
- * Copyright 2002-2017 the original author or authors.
+ * Copyright 2002-2018 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -51,15 +51,16 @@ import org.springframework.amqp.core.DirectExchange;
 import org.springframework.amqp.core.Message;
 import org.springframework.amqp.core.MessageBuilder;
 import org.springframework.amqp.core.MessageListener;
+import org.springframework.amqp.core.MessageProperties;
 import org.springframework.amqp.core.Queue;
 import org.springframework.amqp.core.QueueBuilder;
 import org.springframework.amqp.rabbit.connection.CachingConnectionFactory;
-import org.springframework.amqp.rabbit.core.ChannelAwareMessageListener;
 import org.springframework.amqp.rabbit.core.RabbitAdmin;
 import org.springframework.amqp.rabbit.core.RabbitTemplate;
 import org.springframework.amqp.rabbit.junit.BrokerRunning;
 import org.springframework.amqp.rabbit.junit.BrokerTestUtils;
 import org.springframework.amqp.rabbit.listener.adapter.MessageListenerAdapter;
+import org.springframework.amqp.rabbit.listener.api.ChannelAwareMessageListener;
 import org.springframework.amqp.rabbit.listener.exception.ListenerExecutionFailedException;
 import org.springframework.amqp.support.converter.MessageConversionException;
 import org.springframework.amqp.utils.test.TestUtils;
@@ -127,6 +128,7 @@ public class MessageListenerContainerErrorHandlerIntegrationTests {
 			}
 			throw new RuntimeException("bar");
 		});
+		container.setReceiveTimeout(50);
 		container.start();
 		Log logger = spy(TestUtils.getPropertyValue(container, "logger", Log.class));
 		doReturn(true).when(logger).isWarnEnabled();
@@ -217,6 +219,7 @@ public class MessageListenerContainerErrorHandlerIntegrationTests {
 		admin.declareBinding(BindingBuilder.bind(dlq).to(dle).with(testQueueName));
 
 		container.setQueueNames(testQueueName);
+		container.setReceiveTimeout(50);
 		container.afterPropertiesSet();
 		container.start();
 
@@ -262,7 +265,7 @@ public class MessageListenerContainerErrorHandlerIntegrationTests {
 		container.stop();
 
 		Exception e = new ListenerExecutionFailedException("foo", new MessageConversionException("bar"),
-				mock(Message.class));
+				new Message("".getBytes(), new MessageProperties()));
 		try {
 			eh.handleError(e);
 			fail("expected exception");
@@ -276,7 +279,7 @@ public class MessageListenerContainerErrorHandlerIntegrationTests {
 		((DisposableBean) template.getConnectionFactory()).destroy();
 	}
 
-	public void doTest(int messageCount, ErrorHandler errorHandler, CountDownLatch latch, Object listener)
+	public void doTest(int messageCount, ErrorHandler errorHandler, CountDownLatch latch, MessageListener listener)
 			throws Exception {
 		this.errorsHandled = new CountDownLatch(messageCount);
 		int concurrentConsumers = 1;
@@ -297,6 +300,7 @@ public class MessageListenerContainerErrorHandlerIntegrationTests {
 		container.setTxSize(messageCount);
 		container.setQueueNames(queue.getName());
 		container.setErrorHandler(errorHandler);
+		container.setReceiveTimeout(50);
 		container.afterPropertiesSet();
 		container.start();
 

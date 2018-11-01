@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2017 the original author or authors.
+ * Copyright 2014-2018 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -19,6 +19,7 @@ package org.springframework.amqp.rabbit.config;
 
 import java.util.concurrent.Executor;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.Consumer;
 
 import org.aopalliance.aop.Advice;
 import org.apache.commons.logging.Log;
@@ -31,6 +32,7 @@ import org.springframework.amqp.rabbit.listener.AbstractMessageListenerContainer
 import org.springframework.amqp.rabbit.listener.RabbitListenerContainerFactory;
 import org.springframework.amqp.rabbit.listener.RabbitListenerEndpoint;
 import org.springframework.amqp.rabbit.listener.SimpleMessageListenerContainer;
+import org.springframework.amqp.rabbit.listener.adapter.AbstractAdaptableMessageListener;
 import org.springframework.amqp.support.ConsumerTagStrategy;
 import org.springframework.amqp.support.converter.MessageConverter;
 import org.springframework.beans.BeansException;
@@ -38,6 +40,8 @@ import org.springframework.context.ApplicationContext;
 import org.springframework.context.ApplicationContextAware;
 import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.context.ApplicationEventPublisherAware;
+import org.springframework.retry.RecoveryCallback;
+import org.springframework.retry.support.RetryTemplate;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.util.ErrorHandler;
 import org.springframework.util.backoff.BackOff;
@@ -60,6 +64,8 @@ public abstract class AbstractRabbitListenerContainerFactory<C extends AbstractM
 		implements RabbitListenerContainerFactory<C>, ApplicationContextAware, ApplicationEventPublisherAware {
 
 	protected final Log logger = LogFactory.getLog(getClass());
+
+	protected final AtomicInteger counter = new AtomicInteger();
 
 	private ConnectionFactory connectionFactory;
 
@@ -103,7 +109,13 @@ public abstract class AbstractRabbitListenerContainerFactory<C extends AbstractM
 
 	private MessagePostProcessor[] afterReceivePostProcessors;
 
-	protected final AtomicInteger counter = new AtomicInteger();
+	private MessagePostProcessor[] beforeSendReplyPostProcessors;
+
+	private RetryTemplate retryTemplate;
+
+	private RecoveryCallback<?> recoveryCallback;
+
+	private Consumer<C> containerConfigurer;
 
 	/**
 	 * @param connectionFactory The connection factory.
@@ -274,14 +286,62 @@ public abstract class AbstractRabbitListenerContainerFactory<C extends AbstractM
 	}
 
 	/**
+	 * Set post processors which will be applied after the Message is received.
 	 * @param afterReceivePostProcessors the post processors.
+	 * @since 2.0
 	 * @see AbstractMessageListenerContainer#setAfterReceivePostProcessors(MessagePostProcessor...)
 	 */
 	public void setAfterReceivePostProcessors(MessagePostProcessor... afterReceivePostProcessors) {
 		this.afterReceivePostProcessors = afterReceivePostProcessors;
 	}
 
+	/**
+	 * Set post processors that will be applied before sending replies; added to each
+	 * message listener adapter.
+	 * @param beforeSendReplyPostProcessors the post processors.
+	 * @since 2.0.3
+	 * @see AbstractAdaptableMessageListener#setBeforeSendReplyPostProcessors(MessagePostProcessor...)
+	 */
+	public void setBeforeSendReplyPostProcessors(MessagePostProcessor... beforeSendReplyPostProcessors) {
+		this.beforeSendReplyPostProcessors = beforeSendReplyPostProcessors;
+	}
 
+	/**
+	 * Set a {@link RetryTemplate} to use when sending replies; added to each message
+	 * listener adapter.
+	 * @param retryTemplate the template.
+	 * @since 2.0.6
+	 * @see #setReplyRecoveryCallback(RecoveryCallback)
+	 * @see AbstractAdaptableMessageListener#setRetryTemplate(RetryTemplate)
+	 */
+	public void setRetryTemplate(RetryTemplate retryTemplate) {
+		this.retryTemplate = retryTemplate;
+	}
+
+	/**
+	 * Set a {@link RecoveryCallback} to invoke when retries are exhausted. Added to each
+	 * message listener adapter. Only used if a {@link #setRetryTemplate(RetryTemplate)
+	 * retryTemplate} is provided.
+	 * @param recoveryCallback the recovery callback.
+	 * @since 2.0.6
+	 * @see #setRetryTemplate(RetryTemplate)
+	 * @see AbstractAdaptableMessageListener#setRecoveryCallback(RecoveryCallback)
+	 */
+	public void setReplyRecoveryCallback(RecoveryCallback<?> recoveryCallback) {
+		this.recoveryCallback = recoveryCallback;
+	}
+
+	/**
+	 * A {@link Consumer} that is invoked to enable setting other container properties not
+	 * exposed  by this container factory.
+	 * @param configurer the configurer;
+	 * @since 2.1.1
+	 */
+	public void setContainerConfigurer(Consumer<C> configurer) {
+		this.containerConfigurer = configurer;
+	}
+
+	@SuppressWarnings("deprecation")
 	@Override
 	public C createListenerContainer(RabbitListenerEndpoint endpoint) {
 		C instance = createContainerInstance();
@@ -293,7 +353,15 @@ public abstract class AbstractRabbitListenerContainerFactory<C extends AbstractM
 			instance.setErrorHandler(this.errorHandler);
 		}
 		if (this.messageConverter != null) {
-			instance.setMessageConverter(this.messageConverter);
+			if (endpoint != null) {
+				endpoint.setMessageConverter(this.messageConverter);
+				if (endpoint.getMessageConverter() == null) {
+					instance.setMessageConverter(this.messageConverter);
+				}
+			}
+			else {
+				instance.setMessageConverter(this.messageConverter);
+			}
 		}
 		if (this.acknowledgeMode != null) {
 			instance.setAcknowledgeMode(this.acknowledgeMode);
@@ -340,10 +408,7 @@ public abstract class AbstractRabbitListenerContainerFactory<C extends AbstractM
 		if (this.applicationEventPublisher != null) {
 			instance.setApplicationEventPublisher(this.applicationEventPublisher);
 		}
-		if (endpoint.getAutoStartup() != null) {
-			instance.setAutoStartup(endpoint.getAutoStartup());
-		}
-		else if (this.autoStartup != null) {
+		if (this.autoStartup != null) {
 			instance.setAutoStartup(this.autoStartup);
 		}
 		if (this.phase != null) {
@@ -352,10 +417,32 @@ public abstract class AbstractRabbitListenerContainerFactory<C extends AbstractM
 		if (this.afterReceivePostProcessors != null) {
 			instance.setAfterReceivePostProcessors(this.afterReceivePostProcessors);
 		}
-		instance.setListenerId(endpoint.getId());
+		if (endpoint != null) {
+			if (endpoint.getAutoStartup() != null) {
+				instance.setAutoStartup(endpoint.getAutoStartup());
+			}
+			instance.setListenerId(endpoint.getId());
 
-		endpoint.setupListenerContainer(instance);
+			endpoint.setupListenerContainer(instance);
+		}
+		if (instance.getMessageListener() instanceof AbstractAdaptableMessageListener) {
+			AbstractAdaptableMessageListener messageListener = (AbstractAdaptableMessageListener) instance
+					.getMessageListener();
+			if (this.beforeSendReplyPostProcessors != null) {
+				messageListener.setBeforeSendReplyPostProcessors(this.beforeSendReplyPostProcessors);
+			}
+			if (this.retryTemplate != null) {
+				messageListener.setRetryTemplate(this.retryTemplate);
+				if (this.recoveryCallback != null) {
+					messageListener.setRecoveryCallback(this.recoveryCallback);
+				}
+			}
+		}
 		initializeContainer(instance, endpoint);
+
+		if (this.containerConfigurer != null) {
+			this.containerConfigurer.accept(instance);
+		}
 
 		return instance;
 	}

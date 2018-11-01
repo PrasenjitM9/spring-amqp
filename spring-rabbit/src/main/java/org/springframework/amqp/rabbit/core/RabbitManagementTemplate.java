@@ -1,5 +1,5 @@
 /*
- * Copyright 2015-2017 the original author or authors.
+ * Copyright 2015-2018 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -21,7 +21,6 @@ import java.util.stream.Collectors;
 
 import org.springframework.amqp.AmqpException;
 import org.springframework.amqp.core.AbstractExchange;
-import org.springframework.amqp.core.AmqpManagementOperations;
 import org.springframework.amqp.core.Binding;
 import org.springframework.amqp.core.Binding.DestinationType;
 import org.springframework.amqp.core.DirectExchange;
@@ -30,6 +29,7 @@ import org.springframework.amqp.core.FanoutExchange;
 import org.springframework.amqp.core.HeadersExchange;
 import org.springframework.amqp.core.Queue;
 import org.springframework.amqp.core.TopicExchange;
+import org.springframework.lang.Nullable;
 
 import com.rabbitmq.http.client.Client;
 import com.rabbitmq.http.client.domain.BindingInfo;
@@ -48,8 +48,10 @@ import com.rabbitmq.http.client.domain.QueueInfo;
  *
  * @since 1.5
  *
+ * @deprecated since 2.1 in favor of direct {@link Client} usage.
  */
-public class RabbitManagementTemplate implements AmqpManagementOperations {
+@Deprecated
+public class RabbitManagementTemplate implements org.springframework.amqp.core.AmqpManagementOperations {
 
 	private static final String DEFAULT_VHOST = "/";
 
@@ -229,7 +231,8 @@ public class RabbitManagementTemplate implements AmqpManagementOperations {
 				.collect(Collectors.toList());
 	}
 
-	private Queue convert(QueueInfo qi) {
+	@Nullable
+	private Queue convert(@Nullable QueueInfo qi) {
 		if (qi == null) {
 			return null;
 		}
@@ -243,7 +246,8 @@ public class RabbitManagementTemplate implements AmqpManagementOperations {
 				.collect(Collectors.toList());
 	}
 
-	private Exchange convert(ExchangeInfo ei) {
+	@Nullable
+	private Exchange convert(@Nullable ExchangeInfo ei) {
 		if (ei == null) {
 			return null;
 		}
@@ -279,7 +283,8 @@ public class RabbitManagementTemplate implements AmqpManagementOperations {
 				.collect(Collectors.toList());
 	}
 
-	private Binding convert(BindingInfo bi) {
+	@Nullable
+	private Binding convert(@Nullable BindingInfo bi) {
 		if (bi == null) {
 			return null;
 		}

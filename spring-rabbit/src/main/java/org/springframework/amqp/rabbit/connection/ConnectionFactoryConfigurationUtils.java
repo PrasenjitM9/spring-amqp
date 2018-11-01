@@ -1,5 +1,5 @@
 /*
- * Copyright 2016 the original author or authors.
+ * Copyright 2018 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -14,38 +14,40 @@
  * limitations under the License.
  */
 
-package org.springframework.amqp.rabbit.support;
+package org.springframework.amqp.rabbit.connection;
 
 import java.util.Map;
 
-import org.springframework.amqp.rabbit.connection.AbstractConnectionFactory;
-
 /**
- * Utility methods for log appenders.
+ * Utility methods for configuring connection factories.
  *
  * @author Gary Russell
- * @since 1.5.6
+ *
+ * @since 2.1
  *
  */
-public final class LogAppenderUtils {
+public final class ConnectionFactoryConfigurationUtils {
 
-	private LogAppenderUtils() {
-		// empty
+	private ConnectionFactoryConfigurationUtils() {
+		super();
 	}
 
 	/**
 	 * Parse the properties {@code key:value[,key:value]...} and add them to the
-	 * connection factory client properties.
+	 * underlying connection factory client properties.
 	 * @param connectionFactory the connection factory.
 	 * @param clientConnectionProperties the properties.
 	 */
 	public static void updateClientConnectionProperties(AbstractConnectionFactory connectionFactory,
 			String clientConnectionProperties) {
+
 		if (clientConnectionProperties != null) {
 			String[] props = clientConnectionProperties.split(",");
 			if (props.length > 0) {
-				Map<String, Object> clientProps = connectionFactory.getRabbitConnectionFactory()
-						.getClientProperties();
+				Map<String, Object> clientProps =
+						connectionFactory.getRabbitConnectionFactory()
+								.getClientProperties();
+
 				for (String prop : props) {
 					String[] aProp = prop.split(":");
 					if (aProp.length == 2) {

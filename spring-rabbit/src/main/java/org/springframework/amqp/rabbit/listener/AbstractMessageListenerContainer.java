@@ -1,5 +1,5 @@
 /*
- * Copyright 2002-2017 the original author or authors.
+ * Copyright 2002-2018 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -28,15 +28,18 @@ import java.util.Properties;
 import java.util.Set;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.Executor;
+import java.util.stream.Collectors;
 
 import org.aopalliance.aop.Advice;
 import org.apache.commons.logging.Log;
+import org.apache.commons.logging.LogFactory;
 
 import org.springframework.amqp.AmqpConnectException;
 import org.springframework.amqp.AmqpIOException;
 import org.springframework.amqp.AmqpRejectAndDontRequeueException;
 import org.springframework.amqp.ImmediateAcknowledgeAmqpException;
 import org.springframework.amqp.core.AcknowledgeMode;
+import org.springframework.amqp.core.AmqpAdmin;
 import org.springframework.amqp.core.Message;
 import org.springframework.amqp.core.MessageListener;
 import org.springframework.amqp.core.MessagePostProcessor;
@@ -49,8 +52,7 @@ import org.springframework.amqp.rabbit.connection.RabbitAccessor;
 import org.springframework.amqp.rabbit.connection.RabbitResourceHolder;
 import org.springframework.amqp.rabbit.connection.RabbitUtils;
 import org.springframework.amqp.rabbit.connection.RoutingConnectionFactory;
-import org.springframework.amqp.rabbit.core.ChannelAwareMessageListener;
-import org.springframework.amqp.rabbit.core.RabbitAdmin;
+import org.springframework.amqp.rabbit.listener.api.ChannelAwareMessageListener;
 import org.springframework.amqp.rabbit.listener.exception.FatalListenerExecutionException;
 import org.springframework.amqp.rabbit.listener.exception.FatalListenerStartupException;
 import org.springframework.amqp.rabbit.listener.exception.ListenerExecutionFailedException;
@@ -71,6 +73,7 @@ import org.springframework.context.ApplicationContextAware;
 import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.context.ApplicationEventPublisherAware;
 import org.springframework.core.task.SimpleAsyncTaskExecutor;
+import org.springframework.lang.Nullable;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.interceptor.DefaultTransactionAttribute;
 import org.springframework.transaction.interceptor.TransactionAttribute;
@@ -93,6 +96,7 @@ import com.rabbitmq.client.ShutdownSignalException;
  * @author Alex Panchenko
  * @author Johno Crawford
  * @author Arnaud Cogoluègnes
+ * @author Artem Bilan
  */
 public abstract class AbstractMessageListenerContainer extends RabbitAccessor
 		implements MessageListenerContainer, ApplicationContextAware, BeanNameAware, DisposableBean,
@@ -137,7 +141,7 @@ public abstract class AbstractMessageListenerContainer extends RabbitAccessor
 
 	private MessagePropertiesConverter messagePropertiesConverter = new DefaultMessagePropertiesConverter();
 
-	private RabbitAdmin rabbitAdmin;
+	private AmqpAdmin amqpAdmin;
 
 	private boolean missingQueuesFatal = true;
 
@@ -163,7 +167,7 @@ public abstract class AbstractMessageListenerContainer extends RabbitAccessor
 
 	private final Object lifecycleMonitor = new Object();
 
-	private volatile List<String> queueNames = new CopyOnWriteArrayList<String>();
+	private volatile List<Queue> queues = new CopyOnWriteArrayList<>();
 
 	private ErrorHandler errorHandler = new ConditionalRejectingErrorHandler();
 
@@ -210,6 +214,8 @@ public abstract class AbstractMessageListenerContainer extends RabbitAccessor
 	private String lookupKeyQualifier = "";
 
 	private boolean forceCloseChannel = true;
+
+	private String errorHandlerLoggerName = getClass().getName();
 
 	/**
 	 * {@inheritDoc}
@@ -259,7 +265,9 @@ public abstract class AbstractMessageListenerContainer extends RabbitAccessor
 	 */
 	public void setQueueNames(String... queueName) {
 		Assert.noNullElements(queueName, "Queue name(s) cannot be null");
-		this.queueNames = new CopyOnWriteArrayList<>(queueName);
+		setQueues(Arrays.stream(queueName)
+				.map(n -> new Queue(n))
+				.toArray(Queue[]::new));
 	}
 
 	/**
@@ -267,28 +275,42 @@ public abstract class AbstractMessageListenerContainer extends RabbitAccessor
 	 * @param queues the desired queue(s) (can not be <code>null</code>)
 	 */
 	public final void setQueues(Queue... queues) {
-		setQueueNames(collectQueueNames(queues));
-	}
-
-	private static String[] collectQueueNames(Queue... queues) {
 		Assert.notNull(queues, "'queues' cannot be null");
 		Assert.noNullElements(queues, "'queues' cannot contain null elements");
-		String[] queueNames = new String[queues.length];
-		for (int i = 0; i < queues.length; i++) {
-			queueNames[i] = queues[i].getName();
+		if (isRunning()) {
+			for (Queue queue : queues) {
+				Assert.isTrue(StringUtils.hasText(queue.getName()), "Cannot add broker-named queues dynamically");
+			}
 		}
-		return queueNames;
+		this.queues = new CopyOnWriteArrayList<>(queues);
 	}
 
 	/**
 	 * @return the name of the queues to receive messages from.
 	 */
 	public String[] getQueueNames() {
-		return this.queueNames.toArray(new String[this.queueNames.size()]);
+		return queuesToNames().toArray(new String[0]);
 	}
 
 	protected Set<String> getQueueNamesAsSet() {
-		return new HashSet<String>(this.queueNames);
+		return new HashSet<>(queuesToNames());
+	}
+
+	/**
+	 * Returns a map of current queue names to the Queue object; allows the
+	 * determination of a changed broker-named queue.
+	 * @return the map.
+	 * @since 2.1
+	 */
+	protected Map<String, Queue> getQueueNamesToQueues() {
+		return this.queues.stream()
+				.collect(Collectors.toMap(Queue::getActualName, q -> q));
+	}
+
+	private List<String> queuesToNames() {
+		return this.queues.stream()
+				.map(Queue::getActualName)
+				.collect(Collectors.toList());
 	}
 
 	/**
@@ -298,15 +320,24 @@ public abstract class AbstractMessageListenerContainer extends RabbitAccessor
 	public void addQueueNames(String... queueNames) {
 		Assert.notNull(queueNames, "'queueNames' cannot be null");
 		Assert.noNullElements(queueNames, "'queueNames' cannot contain null elements");
-		this.queueNames.addAll(Arrays.asList(queueNames));
+		addQueues(Arrays.stream(queueNames)
+				.map(n -> new Queue(n))
+				.toArray(Queue[]::new));
 	}
 
 	/**
 	 * Add queue(s) to this container's list of queues.
 	 * @param queues The queue(s) to add.
 	 */
-	public final void addQueues(Queue... queues) {
-		addQueueNames(collectQueueNames(queues));
+	public void addQueues(Queue... queues) {
+		Assert.notNull(queues, "'queues' cannot be null");
+		Assert.noNullElements(queues, "'queues' cannot contain null elements");
+		if (isRunning()) {
+			for (Queue queue : queues) {
+				Assert.hasText(queue.getName(), "Cannot add broker-named queues dynamically");
+			}
+		}
+		this.queues.addAll(Arrays.asList(queues));
 	}
 
 	/**
@@ -317,7 +348,12 @@ public abstract class AbstractMessageListenerContainer extends RabbitAccessor
 	public boolean removeQueueNames(String... queueNames) {
 		Assert.notNull(queueNames, "'queueNames' cannot be null");
 		Assert.noNullElements(queueNames, "'queueNames' cannot contain null elements");
-		return this.queueNames.removeAll(Arrays.asList(queueNames));
+		if (this.queues.size() > 0) {
+			Set<String> toRemove = new HashSet<>(Arrays.asList(queueNames));
+			return this.queues.removeIf(
+					q -> toRemove.contains(q.getActualName()));
+		}
+		return false;
 	}
 
 	/**
@@ -325,8 +361,12 @@ public abstract class AbstractMessageListenerContainer extends RabbitAccessor
 	 * @param queues The queue(s) to remove.
 	 * @return the boolean result of removal on the target {@code queueNames} List.
 	 */
-	public final boolean removeQueues(Queue... queues) {
-		return removeQueueNames(collectQueueNames(queues));
+	public boolean removeQueues(Queue... queues) {
+		Assert.notNull(queues, "'queues' cannot be null");
+		Assert.noNullElements(queues, "'queues' cannot contain null elements");
+		return removeQueueNames(Arrays.stream(queues)
+				.map(q -> q.getActualName())
+				.toArray(String[]::new));
 	}
 
 	/**
@@ -358,23 +398,23 @@ public abstract class AbstractMessageListenerContainer extends RabbitAccessor
 	/**
 	 * Set the message listener implementation to register. This can be either a Spring
 	 * {@link MessageListener} object or a Spring {@link ChannelAwareMessageListener}
-	 * object. Using the strongly typed
-	 * {@link #setChannelAwareMessageListener(ChannelAwareMessageListener)} is preferred.
+	 * object.
 	 *
 	 * @param messageListener The listener.
 	 * @throws IllegalArgumentException if the supplied listener is not a
 	 * {@link MessageListener} or a {@link ChannelAwareMessageListener}
+	 * @deprecated use {@link #setMessageListener(MessageListener)}.
 	 * @see MessageListener
 	 * @see ChannelAwareMessageListener
 	 */
+	@Deprecated
 	public void setMessageListener(Object messageListener) {
 		checkMessageListener(messageListener);
 		this.messageListener = messageListener;
 	}
 
 	/**
-	 * Set the {@link MessageListener}; strongly typed version of
-	 * {@link #setMessageListener(Object)}.
+	 * Set the {@link MessageListener}.
 	 * @param messageListener the listener.
 	 * @since 2.0
 	 */
@@ -383,11 +423,13 @@ public abstract class AbstractMessageListenerContainer extends RabbitAccessor
 	}
 
 	/**
-	 * Set the {@link ChannelAwareMessageListener}; strongly typed version of
-	 * {@link #setMessageListener(Object)}.
+	 * Set the {@link ChannelAwareMessageListener}.
 	 * @param messageListener the listener.
 	 * @since 2.0
+	 * @deprecated use {@link #setMessageListener(MessageListener)} since
+	 * {@link ChannelAwareMessageListener} now inherits {@link MessageListener}.
 	 */
+	@Deprecated
 	public void setChannelAwareMessageListener(ChannelAwareMessageListener messageListener) {
 		this.messageListener = messageListener;
 	}
@@ -395,15 +437,13 @@ public abstract class AbstractMessageListenerContainer extends RabbitAccessor
 	/**
 	 * Check the given message listener, throwing an exception if it does not correspond to a supported listener type.
 	 * <p>
-	 * By default, only a Spring {@link MessageListener} object or a Spring
-	 * {@link ChannelAwareMessageListener} object will be accepted.
+	 * Only a Spring {@link MessageListener} object will be accepted.
 	 * @param messageListener the message listener object to check
-	 * @throws IllegalArgumentException if the supplied listener is not a MessageListener or SessionAwareMessageListener
+	 * @throws IllegalArgumentException if the supplied listener is not a MessageListener
 	 * @see MessageListener
-	 * @see ChannelAwareMessageListener
 	 */
 	protected void checkMessageListener(Object messageListener) {
-		if (!(messageListener instanceof MessageListener || messageListener instanceof ChannelAwareMessageListener)) {
+		if (!(messageListener instanceof MessageListener)) {
 			throw new IllegalArgumentException("Message listener needs to be of type ["
 					+ MessageListener.class.getName() + "] or [" + ChannelAwareMessageListener.class.getName() + "]");
 		}
@@ -429,12 +469,21 @@ public abstract class AbstractMessageListenerContainer extends RabbitAccessor
 	/**
 	 * Set the {@link MessageConverter} strategy for converting AMQP Messages.
 	 * @param messageConverter the message converter to use
+	 * @deprecated - this converter is not used by the container; it was only
+	 * used to configure the converter for a {@code @RabbitListener} adapter.
+	 * That is now handled differently. If you are manually creating a listener
+	 * container, the converter must be configured in a listener adapter (if
+	 * present).
 	 */
+	@Deprecated
 	public void setMessageConverter(MessageConverter messageConverter) {
+		this.logger.warn("It is preferred to configure the message converter via the endpoint. "
+				+ "See RabbitListenerEndpoint.setMessageConverter");
 		this.messageConverter = messageConverter;
 	}
 
 	@Override
+	@Deprecated
 	public MessageConverter getMessageConverter() {
 		return this.messageConverter;
 	}
@@ -584,9 +633,12 @@ public abstract class AbstractMessageListenerContainer extends RabbitAccessor
 	 * @since 1.6.9
 	 * @see #setLookupKeyQualifier(String)
 	 */
+	@Nullable
 	protected String getRoutingLookupKey() {
 		return super.getConnectionFactory() instanceof RoutingConnectionFactory
-				? (this.lookupKeyQualifier + this.queueNames.toString().replaceAll(" ", ""))
+				? this.lookupKeyQualifier + "[" + this.queues.stream()
+								.map(q -> q.getName())
+								.collect(Collectors.joining(",")) + "]"
 				: null;
 	}
 
@@ -596,6 +648,7 @@ public abstract class AbstractMessageListenerContainer extends RabbitAccessor
 	 * @return the {@link RoutingConnectionFactory} or null.
 	 * @since 1.6.9
 	 */
+	@Nullable
 	protected RoutingConnectionFactory getRoutingConnectionFactory() {
 		return super.getConnectionFactory() instanceof RoutingConnectionFactory
 				? (RoutingConnectionFactory) super.getConnectionFactory()
@@ -841,20 +894,45 @@ public abstract class AbstractMessageListenerContainer extends RabbitAccessor
 		return this.messagePropertiesConverter;
 	}
 
-	protected RabbitAdmin getRabbitAdmin() {
-		return this.rabbitAdmin;
+	/**
+	 * Return the admin.
+	 * @return the admin.
+	 * @deprecated in favor of {@link #getAmqpAdmin()}
+	 */
+	@Deprecated
+	protected AmqpAdmin getRabbitAdmin() {
+		return getAmqpAdmin();
+	}
+
+	protected AmqpAdmin getAmqpAdmin() {
+		return this.amqpAdmin;
 	}
 
 	/**
-	 * Set the {@link RabbitAdmin}, used to declare any auto-delete queues, bindings
+	 * Set the {@link AmqpAdmin}, used to declare any auto-delete queues, bindings
 	 * etc when the container is started. Only needed if those queues use conditional
 	 * declaration (have a 'declared-by' attribute). If not specified, an internal
 	 * admin will be used which will attempt to declare all elements not having a
 	 * 'declared-by' attribute.
-	 * @param rabbitAdmin The admin.
+	 * @param amqpAdmin the AmqpAdmin to use
+	 * @since 2.1
 	 */
-	public final void setRabbitAdmin(RabbitAdmin rabbitAdmin) {
-		this.rabbitAdmin = rabbitAdmin;
+	public void setAmqpAdmin(AmqpAdmin amqpAdmin) {
+		this.amqpAdmin = amqpAdmin;
+	}
+
+	/**
+	 * Set the {@link AmqpAdmin}, used to declare any auto-delete queues, bindings
+	 * etc when the container is started. Only needed if those queues use conditional
+	 * declaration (have a 'declared-by' attribute). If not specified, an internal
+	 * admin will be used which will attempt to declare all elements not having a
+	 * 'declared-by' attribute.
+	 * @param amqpAdmin The admin.
+	 * @deprecated in favor of {@link #setAmqpAdmin(AmqpAdmin)}
+	 */
+	@Deprecated
+	public final void setRabbitAdmin(AmqpAdmin amqpAdmin) {
+		setAmqpAdmin(amqpAdmin);
 	}
 
 	/**
@@ -990,6 +1068,18 @@ public abstract class AbstractMessageListenerContainer extends RabbitAccessor
 	}
 
 	/**
+	 * Set the name (category) of the logger used to log exceptions thrown by the error handler.
+	 * It defaults to the container's logger but can be overridden if you want it to log at a different
+	 * level to the container. Such exceptions are logged at the ERROR level.
+	 * @param errorHandlerLoggerName the logger name.
+	 * @since 2.0.8
+	 */
+	public void setErrorHandlerLoggerName(String errorHandlerLoggerName) {
+		Assert.notNull(errorHandlerLoggerName, "'errorHandlerLoggerName' cannot be null");
+		this.errorHandlerLoggerName = errorHandlerLoggerName;
+	}
+
+	/**
 	 * Delegates to {@link #validateConfiguration()} and {@link #initialize()}.
 	 */
 	@Override
@@ -1008,7 +1098,7 @@ public abstract class AbstractMessageListenerContainer extends RabbitAccessor
 	}
 
 	@Override
-	public void setupMessageListener(Object messageListener) {
+	public void setupMessageListener(MessageListener messageListener) {
 		setMessageListener(messageListener);
 	}
 
@@ -1074,6 +1164,7 @@ public abstract class AbstractMessageListenerContainer extends RabbitAccessor
 				}
 
 			}
+			this.initialized = true;
 		}
 		catch (Exception ex) {
 			throw convertRabbitAccessException(ex);
@@ -1084,11 +1175,16 @@ public abstract class AbstractMessageListenerContainer extends RabbitAccessor
 	 * Stop the shared Connection, call {@link #doShutdown()}, and close this container.
 	 */
 	public void shutdown() {
-		logger.debug("Shutting down Rabbit listener container");
 		synchronized (this.lifecycleMonitor) {
+			if (!isActive()) {
+				logger.info("Shutdown ignored - container is not active already");
+				return;
+			}
 			this.active = false;
 			this.lifecycleMonitor.notifyAll();
 		}
+
+		logger.debug("Shutting down Rabbit listener container");
 
 		// Shut down the invokers.
 		try {
@@ -1139,11 +1235,13 @@ public abstract class AbstractMessageListenerContainer extends RabbitAccessor
 	 */
 	@Override
 	public void start() {
+		if (isRunning()) {
+			return;
+		}
 		if (!this.initialized) {
 			synchronized (this.lifecycleMonitor) {
 				if (!this.initialized) {
 					afterPropertiesSet();
-					this.initialized = true;
 				}
 			}
 		}
@@ -1232,7 +1330,14 @@ public abstract class AbstractMessageListenerContainer extends RabbitAccessor
 	 */
 	protected void invokeErrorHandler(Throwable ex) {
 		if (this.errorHandler != null) {
-			this.errorHandler.handleError(ex);
+			try {
+				this.errorHandler.handleError(ex);
+			}
+			catch (Exception e) {
+				LogFactory.getLog(this.errorHandlerLoggerName).error(
+						"Execution of Rabbit message listener failed, and the error handler threw an exception", e);
+				throw e;
+			}
 		}
 		else if (logger.isWarnEnabled()) {
 			logger.warn("Execution of Rabbit message listener failed, and no ErrorHandler has been set.", ex);
@@ -1321,7 +1426,7 @@ public abstract class AbstractMessageListenerContainer extends RabbitAccessor
 	 * @param channel the Rabbit Channel to operate on
 	 * @param message the received Rabbit Message
 	 * @throws Exception if thrown by Rabbit API methods
-	 * @see #setMessageListener
+	 * @see #setMessageListener(MessageListener)
 	 */
 	protected void actualInvokeListener(Channel channel, Message message) throws Exception {
 		Object listener = getMessageListener();
@@ -1414,7 +1519,7 @@ public abstract class AbstractMessageListenerContainer extends RabbitAccessor
 				// so the channel exposed (because exposeListenerChannel is false) will be closed
 				resourceHolder.setSynchronizedWithTransaction(false);
 			}
-			ConnectionFactoryUtils.releaseResources(resourceHolder);
+			ConnectionFactoryUtils.releaseResources(resourceHolder); // NOSONAR - null check in method
 			if (boundHere) {
 				// unbind if we bound
 				TransactionSynchronizationManager.unbindResource(this.getConnectionFactory());
@@ -1500,7 +1605,7 @@ public abstract class AbstractMessageListenerContainer extends RabbitAccessor
 		return e;
 	}
 
-	protected final void publishConsumerFailedEvent(String reason, boolean fatal, Throwable t) {
+	protected void publishConsumerFailedEvent(String reason, boolean fatal, @Nullable Throwable t) {
 		if (this.applicationEventPublisher != null) {
 			this.applicationEventPublisher
 					.publishEvent(t == null ? new ListenerContainerConsumerTerminatedEvent(this, reason) :
@@ -1522,22 +1627,22 @@ public abstract class AbstractMessageListenerContainer extends RabbitAccessor
 	}
 
 	protected void configureAdminIfNeeded() {
-		if (this.rabbitAdmin == null && this.getApplicationContext() != null) {
-			Map<String, RabbitAdmin> admins = this.getApplicationContext().getBeansOfType(RabbitAdmin.class);
+		if (this.amqpAdmin == null && this.getApplicationContext() != null) {
+			Map<String, AmqpAdmin> admins = this.getApplicationContext().getBeansOfType(AmqpAdmin.class);
 			if (admins.size() == 1) {
-				this.rabbitAdmin = admins.values().iterator().next();
+				this.amqpAdmin = admins.values().iterator().next();
 			}
 			else {
 				if (isAutoDeclare() || isMismatchedQueuesFatal()) {
 					if (logger.isDebugEnabled()) {
 						logger.debug("For 'autoDeclare' and 'mismatchedQueuesFatal' to work, there must be exactly one "
-								+ "RabbitAdmin in the context or you must inject one into this container; found: "
+								+ "AmqpAdmin in the context or you must inject one into this container; found: "
 								+ admins.size() + " for container " + this.toString());
 					}
 				}
 				if (isMismatchedQueuesFatal()) {
 					throw new IllegalStateException("When 'mismatchedQueuesFatal' is 'true', there must be exactly "
-							+ "one RabbitAdmin in the context or you must inject one into this container; found: "
+							+ "one AmqpAdmin in the context or you must inject one into this container; found: "
 							+ admins.size() + " for container " + this.toString());
 				}
 			}
@@ -1545,9 +1650,9 @@ public abstract class AbstractMessageListenerContainer extends RabbitAccessor
 	}
 
 	protected void checkMismatchedQueues() {
-		if (this.mismatchedQueuesFatal && this.rabbitAdmin != null) {
+		if (this.mismatchedQueuesFatal && this.amqpAdmin != null) {
 			try {
-				this.rabbitAdmin.initialize();
+				this.amqpAdmin.initialize();
 			}
 			catch (AmqpConnectException e) {
 				logger.info("Broker not available; cannot check queue declarations");
@@ -1561,10 +1666,21 @@ public abstract class AbstractMessageListenerContainer extends RabbitAccessor
 				}
 			}
 		}
+		else {
+			try {
+				Connection connection = getConnectionFactory().createConnection(); // NOSONAR
+				if (connection != null) {
+					connection.close();
+				}
+			}
+			catch (Exception e) {
+				logger.info("Broker not available; cannot force queue declarations during start");
+			}
+		}
 	}
 
 	/**
-	 * Use {@link RabbitAdmin#initialize()} to redeclare everything if necessary.
+	 * Use {@link AmqpAdmin#initialize()} to redeclare everything if necessary.
 	 * Since auto deletion of a queue can cause upstream elements
 	 * (bindings, exchanges) to be deleted too, everything needs to be redeclared if
 	 * a queue is missing.
@@ -1581,23 +1697,23 @@ public abstract class AbstractMessageListenerContainer extends RabbitAccessor
 	 * fail with a fatal error if mismatches occur.
 	 */
 	protected synchronized void redeclareElementsIfNecessary() {
-		RabbitAdmin rabbitAdmin = getRabbitAdmin();
-		if (rabbitAdmin == null || !isAutoDeclare()) {
+		AmqpAdmin amqpAdmin = getAmqpAdmin();
+		if (amqpAdmin == null || !isAutoDeclare()) {
 			return;
 		}
 		try {
 			ApplicationContext applicationContext = this.getApplicationContext();
 			if (applicationContext != null) {
-				Set<String> queueNames = this.getQueueNamesAsSet();
+				Set<String> queueNames = getQueueNamesAsSet();
 				Map<String, Queue> queueBeans = applicationContext.getBeansOfType(Queue.class);
 				for (Entry<String, Queue> entry : queueBeans.entrySet()) {
 					Queue queue = entry.getValue();
 					if (isMismatchedQueuesFatal() || (queueNames.contains(queue.getName()) &&
-							rabbitAdmin.getQueueProperties(queue.getName()) == null)) {
+							amqpAdmin.getQueueProperties(queue.getName()) == null)) {
 						if (logger.isDebugEnabled()) {
 							logger.debug("Redeclaring context exchanges, queues, bindings.");
 						}
-						rabbitAdmin.initialize();
+						amqpAdmin.initialize();
 						return;
 					}
 				}
@@ -1646,7 +1762,7 @@ public abstract class AbstractMessageListenerContainer extends RabbitAccessor
 	protected void prepareHolderForRollback(RabbitResourceHolder resourceHolder, RuntimeException exception) {
 		if (resourceHolder != null) {
 			resourceHolder.setRequeueOnRollback(isAlwaysRequeueWithTxManagerRollback() ||
-					RabbitUtils.shouldRequeue(isDefaultRequeueRejected(), exception, logger));
+					ContainerUtils.shouldRequeue(isDefaultRequeueRejected(), exception, logger));
 		}
 	}
 

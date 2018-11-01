@@ -1,5 +1,5 @@
 /*
- * Copyright 2002-2017 the original author or authors.
+ * Copyright 2002-2018 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -22,7 +22,7 @@ import java.lang.reflect.Type;
 import java.lang.reflect.WildcardType;
 
 import org.springframework.amqp.core.MessageProperties;
-import org.springframework.amqp.rabbit.listener.RabbitListenerErrorHandler;
+import org.springframework.amqp.rabbit.listener.api.RabbitListenerErrorHandler;
 import org.springframework.amqp.rabbit.listener.exception.ListenerExecutionFailedException;
 import org.springframework.amqp.support.AmqpHeaderMapper;
 import org.springframework.amqp.support.converter.MessageConversionException;
@@ -58,7 +58,7 @@ import com.rabbitmq.client.Channel;
  */
 public class MessagingMessageListenerAdapter extends AbstractAdaptableMessageListener {
 
-	private HandlerAdapter handlerMethod;
+	private HandlerAdapter handlerAdapter;
 
 	private final MessagingMessageConverterAdapter messagingMessageConverter;
 
@@ -84,10 +84,10 @@ public class MessagingMessageListenerAdapter extends AbstractAdaptableMessageLis
 	/**
 	 * Set the {@link HandlerAdapter} to use to invoke the method
 	 * processing an incoming {@link org.springframework.amqp.core.Message}.
-	 * @param handlerMethod {@link HandlerAdapter} instance.
+	 * @param handlerAdapter {@link HandlerAdapter} instance.
 	 */
-	public void setHandlerMethod(HandlerAdapter handlerMethod) {
-		this.handlerMethod = handlerMethod;
+	public void setHandlerAdapter(HandlerAdapter handlerAdapter) {
+		this.handlerAdapter = handlerAdapter;
 	}
 
 	/**
@@ -111,14 +111,21 @@ public class MessagingMessageListenerAdapter extends AbstractAdaptableMessageLis
 	}
 
 	@Override
+	public void setMessageConverter(MessageConverter messageConverter) {
+		super.setMessageConverter(messageConverter);
+		this.messagingMessageConverter.setPayloadConverter(messageConverter);
+	}
+
+	@Override
 	public void onMessage(org.springframework.amqp.core.Message amqpMessage, Channel channel) throws Exception {
 		Message<?> message = toMessagingMessage(amqpMessage);
 		if (logger.isDebugEnabled()) {
 			logger.debug("Processing [" + message + "]");
 		}
+		InvocationResult result = null;
 		try {
-			Object result = invokeHandler(amqpMessage, channel, message);
-			if (result != null) {
+			result = invokeHandler(amqpMessage, channel, message);
+			if (result.getReturnValue() != null) {
 				handleResult(result, amqpMessage, channel, message);
 			}
 			else {
@@ -128,9 +135,9 @@ public class MessagingMessageListenerAdapter extends AbstractAdaptableMessageLis
 		catch (ListenerExecutionFailedException e) {
 			if (this.errorHandler != null) {
 				try {
-					Object result = this.errorHandler.handleError(amqpMessage, message, e);
-					if (result != null) {
-						handleResult(result, amqpMessage, channel, message);
+					Object errorResult = this.errorHandler.handleError(amqpMessage, message, e);
+					if (errorResult != null) {
+						handleResult(new InvocationResult(errorResult, null, null), amqpMessage, channel, message);
 					}
 					else {
 						logger.trace("Error handler returned no result");
@@ -152,10 +159,11 @@ public class MessagingMessageListenerAdapter extends AbstractAdaptableMessageLis
 			throw exceptionToThrow;
 		}
 		try {
-			handleResult(new RemoteInvocationResult(throwableToReturn), amqpMessage, channel, message);
+			handleResult(new InvocationResult(new RemoteInvocationResult(throwableToReturn), null, null),
+					amqpMessage, channel, message);
 		}
 		catch (ReplyFailureException rfe) {
-			if (void.class.equals(this.handlerMethod.getReturnType(message.getPayload()))) {
+			if (void.class.equals(this.handlerAdapter.getReturnType(message.getPayload()))) {
 				throw exceptionToThrow;
 			}
 			else {
@@ -176,10 +184,10 @@ public class MessagingMessageListenerAdapter extends AbstractAdaptableMessageLis
 	 * @param message the messaging message.
 	 * @return the result of invoking the handler.
 	 */
-	private Object invokeHandler(org.springframework.amqp.core.Message amqpMessage, Channel channel,
+	private InvocationResult invokeHandler(org.springframework.amqp.core.Message amqpMessage, Channel channel,
 			Message<?> message) {
 		try {
-			return this.handlerMethod.invoke(message, amqpMessage, channel);
+			return this.handlerAdapter.invoke(message, amqpMessage, channel);
 		}
 		catch (MessagingException ex) {
 			throw new ListenerExecutionFailedException(createMessagingErrorMessage("Listener method could not " +
@@ -187,34 +195,36 @@ public class MessagingMessageListenerAdapter extends AbstractAdaptableMessageLis
 		}
 		catch (Exception ex) {
 			throw new ListenerExecutionFailedException("Listener method '" +
-					this.handlerMethod.getMethodAsString(message.getPayload()) + "' threw exception", ex, amqpMessage);
+					this.handlerAdapter.getMethodAsString(message.getPayload()) + "' threw exception", ex, amqpMessage);
 		}
 	}
 
 	private String createMessagingErrorMessage(String description, Object payload) {
 		return description + "\n"
 				+ "Endpoint handler details:\n"
-				+ "Method [" + this.handlerMethod.getMethodAsString(payload) + "]\n"
-				+ "Bean [" + this.handlerMethod.getBean() + "]";
+				+ "Method [" + this.handlerAdapter.getMethodAsString(payload) + "]\n"
+				+ "Bean [" + this.handlerAdapter.getBean() + "]";
 	}
 
 	/**
 	 * Build a Rabbit message to be sent as response based on the given result object.
 	 * @param channel the Rabbit Channel to operate on
 	 * @param result the content of the message, as returned from the listener method
+	 * @param genericType the generic type of the result.
 	 * @return the Rabbit <code>Message</code> (never <code>null</code>)
 	 * @throws Exception if thrown by Rabbit API methods
 	 * @see #setMessageConverter
 	 */
 	@Override
-	protected org.springframework.amqp.core.Message buildMessage(Channel channel, Object result) throws Exception {
+	protected org.springframework.amqp.core.Message buildMessage(Channel channel, Object result, Type genericType)
+			throws Exception {
 		MessageConverter converter = getMessageConverter();
 		if (converter != null && !(result instanceof org.springframework.amqp.core.Message)) {
 			if (result instanceof org.springframework.messaging.Message) {
 				return this.messagingMessageConverter.toMessage(result, new MessageProperties());
 			}
 			else {
-				return converter.toMessage(result, new MessageProperties());
+				return converter.toMessage(result, new MessageProperties(), genericType);
 			}
 		}
 		else {

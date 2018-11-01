@@ -1,5 +1,5 @@
 /*
- * Copyright 2002-2017 the original author or authors.
+ * Copyright 2002-2018 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -60,21 +60,23 @@ import org.junit.Rule;
 import org.junit.Test;
 
 import org.springframework.amqp.AmqpException;
+import org.springframework.amqp.core.Correlation;
 import org.springframework.amqp.core.Message;
 import org.springframework.amqp.core.MessagePostProcessor;
 import org.springframework.amqp.core.MessageProperties;
+import org.springframework.amqp.core.Queue;
+import org.springframework.amqp.core.QueueBuilder;
 import org.springframework.amqp.rabbit.connection.CachingConnectionFactory;
 import org.springframework.amqp.rabbit.connection.ChannelProxy;
+import org.springframework.amqp.rabbit.connection.CorrelationData;
+import org.springframework.amqp.rabbit.connection.PendingConfirm;
+import org.springframework.amqp.rabbit.connection.PublisherCallbackChannel.Listener;
+import org.springframework.amqp.rabbit.connection.PublisherCallbackChannelImpl;
 import org.springframework.amqp.rabbit.junit.BrokerRunning;
 import org.springframework.amqp.rabbit.junit.BrokerTestUtils;
 import org.springframework.amqp.rabbit.listener.SimpleMessageListenerContainer;
 import org.springframework.amqp.rabbit.listener.adapter.MessageListenerAdapter;
 import org.springframework.amqp.rabbit.listener.adapter.ReplyingMessageListener;
-import org.springframework.amqp.rabbit.support.CorrelationData;
-import org.springframework.amqp.rabbit.support.PendingConfirm;
-import org.springframework.amqp.rabbit.support.PublisherCallbackChannel.Listener;
-import org.springframework.amqp.rabbit.support.PublisherCallbackChannelImpl;
-import org.springframework.amqp.support.Correlation;
 import org.springframework.amqp.support.converter.SimpleMessageConverter;
 import org.springframework.amqp.utils.test.TestUtils;
 import org.springframework.beans.DirectFieldAccessor;
@@ -98,15 +100,22 @@ public class RabbitTemplatePublisherCallbacksIntegrationTests {
 
 	private static final String ROUTE = "test.queue";
 
+	@Rule
+	public BrokerRunning brokerIsRunning = BrokerRunning.isRunningWithEmptyQueues(ROUTE);
+
 	private CachingConnectionFactory connectionFactory;
 
 	private CachingConnectionFactory connectionFactoryWithConfirmsEnabled;
 
 	private CachingConnectionFactory connectionFactoryWithReturnsEnabled;
 
+	private CachingConnectionFactory connectionFactoryWithConfirmsAndReturnsEnabled;
+
 	private RabbitTemplate templateWithConfirmsEnabled;
 
 	private RabbitTemplate templateWithReturnsEnabled;
+
+	private RabbitTemplate templateWithConfirmsAndReturnsEnabled;
 
 	@Before
 	public void create() {
@@ -116,8 +125,6 @@ public class RabbitTemplatePublisherCallbacksIntegrationTests {
 		connectionFactory.setPort(BrokerTestUtils.getPort());
 		connectionFactoryWithConfirmsEnabled = new CachingConnectionFactory();
 		connectionFactoryWithConfirmsEnabled.setHost("localhost");
-		// When using publisher confirms, the cache size needs to be large enough
-		// otherwise channels can be closed before confirms are received.
 		connectionFactoryWithConfirmsEnabled.setChannelCacheSize(100);
 		connectionFactoryWithConfirmsEnabled.setPort(BrokerTestUtils.getPort());
 		connectionFactoryWithConfirmsEnabled.setPublisherConfirms(true);
@@ -128,6 +135,14 @@ public class RabbitTemplatePublisherCallbacksIntegrationTests {
 		connectionFactoryWithReturnsEnabled.setPort(BrokerTestUtils.getPort());
 		connectionFactoryWithReturnsEnabled.setPublisherReturns(true);
 		templateWithReturnsEnabled = new RabbitTemplate(connectionFactoryWithReturnsEnabled);
+		connectionFactoryWithConfirmsAndReturnsEnabled = new CachingConnectionFactory();
+		connectionFactoryWithConfirmsAndReturnsEnabled.setHost("localhost");
+		connectionFactoryWithConfirmsAndReturnsEnabled.setChannelCacheSize(100);
+		connectionFactoryWithConfirmsAndReturnsEnabled.setPort(BrokerTestUtils.getPort());
+		connectionFactoryWithConfirmsAndReturnsEnabled.setPublisherConfirms(true);
+		connectionFactoryWithConfirmsAndReturnsEnabled.setPublisherReturns(true);
+		templateWithConfirmsAndReturnsEnabled = new RabbitTemplate(connectionFactoryWithConfirmsAndReturnsEnabled);
+		templateWithConfirmsAndReturnsEnabled.setMandatory(true);
 	}
 
 	@After
@@ -139,9 +154,6 @@ public class RabbitTemplatePublisherCallbacksIntegrationTests {
 		this.connectionFactoryWithReturnsEnabled.destroy();
 		this.brokerIsRunning.removeTestQueues();
 	}
-
-	@Rule
-	public BrokerRunning brokerIsRunning = BrokerRunning.isRunningWithEmptyQueues(ROUTE);
 
 	@Test
 	public void testPublisherConfirmReceived() throws Exception {
@@ -401,6 +413,10 @@ public class RabbitTemplatePublisherCallbacksIntegrationTests {
 		exec.shutdown();
 		assertTrue(exec.awaitTermination(10, TimeUnit.SECONDS));
 		ccf.destroy();
+		int n = 0;
+		while (n++ < 100 && pendingConfirms.size() > 0) {
+			Thread.sleep(100);
+		}
 		assertEquals(0, pendingConfirms.size());
 	}
 
@@ -542,7 +558,7 @@ public class RabbitTemplatePublisherCallbacksIntegrationTests {
 	 * time as adding a new pending ack to the map. Test verifies we don't
 	 * get a {@link ConcurrentModificationException}.
 	 */
-	@SuppressWarnings({ "rawtypes", "unchecked", "deprecation" })
+	@SuppressWarnings({ "rawtypes", "unchecked" })
 	@Test
 	public void testConcurrentConfirms() throws Exception {
 		ConnectionFactory mockConnectionFactory = mock(ConnectionFactory.class);
@@ -693,7 +709,7 @@ public class RabbitTemplatePublisherCallbacksIntegrationTests {
 			sentAll.set(true);
 		});
 		long t1 = System.currentTimeMillis();
-		while (!sentAll.get() && System.currentTimeMillis() < t1 + 20000) {
+		while (!sentAll.get() && System.currentTimeMillis() < t1 + 60_000) {
 			template.getUnconfirmed(-1);
 		}
 		assertTrue(sentAll.get());
@@ -739,7 +755,7 @@ public class RabbitTemplatePublisherCallbacksIntegrationTests {
 		when(mockConnection.createChannel()).thenReturn(mockChannel1, mockChannel2);
 
 		CachingConnectionFactory ccf = new CachingConnectionFactory(mockConnectionFactory);
-		ccf.setExecutor(mock(ExecutorService.class));
+		ccf.setExecutor(Executors.newSingleThreadExecutor());
 		ccf.setPublisherConfirms(true);
 		final RabbitTemplate template = new RabbitTemplate(ccf);
 
@@ -750,12 +766,15 @@ public class RabbitTemplatePublisherCallbacksIntegrationTests {
 		doAnswer(invocation -> sent.incrementAndGet() < closeAfter).when(mockChannel1).isOpen();
 		final CountDownLatch sentAll = new CountDownLatch(1);
 		exec.execute(() -> {
-			for (int i = 0; i < 1000; i++) {
-				try {
-					template.convertAndSend(ROUTE, (Object) "message", new CorrelationData("abc"));
+			template.invoke(t -> {
+				for (int i = 0; i < 1000; i++) {
+					try {
+						t.convertAndSend(ROUTE, (Object) "message", new CorrelationData("abc"));
+					}
+					catch (AmqpException e) { }
 				}
-				catch (AmqpException e) { }
-			}
+				return null;
+			});
 			sentAll.countDown();
 		});
 		assertTrue(sentAll.await(10, TimeUnit.SECONDS));
@@ -765,13 +784,12 @@ public class RabbitTemplatePublisherCallbacksIntegrationTests {
 	@Test
 	public void testPublisherCallbackChannelImplCloseWithPending() throws Exception {
 
-		final AtomicInteger nacks = new AtomicInteger();
-
 		Listener listener = mock(Listener.class);
+		final CountDownLatch latch = new CountDownLatch(2);
 		doAnswer(invocation -> {
 			boolean ack = invocation.getArgument(1);
 			if (!ack) {
-				nacks.incrementAndGet();
+				latch.countDown();
 			}
 			return null;
 		}).when(listener).handleConfirm(any(PendingConfirm.class), anyBoolean());
@@ -792,9 +810,47 @@ public class RabbitTemplatePublisherCallbacksIntegrationTests {
 
 		channel.close();
 
-		assertEquals(0, TestUtils.getPropertyValue(channel, "pendingConfirms", Map.class).size());
-		assertEquals(2, nacks.get());
+		assertTrue(latch.await(10, TimeUnit.SECONDS));
 
+		int n = 0;
+		while (n++ < 100 && TestUtils.getPropertyValue(channel, "pendingConfirms", Map.class).size() > 0) {
+			Thread.sleep(100);
+		}
+		assertEquals(0, TestUtils.getPropertyValue(channel, "pendingConfirms", Map.class).size());
+
+	}
+
+	@Test
+	public void testWithFuture() throws Exception {
+		RabbitAdmin admin = new RabbitAdmin(this.connectionFactory);
+		Queue queue = QueueBuilder.nonDurable()
+						.autoDelete()
+						.withArgument("x-max-length", 1)
+						.withArgument("x-overflow", "reject-publish")
+						.build();
+		admin.declareQueue(queue);
+		CorrelationData cd1 = new CorrelationData();
+		this.templateWithConfirmsEnabled.convertAndSend("", queue.getName(), "foo", cd1);
+		assertTrue(cd1.getFuture().get(10, TimeUnit.SECONDS).isAck());
+		CorrelationData cd2 = new CorrelationData();
+		this.templateWithConfirmsEnabled.convertAndSend("", queue.getName(), "bar", cd2);
+		// TODO: Uncomment when travis updates to rabbitmq 3.7
+//		assertFalse(cd2.getFuture().get(10, TimeUnit.SECONDS).isAck());
+		CorrelationData cd3 = new CorrelationData();
+		this.templateWithConfirmsEnabled.convertAndSend("NO_EXCHANGE_HERE", queue.getName(), "foo", cd3);
+		assertFalse(cd3.getFuture().get(10, TimeUnit.SECONDS).isAck());
+		assertThat(cd3.getFuture().get().getReason(), containsString("NOT_FOUND"));
+		CorrelationData cd4 = new CorrelationData("42");
+		AtomicBoolean resent = new AtomicBoolean();
+		this.templateWithConfirmsAndReturnsEnabled.setReturnCallback((m, r, rt, e, rk) -> {
+			this.templateWithConfirmsEnabled.send(ROUTE, m);
+			resent.set(true);
+		});
+		this.templateWithConfirmsAndReturnsEnabled.convertAndSend("", "NO_QUEUE_HERE", "foo", cd4);
+		assertTrue(cd4.getFuture().get(10, TimeUnit.SECONDS).isAck());
+		assertNotNull(cd4.getReturnedMessage());
+		assertTrue(resent.get());
+		admin.deleteQueue(queue.getName());
 	}
 
 }

@@ -1,5 +1,5 @@
 /*
- * Copyright 2002-2017 the original author or authors.
+ * Copyright 2002-2018 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -340,9 +340,9 @@ public class SimpleMessageListenerContainerTests {
 		ConnectionFactory connectionFactory = mock(ConnectionFactory.class);
 		final SimpleMessageListenerContainer container = new SimpleMessageListenerContainer(connectionFactory);
 		container.setQueueNames("foo");
-		List<?> queues = TestUtils.getPropertyValue(container, "queueNames", List.class);
+		List<?> queues = TestUtils.getPropertyValue(container, "queues", List.class);
 		assertEquals(1, queues.size());
-		container.addQueues(new AnonymousQueue(), new AnonymousQueue());
+		container.addQueueNames(new AnonymousQueue().getName(), new AnonymousQueue().getName());
 		assertEquals(3, queues.size());
 		container.removeQueues(new Queue("foo"));
 		assertEquals(2, queues.size());
@@ -430,9 +430,11 @@ public class SimpleMessageListenerContainerTests {
 		CountDownLatch latch1 = new CountDownLatch(2);
 		CountDownLatch latch2 = new CountDownLatch(2);
 		doAnswer(messageToConsumer(mockChannel1, container, false, latch1))
-		.when(mockChannel1).basicConsume(anyString(), anyBoolean(), anyString(), anyBoolean(), anyBoolean(), anyMap(), any(Consumer.class));
+				.when(mockChannel1).basicConsume(anyString(), anyBoolean(), anyString(), anyBoolean(), anyBoolean(),
+						anyMap(), any(Consumer.class));
 		doAnswer(messageToConsumer(mockChannel2, container, false, latch1))
-			.when(mockChannel2).basicConsume(anyString(), anyBoolean(), anyString(), anyBoolean(), anyBoolean(), anyMap(), any(Consumer.class));
+				.when(mockChannel2).basicConsume(anyString(), anyBoolean(), anyString(), anyBoolean(), anyBoolean(),
+						anyMap(), any(Consumer.class));
 		doAnswer(messageToConsumer(mockChannel1, container, true, latch2)).when(mockChannel1).basicCancel(anyString());
 		doAnswer(messageToConsumer(mockChannel2, container, true, latch2)).when(mockChannel2).basicCancel(anyString());
 
@@ -565,12 +567,12 @@ public class SimpleMessageListenerContainerTests {
 			for (Object consumer : consumers) {
 				ChannelProxy channel = TestUtils.getPropertyValue(consumer, "channel", ChannelProxy.class);
 				if (channel != null && channel.getTargetChannel() == mockChannel) {
-					Consumer rabbitConsumer = TestUtils.getPropertyValue(consumer, "consumer", Consumer.class);
 					if (cancel) {
-						rabbitConsumer.handleCancelOk(invocation.getArgument(0));
+						((Consumer) TestUtils.getPropertyValue(consumer, "consumers", Map.class)
+							.values().iterator().next()).handleCancelOk(invocation.getArgument(0));
 					}
 					else {
-						rabbitConsumer.handleConsumeOk("foo");
+						((Consumer) invocation.getArgument(6)).handleConsumeOk("foo");
 						returnValue = "foo";
 					}
 					latch.countDown();

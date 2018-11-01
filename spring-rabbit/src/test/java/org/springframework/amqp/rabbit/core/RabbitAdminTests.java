@@ -1,5 +1,5 @@
 /*
- * Copyright 2002-2017 the original author or authors.
+ * Copyright 2002-2018 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -28,7 +28,9 @@ import static org.junit.Assert.assertThat;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.BDDMockito.given;
 import static org.mockito.BDDMockito.willDoNothing;
 import static org.mockito.BDDMockito.willReturn;
@@ -41,7 +43,6 @@ import static org.mockito.Mockito.verifyZeroInteractions;
 import static org.mockito.Mockito.when;
 
 import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
@@ -52,16 +53,18 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.TimeoutException;
 
 import org.apache.commons.logging.Log;
+import org.junit.Ignore;
 import org.junit.Rule;
 import org.junit.Test;
 import org.junit.rules.ExpectedException;
 import org.mockito.ArgumentCaptor;
 
+import org.springframework.amqp.UncategorizedAmqpException;
 import org.springframework.amqp.core.AnonymousQueue;
 import org.springframework.amqp.core.Binding;
 import org.springframework.amqp.core.Binding.DestinationType;
 import org.springframework.amqp.core.BindingBuilder;
-import org.springframework.amqp.core.Declarable;
+import org.springframework.amqp.core.Declarables;
 import org.springframework.amqp.core.DirectExchange;
 import org.springframework.amqp.core.Exchange;
 import org.springframework.amqp.core.Queue;
@@ -86,6 +89,8 @@ import org.springframework.context.support.GenericApplicationContext;
 import com.rabbitmq.client.AMQP.Queue.DeclareOk;
 import com.rabbitmq.client.Channel;
 import com.rabbitmq.client.DefaultConsumer;
+import com.rabbitmq.http.client.Client;
+import com.rabbitmq.http.client.domain.QueueInfo;
 
 /**
  * @author Mark Pollack
@@ -104,7 +109,7 @@ public class RabbitAdminTests {
 	public ExpectedException exception = ExpectedException.none();
 
 	@Rule
-	public BrokerRunning brokerIsRunning = BrokerRunning.isRunning();
+	public BrokerRunning brokerIsRunning = BrokerRunning.isBrokerAndManagementRunning();
 
 	@Test
 	public void testSettingOfNullConnectionFactory() {
@@ -271,9 +276,10 @@ public class RabbitAdminTests {
 		String longName = new String(new byte[300]).replace('\u0000', 'x');
 		try {
 			admin.declareQueue(new Queue(longName));
+			fail("expected exception");
 		}
 		catch (Exception e) {
-			e.printStackTrace();
+			// NOSONAR
 		}
 		String goodName = "foobar";
 		admin.declareQueue(new Queue(goodName));
@@ -339,6 +345,65 @@ public class RabbitAdminTests {
 		verifyZeroInteractions(channel2);
 	}
 
+	@Test
+	@Ignore // too long; not much value
+	public void testRetry() throws Exception {
+		com.rabbitmq.client.ConnectionFactory rabbitConnectionFactory = mock(com.rabbitmq.client.ConnectionFactory.class);
+		com.rabbitmq.client.Connection connection = mock(com.rabbitmq.client.Connection.class);
+		given(rabbitConnectionFactory.newConnection((ExecutorService) isNull(), anyString())).willReturn(connection);
+		Channel channel = mock(Channel.class);
+		given(connection.createChannel()).willReturn(channel);
+		given(channel.isOpen()).willReturn(true);
+		willThrow(new RuntimeException()).given(channel)
+			.queueDeclare(anyString(), anyBoolean(), anyBoolean(), anyBoolean(), isNull());
+		CachingConnectionFactory ccf = new CachingConnectionFactory(rabbitConnectionFactory);
+		RabbitAdmin admin = new RabbitAdmin(ccf);
+		GenericApplicationContext ctx = new GenericApplicationContext();
+		ctx.getBeanFactory().registerSingleton("foo", new AnonymousQueue());
+		ctx.getBeanFactory().registerSingleton("admin", admin);
+		admin.setApplicationContext(ctx);
+		ctx.getBeanFactory().initializeBean(admin, "admin");
+		ctx.refresh();
+		try {
+			ccf.createConnection();
+			fail("expected exception");
+		}
+		catch (UncategorizedAmqpException e) {
+			// NOSONAR
+		}
+		ctx.close();
+	}
+
+	@Test
+	public void testMasterLocator() throws Exception {
+		CachingConnectionFactory cf = new CachingConnectionFactory(brokerIsRunning.getConnectionFactory());
+		RabbitAdmin admin = new RabbitAdmin(cf);
+		AnonymousQueue queue = new AnonymousQueue();
+		admin.declareQueue(queue);
+		Client client = new Client("http://guest:guest@localhost:15672/api");
+		QueueInfo info = client.getQueue("?", queue.getName());
+		int n = 0;
+		while (n++ < 100 && info == null) {
+			Thread.sleep(100);
+			info = client.getQueue("/", queue.getName());
+		}
+		assertNotNull(info);
+		assertThat(info.getArguments().get(Queue.X_QUEUE_MASTER_LOCATOR), equalTo("client-local"));
+
+		queue = new AnonymousQueue();
+		queue.setMasterLocator(null);
+		admin.declareQueue(queue);
+		info = client.getQueue("?", queue.getName());
+		n = 0;
+		while (n++ < 100 && info == null) {
+			Thread.sleep(100);
+			info = client.getQueue("/", queue.getName());
+		}
+		assertNotNull(info);
+		assertNull(info.getArguments().get(Queue.X_QUEUE_MASTER_LOCATOR));
+		cf.destroy();
+	}
+
 	@Configuration
 	public static class Config {
 
@@ -375,44 +440,38 @@ public class RabbitAdminTests {
 		}
 
 		@Bean
-		public List<Exchange> es() {
-			return Arrays.<Exchange>asList(
+		public Declarables es() {
+			return new Declarables(
 					new DirectExchange("e2", false, true),
-					new DirectExchange("e3", false, true)
-			);
+					new DirectExchange("e3", false, true));
 		}
 
 		@Bean
-		public List<Queue> qs() {
-			return Arrays.asList(
+		public Declarables qs() {
+			return new Declarables(
 					new Queue("q2", false, false, true),
-					new Queue("q3", false, false, true)
-			);
+					new Queue("q3", false, false, true));
 		}
 
 		@Bean
 		@Scope(ConfigurableBeanFactory.SCOPE_PROTOTYPE)
-		public List<Queue> prototypes() {
-			return Arrays.asList(
-					new Queue(this.prototypeQueueName, false, false, true)
-			);
+		public Declarables prototypes() {
+			return new Declarables(new Queue(this.prototypeQueueName, false, false, true));
 		}
 
 		@Bean
-		public List<Binding> bs() {
-			return Arrays.asList(
+		public Declarables bs() {
+			return new Declarables(
 					new Binding("q2", DestinationType.QUEUE, "e2", "k2", null),
-					new Binding("q3", DestinationType.QUEUE, "e3", "k3", null)
-			);
+					new Binding("q3", DestinationType.QUEUE, "e3", "k3", null));
 		}
 
 		@Bean
-		public List<Declarable> ds() {
-			return Arrays.<Declarable>asList(
+		public Declarables ds() {
+			return new Declarables(
 					new DirectExchange("e4", false, true),
 					new Queue("q4", false, false, true),
-					new Binding("q4", DestinationType.QUEUE, "e4", "k4", null)
-			);
+					new Binding("q4", DestinationType.QUEUE, "e4", "k4", null));
 		}
 
 	}

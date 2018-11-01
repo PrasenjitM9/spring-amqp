@@ -1,5 +1,5 @@
 /*
- * Copyright 2002-2017 the original author or authors.
+ * Copyright 2002-2018 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -45,16 +45,17 @@ import org.springframework.amqp.rabbit.connection.CachingConnectionFactory;
 import org.springframework.amqp.rabbit.connection.Connection;
 import org.springframework.amqp.rabbit.connection.ConnectionFactory;
 import org.springframework.amqp.rabbit.connection.ConnectionProxy;
-import org.springframework.amqp.rabbit.core.ChannelAwareMessageListener;
 import org.springframework.amqp.rabbit.core.RabbitAdmin;
 import org.springframework.amqp.rabbit.core.RabbitTemplate;
 import org.springframework.amqp.rabbit.junit.BrokerRunning;
 import org.springframework.amqp.rabbit.junit.BrokerTestUtils;
 import org.springframework.amqp.rabbit.junit.LongRunningIntegrationTest;
 import org.springframework.amqp.rabbit.listener.adapter.MessageListenerAdapter;
+import org.springframework.amqp.rabbit.listener.api.ChannelAwareMessageListener;
 import org.springframework.amqp.rabbit.test.LogLevelAdjuster;
 import org.springframework.amqp.utils.test.TestUtils;
 import org.springframework.beans.factory.DisposableBean;
+import org.springframework.context.ApplicationContext;
 import org.springframework.context.support.GenericApplicationContext;
 
 import com.rabbitmq.client.Channel;
@@ -395,12 +396,12 @@ public class MessageListenerRecoveryCachingConnectionIntegrationTests {
 		RabbitAdmin admin = new RabbitAdmin(connectionFactory);
 		admin.deleteQueue("nonexistent");
 		try {
-			container = doCreateContainer("nonexistent", new VanillaListener(latch), connectionFactory);
 			Properties properties = new Properties();
 			properties.setProperty("mlc.missing.queues.fatal", "false");
 			GenericApplicationContext context = new GenericApplicationContext();
 			context.getBeanFactory().registerSingleton("spring.amqp.global.properties", properties);
 			context.refresh();
+			container = doCreateContainer("nonexistent", new VanillaListener(latch), connectionFactory, context);
 			container.setApplicationContext(context);
 			container.start();
 			testRecoverMissingQueues(latch, connectionFactory);
@@ -458,6 +459,15 @@ public class MessageListenerRecoveryCachingConnectionIntegrationTests {
 
 	protected SimpleMessageListenerContainer doCreateContainer(String queueName, Object listener,
 			ConnectionFactory connectionFactory) {
+
+		return doCreateContainer(queueName, listener, connectionFactory, null);
+	}
+
+
+
+	protected SimpleMessageListenerContainer doCreateContainer(String queueName, Object listener,
+			ConnectionFactory connectionFactory, ApplicationContext context) {
+
 		SimpleMessageListenerContainer container = new SimpleMessageListenerContainer(connectionFactory);
 		container.setMessageListener(new MessageListenerAdapter(listener));
 		container.setQueueNames(queueName);
@@ -467,6 +477,10 @@ public class MessageListenerRecoveryCachingConnectionIntegrationTests {
 		container.setAcknowledgeMode(acknowledgeMode);
 		container.setRecoveryInterval(100);
 		container.setFailedDeclarationRetryInterval(100);
+		container.setReceiveTimeout(50);
+		if (context != null) {
+			container.setApplicationContext(context);
+		}
 		container.afterPropertiesSet();
 		return container;
 	}

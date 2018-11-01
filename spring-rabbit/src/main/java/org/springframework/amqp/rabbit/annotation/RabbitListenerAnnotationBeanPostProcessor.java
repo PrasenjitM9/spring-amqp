@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2017 the original author or authors.
+ * Copyright 2014-2018 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -33,7 +33,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 
-import org.springframework.amqp.core.AnonymousQueue;
+import org.springframework.amqp.core.Base64UrlNamingStrategy;
 import org.springframework.amqp.core.Binding;
 import org.springframework.amqp.core.Binding.DestinationType;
 import org.springframework.amqp.core.ExchangeBuilder;
@@ -46,7 +46,7 @@ import org.springframework.amqp.rabbit.listener.MultiMethodRabbitListenerEndpoin
 import org.springframework.amqp.rabbit.listener.RabbitListenerContainerFactory;
 import org.springframework.amqp.rabbit.listener.RabbitListenerEndpointRegistrar;
 import org.springframework.amqp.rabbit.listener.RabbitListenerEndpointRegistry;
-import org.springframework.amqp.rabbit.listener.RabbitListenerErrorHandler;
+import org.springframework.amqp.rabbit.listener.api.RabbitListenerErrorHandler;
 import org.springframework.aop.framework.Advised;
 import org.springframework.aop.support.AopUtils;
 import org.springframework.beans.BeansException;
@@ -342,12 +342,20 @@ public class RabbitListenerAnnotationBeanPostProcessor
 	private void processMultiMethodListeners(RabbitListener[] classLevelListeners, Method[] multiMethods,
 			Object bean, String beanName) {
 		List<Method> checkedMethods = new ArrayList<Method>();
+		Method defaultMethod = null;
 		for (Method method : multiMethods) {
-			checkedMethods.add(checkProxy(method, bean));
+			Method checked = checkProxy(method, bean);
+			if (AnnotationUtils.findAnnotation(method, RabbitHandler.class).isDefault()) {
+				final Method toAssert = defaultMethod;
+				Assert.state(toAssert == null, () -> "Only one @RabbitHandler can be marked 'isDefault', found: "
+						+ toAssert.toString() + " and " + method.toString());
+				defaultMethod = checked;
+			}
+			checkedMethods.add(checked);
 		}
 		for (RabbitListener classLevelListener : classLevelListeners) {
-			MultiMethodRabbitListenerEndpoint endpoint = new MultiMethodRabbitListenerEndpoint(checkedMethods, bean);
-			endpoint.setBeanFactory(this.beanFactory);
+			MultiMethodRabbitListenerEndpoint endpoint =
+					new MultiMethodRabbitListenerEndpoint(checkedMethods, defaultMethod, bean);
 			processListener(endpoint, classLevelListener, bean, bean.getClass(), beanName);
 		}
 	}
@@ -356,12 +364,6 @@ public class RabbitListenerAnnotationBeanPostProcessor
 		Method methodToUse = checkProxy(method, bean);
 		MethodRabbitListenerEndpoint endpoint = new MethodRabbitListenerEndpoint();
 		endpoint.setMethod(methodToUse);
-		endpoint.setBeanFactory(this.beanFactory);
-		endpoint.setReturnExceptions(resolveExpressionAsBoolean(rabbitListener.returnExceptions()));
-		String errorHandlerBeanName = resolveExpressionAsString(rabbitListener.errorHandler(), "errorHandler");
-		if (StringUtils.hasText(errorHandlerBeanName)) {
-			endpoint.setErrorHandler(this.beanFactory.getBean(errorHandlerBeanName, RabbitListenerErrorHandler.class));
-		}
 		processListener(endpoint, rabbitListener, bean, methodToUse, beanName);
 	}
 
@@ -403,6 +405,22 @@ public class RabbitListenerAnnotationBeanPostProcessor
 		endpoint.setId(getEndpointId(rabbitListener));
 		endpoint.setQueueNames(resolveQueues(rabbitListener));
 		endpoint.setConcurrency(resolveExpressionAsStringOrInteger(rabbitListener.concurrency(), "concurrency"));
+		endpoint.setBeanFactory(this.beanFactory);
+		endpoint.setReturnExceptions(resolveExpressionAsBoolean(rabbitListener.returnExceptions()));
+		Object errorHandler = resolveExpression(rabbitListener.errorHandler());
+		if (errorHandler instanceof RabbitListenerErrorHandler) {
+			endpoint.setErrorHandler((RabbitListenerErrorHandler) errorHandler);
+		}
+		else if (errorHandler instanceof String) {
+			String errorHandlerBeanName = (String) errorHandler;
+			if (StringUtils.hasText(errorHandlerBeanName)) {
+				endpoint.setErrorHandler(this.beanFactory.getBean(errorHandlerBeanName, RabbitListenerErrorHandler.class));
+			}
+		}
+		else {
+			throw new IllegalStateException("error handler mut be a bean name or RabbitListenerErrorHandler, not a "
+					+ errorHandler.getClass().toString());
+		}
 		String group = rabbitListener.group();
 		if (StringUtils.hasText(group)) {
 			Object resolvedGroup = resolveExpression(group);
@@ -536,7 +554,7 @@ public class RabbitListenerAnnotationBeanPostProcessor
 		String queueName = (String) resolveExpression(bindingQueue.value());
 		boolean isAnonymous = false;
 		if (!StringUtils.hasText(queueName)) {
-			queueName = AnonymousQueue.Base64UrlNamingStrategy.DEFAULT.generateName();
+			queueName = Base64UrlNamingStrategy.DEFAULT.generateName();
 			// default exclusive/autodelete and non-durable when anonymous
 			isAnonymous = true;
 		}
@@ -547,6 +565,10 @@ public class RabbitListenerAnnotationBeanPostProcessor
 				resolveArguments(bindingQueue.arguments()));
 		queue.setIgnoreDeclarationExceptions(resolveExpressionAsBoolean(bindingQueue.ignoreDeclarationExceptions()));
 		((ConfigurableBeanFactory) this.beanFactory).registerSingleton(queueName + ++this.increment, queue);
+		if (bindingQueue.admins().length > 0) {
+			queue.setAdminsThatShouldDeclare((Object[]) bindingQueue.admins());
+		}
+		queue.setShouldDeclare(resolveExpressionAsBoolean(bindingQueue.declare()));
 		return queueName;
 	}
 
@@ -574,11 +596,20 @@ public class RabbitListenerAnnotationBeanPostProcessor
 			exchangeBuilder.ignoreDeclarationExceptions();
 		}
 
+		if (!resolveExpressionAsBoolean(bindingExchange.declare())) {
+			exchangeBuilder.suppressDeclaration();
+		}
+
+		if (bindingExchange.admins().length > 0) {
+			exchangeBuilder.admins((Object[]) bindingExchange.admins());
+		}
+
 		Map<String, Object> arguments = resolveArguments(bindingExchange.arguments());
 
 		if (!CollectionUtils.isEmpty(arguments)) {
 			exchangeBuilder.withArguments(arguments);
 		}
+
 
 		org.springframework.amqp.core.Exchange exchange =
 				exchangeBuilder.durable(resolveExpressionAsBoolean(bindingExchange.durable()))
@@ -599,10 +630,15 @@ public class RabbitListenerAnnotationBeanPostProcessor
 		}
 		final Map<String, Object> bindingArguments = resolveArguments(binding.arguments());
 		final boolean bindingIgnoreExceptions = resolveExpressionAsBoolean(binding.ignoreDeclarationExceptions());
+		boolean declare = resolveExpressionAsBoolean(binding.declare());
 		for (String routingKey : routingKeys) {
 			final Binding actualBinding = new Binding(queueName, DestinationType.QUEUE, exchangeName, routingKey,
 					bindingArguments);
 			actualBinding.setIgnoreDeclarationExceptions(bindingIgnoreExceptions);
+			actualBinding.setShouldDeclare(declare);
+			if (binding.admins().length > 0) {
+				actualBinding.setAdminsThatShouldDeclare((Object[]) binding.admins());
+			}
 			((ConfigurableBeanFactory) this.beanFactory)
 					.registerSingleton(exchangeName + "." + queueName + ++this.increment, actualBinding);
 		}

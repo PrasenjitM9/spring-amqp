@@ -1,5 +1,5 @@
 /*
- * Copyright 2002-2016 the original author or authors.
+ * Copyright 2002-2018 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -14,9 +14,10 @@
  * limitations under the License.
  */
 
-package org.springframework.amqp.rabbit.core;
+package org.springframework.amqp.rabbit.listener.api;
 
 import org.springframework.amqp.core.Message;
+import org.springframework.amqp.core.MessageListener;
 
 import com.rabbitmq.client.Channel;
 
@@ -27,7 +28,7 @@ import com.rabbitmq.client.Channel;
  * @author Gary Russell
  */
 @FunctionalInterface
-public interface ChannelAwareMessageListener {
+public interface ChannelAwareMessageListener extends MessageListener {
 
 	/**
 	 * Callback for processing a received Rabbit message.
@@ -38,5 +39,10 @@ public interface ChannelAwareMessageListener {
 	 * @throws Exception Any.
 	 */
 	void onMessage(Message message, Channel channel) throws Exception;
+
+	@Override
+	default void onMessage(Message message) {
+		throw new IllegalStateException("Should never be called for a ChannelAwareMessageListener");
+	}
 
 }

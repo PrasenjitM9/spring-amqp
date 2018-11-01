@@ -16,20 +16,36 @@
 
 package org.springframework.amqp.rabbit.listener.adapter;
 
+import static org.hamcrest.Matchers.equalTo;
+import static org.hamcrest.Matchers.notNullValue;
+import static org.hamcrest.Matchers.sameInstance;
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertThat;
 import static org.junit.Assert.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.BDDMockito.willThrow;
+import static org.mockito.Mockito.mock;
 
 import java.util.HashMap;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
 
 import org.junit.Before;
 import org.junit.Test;
 
+import org.springframework.amqp.core.Address;
 import org.springframework.amqp.core.Message;
 import org.springframework.amqp.core.MessageProperties;
+import org.springframework.amqp.support.SendRetryContextAccessor;
 import org.springframework.amqp.support.converter.SimpleMessageConverter;
 import org.springframework.aop.framework.ProxyFactory;
+import org.springframework.retry.RetryPolicy;
+import org.springframework.retry.policy.SimpleRetryPolicy;
+import org.springframework.retry.support.RetryTemplate;
+
+import com.rabbitmq.client.Channel;
 
 /**
  * @author Dave Syer
@@ -64,7 +80,7 @@ public class MessageListenerAdapterTests {
 			}
 		}
 		this.adapter.setDelegate(new Delegate());
-		this.adapter.onMessage(new Message("foo".getBytes(), messageProperties));
+		this.adapter.onMessage(new Message("foo".getBytes(), messageProperties), null);
 		assertTrue(called.get());
 	}
 
@@ -79,7 +95,7 @@ public class MessageListenerAdapterTests {
 			}
 		}
 		this.adapter = new MessageListenerAdapter(new Delegate(), "myPojoMessageMethod");
-		this.adapter.onMessage(new Message("foo".getBytes(), messageProperties));
+		this.adapter.onMessage(new Message("foo".getBytes(), messageProperties), null);
 		assertTrue(called.get());
 	}
 
@@ -87,7 +103,7 @@ public class MessageListenerAdapterTests {
 	public void testExplicitListenerMethod() throws Exception {
 		this.adapter.setDefaultListenerMethod("handle");
 		this.adapter.setDelegate(this.simpleService);
-		this.adapter.onMessage(new Message("foo".getBytes(), this.messageProperties));
+		this.adapter.onMessage(new Message("foo".getBytes(), this.messageProperties), null);
 		assertEquals("handle", this.simpleService.called);
 	}
 
@@ -101,13 +117,13 @@ public class MessageListenerAdapterTests {
 		this.adapter.setDelegate(this.simpleService);
 		this.messageProperties.setConsumerQueue("foo");
 		this.messageProperties.setConsumerTag("bar");
-		this.adapter.onMessage(new Message("foo".getBytes(), this.messageProperties));
+		this.adapter.onMessage(new Message("foo".getBytes(), this.messageProperties), null);
 		assertEquals("handle", this.simpleService.called);
 		this.messageProperties.setConsumerQueue("junk");
-		this.adapter.onMessage(new Message("foo".getBytes(), this.messageProperties));
+		this.adapter.onMessage(new Message("foo".getBytes(), this.messageProperties), null);
 		assertEquals("notDefinedOnInterface", this.simpleService.called);
 		this.messageProperties.setConsumerTag("junk");
-		this.adapter.onMessage(new Message("foo".getBytes(), this.messageProperties));
+		this.adapter.onMessage(new Message("foo".getBytes(), this.messageProperties), null);
 		assertEquals("anotherHandle", this.simpleService.called);
 	}
 
@@ -117,7 +133,7 @@ public class MessageListenerAdapterTests {
 		ProxyFactory factory = new ProxyFactory(this.simpleService);
 		factory.setProxyTargetClass(true);
 		this.adapter.setDelegate(factory.getProxy());
-		this.adapter.onMessage(new Message("foo".getBytes(), this.messageProperties));
+		this.adapter.onMessage(new Message("foo".getBytes(), this.messageProperties), null);
 		assertEquals("notDefinedOnInterface", this.simpleService.called);
 	}
 
@@ -127,8 +143,41 @@ public class MessageListenerAdapterTests {
 		ProxyFactory factory = new ProxyFactory(this.simpleService);
 		factory.setProxyTargetClass(false);
 		this.adapter.setDelegate(factory.getProxy());
-		this.adapter.onMessage(new Message("foo".getBytes(), this.messageProperties));
+		this.adapter.onMessage(new Message("foo".getBytes(), this.messageProperties), null);
 		assertEquals("handle", this.simpleService.called);
+	}
+
+	@Test
+	public void testReplyRetry() throws Exception {
+		this.adapter.setDefaultListenerMethod("handle");
+		this.adapter.setDelegate(this.simpleService);
+		RetryPolicy retryPolicy = new SimpleRetryPolicy(2);
+		RetryTemplate retryTemplate = new RetryTemplate();
+		retryTemplate.setRetryPolicy(retryPolicy);
+		this.adapter.setRetryTemplate(retryTemplate);
+		AtomicReference<Message> replyMessage = new AtomicReference<>();
+		AtomicReference<Address> replyAddress = new AtomicReference<>();
+		AtomicReference<Throwable> throwable = new AtomicReference<>();
+		this.adapter.setRecoveryCallback(ctx -> {
+			replyMessage.set(SendRetryContextAccessor.getMessage(ctx));
+			replyAddress.set(SendRetryContextAccessor.getAddress(ctx));
+			throwable.set(ctx.getLastThrowable());
+			return null;
+		});
+		this.messageProperties.setReplyTo("foo/bar");
+		Channel channel = mock(Channel.class);
+		RuntimeException ex = new RuntimeException();
+		willThrow(ex).given(channel)
+			.basicPublish(eq("foo"), eq("bar"), eq(Boolean.FALSE), any(), any());
+		Message message = new Message("foo".getBytes(), this.messageProperties);
+		this.adapter.onMessage(message, channel);
+		assertThat(this.simpleService.called, equalTo("handle"));
+		assertThat(replyMessage.get(), notNullValue());
+		assertThat(new String(replyMessage.get().getBody()), equalTo("processedfoo"));
+		assertThat(replyAddress.get(), notNullValue());
+		assertThat(replyAddress.get().getExchangeName(), equalTo("foo"));
+		assertThat(replyAddress.get().getRoutingKey(), equalTo("bar"));
+		assertThat(throwable.get(), sameInstance(ex));
 	}
 
 	public interface Service {

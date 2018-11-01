@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2016 the original author or authors.
+ * Copyright 2014-2018 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -17,6 +17,7 @@
 package org.springframework.amqp.rabbit.annotation;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertTrue;
@@ -34,6 +35,7 @@ import org.springframework.amqp.core.Message;
 import org.springframework.amqp.core.MessageProperties;
 import org.springframework.amqp.rabbit.config.RabbitListenerContainerTestFactory;
 import org.springframework.amqp.rabbit.config.SimpleRabbitListenerEndpoint;
+import org.springframework.amqp.rabbit.core.RabbitAdmin;
 import org.springframework.amqp.rabbit.listener.AbstractRabbitListenerEndpoint;
 import org.springframework.amqp.rabbit.listener.MethodRabbitListenerEndpoint;
 import org.springframework.amqp.rabbit.listener.RabbitListenerEndpoint;
@@ -100,17 +102,32 @@ public abstract class AbstractRabbitAnnotationDrivenTests {
 				.getBeansOfType(org.springframework.amqp.core.Queue.class);
 		for (org.springframework.amqp.core.Queue queue : queues.values()) {
 			assertTrue(queue.isIgnoreDeclarationExceptions());
+			assertFalse(queue.shouldDeclare());
+			Collection<?> admins = queue.getDeclaringAdmins();
+			checkAdmin(admins);
 		}
 		Map<String, org.springframework.amqp.core.Exchange> exchanges = context
 				.getBeansOfType(org.springframework.amqp.core.Exchange.class);
 		for (org.springframework.amqp.core.Exchange exchange : exchanges.values()) {
 			assertTrue(exchange.isIgnoreDeclarationExceptions());
+			assertFalse(exchange.shouldDeclare());
+			Collection<?> admins = exchange.getDeclaringAdmins();
+			checkAdmin(admins);
 		}
 		Map<String, org.springframework.amqp.core.Binding> bindings = context
 				.getBeansOfType(org.springframework.amqp.core.Binding.class);
 		for (org.springframework.amqp.core.Binding binding : bindings.values()) {
 			assertTrue(binding.isIgnoreDeclarationExceptions());
+			assertFalse(binding.shouldDeclare());
+			Collection<?> admins = binding.getDeclaringAdmins();
+			checkAdmin(admins);
 		}
+	}
+
+	private void checkAdmin(Collection<?> admins) {
+		assertEquals(1, admins.size());
+		Object admin = admins.iterator().next();
+		assertEquals("myAdmin", admin instanceof RabbitAdmin ? ((RabbitAdmin) admin).getBeanName() : admin);
 	}
 
 	/**
@@ -128,7 +145,7 @@ public abstract class AbstractRabbitAnnotationDrivenTests {
 		assertQueues(endpoint, "queue1", "queue2");
 		assertTrue("No queue instances should be set", endpoint.getQueues().isEmpty());
 		assertEquals(true, endpoint.isExclusive());
-		assertEquals(new Integer(34), endpoint.getPriority());
+		assertEquals(Integer.valueOf(34), endpoint.getPriority());
 		assertSame(context.getBean("rabbitAdmin"), endpoint.getAdmin());
 
 		// Resolve the container and invoke a message on it

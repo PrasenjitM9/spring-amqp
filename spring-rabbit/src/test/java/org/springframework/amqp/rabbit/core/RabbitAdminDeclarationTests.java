@@ -1,5 +1,5 @@
 /*
- * Copyright 2002-2017 the original author or authors.
+ * Copyright 2002-2018 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -24,8 +24,11 @@ import static org.junit.Assert.fail;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.anyMap;
+import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.isNull;
+import static org.mockito.BDDMockito.given;
+import static org.mockito.BDDMockito.willReturn;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -55,6 +58,7 @@ import org.springframework.amqp.rabbit.connection.CachingConnectionFactory.Cache
 import org.springframework.amqp.rabbit.connection.Connection;
 import org.springframework.amqp.rabbit.connection.ConnectionFactory;
 import org.springframework.amqp.rabbit.connection.ConnectionListener;
+import org.springframework.context.ApplicationContext;
 import org.springframework.context.annotation.AnnotationConfigApplicationContext;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
@@ -78,7 +82,8 @@ public class RabbitAdminDeclarationTests {
 		Channel channel = mock(Channel.class);
 		when(cf.createConnection()).thenReturn(conn);
 		when(conn.createChannel(false)).thenReturn(channel);
-		when(channel.queueDeclare("foo", true, false, false, null)).thenReturn(new AMQImpl.Queue.DeclareOk("foo", 0, 0));
+		when(channel.queueDeclare("foo", true, false, false, new HashMap<>()))
+			.thenReturn(new AMQImpl.Queue.DeclareOk("foo", 0, 0));
 		final AtomicReference<ConnectionListener> listener = new AtomicReference<ConnectionListener>();
 		doAnswer(invocation -> {
 			listener.set((ConnectionListener) invocation.getArguments()[0]);
@@ -98,7 +103,7 @@ public class RabbitAdminDeclarationTests {
 		assertNotNull(listener.get());
 		listener.get().onCreate(conn);
 
-		verify(channel).queueDeclare("foo", true, false, false, null);
+		verify(channel).queueDeclare("foo", true, false, false, new HashMap<>());
 		verify(channel).exchangeDeclare("bar", "direct", true, false, false, new HashMap<String, Object>());
 		verify(channel).queueBind("foo", "bar", "foo", null);
 	}
@@ -159,7 +164,8 @@ public class RabbitAdminDeclarationTests {
 		Channel channel = mock(Channel.class);
 		when(cf.createConnection()).thenReturn(conn);
 		when(conn.createChannel(false)).thenReturn(channel);
-		when(channel.queueDeclare("foo", true, false, false, null)).thenReturn(new AMQImpl.Queue.DeclareOk("foo", 0, 0));
+		when(channel.queueDeclare("foo", true, false, false, new HashMap<>()))
+			.thenReturn(new AMQImpl.Queue.DeclareOk("foo", 0, 0));
 		final AtomicReference<ConnectionListener> listener = new AtomicReference<ConnectionListener>();
 		doAnswer(invocation -> {
 			listener.set(invocation.getArgument(0));
@@ -182,7 +188,7 @@ public class RabbitAdminDeclarationTests {
 		assertNotNull(listener.get());
 		listener.get().onCreate(conn);
 
-		verify(channel).queueDeclare("foo", true, false, false, null);
+		verify(channel).queueDeclare("foo", true, false, false, new HashMap<>());
 		verify(channel).exchangeDeclare("bar", "direct", true, false, false, new HashMap<String, Object>());
 		verify(channel).queueBind("foo", "bar", "foo", null);
 	}
@@ -266,7 +272,7 @@ public class RabbitAdminDeclarationTests {
 	public void testJavaConfig() throws Exception {
 		AnnotationConfigApplicationContext context = new AnnotationConfigApplicationContext(Config.class);
 		Config.listener1.onCreate(Config.conn1);
-		verify(Config.channel1).queueDeclare("foo", true, false, false, null);
+		verify(Config.channel1).queueDeclare("foo", true, false, false, new HashMap<>());
 		verify(Config.channel1).exchangeDeclare("bar", "direct", true, false, true, new HashMap<String, Object>());
 		verify(Config.channel1).queueBind("foo", "bar", "foo", null);
 
@@ -313,6 +319,26 @@ public class RabbitAdminDeclarationTests {
 		}
 	}
 
+	@Test
+	public void testNoOpWhenNothingToDeclare() throws Exception {
+		com.rabbitmq.client.ConnectionFactory cf = mock(com.rabbitmq.client.ConnectionFactory.class);
+		com.rabbitmq.client.Connection connection = mock(com.rabbitmq.client.Connection.class);
+		Channel channel = mock(Channel.class, "channel1");
+		given(channel.isOpen()).willReturn(true);
+		willReturn(connection).given(cf).newConnection(any(ExecutorService.class), anyString());
+		given(connection.isOpen()).willReturn(true);
+		given(connection.createChannel()).willReturn(channel);
+		CachingConnectionFactory ccf = new CachingConnectionFactory(cf);
+		ccf.setExecutor(mock(ExecutorService.class));
+		RabbitTemplate rabbitTemplate = new RabbitTemplate(ccf);
+		RabbitAdmin admin = new RabbitAdmin(rabbitTemplate);
+		ApplicationContext ac = mock(ApplicationContext.class);
+		admin.setApplicationContext(ac);
+		admin.afterPropertiesSet();
+		ccf.createConnection();
+		verify(connection, never()).createChannel();
+	}
+
 	@Configuration
 	public static class Config {
 
@@ -333,7 +359,7 @@ public class RabbitAdminDeclarationTests {
 			ConnectionFactory connectionFactory = mock(ConnectionFactory.class);
 			when(connectionFactory.createConnection()).thenReturn(conn1);
 			when(conn1.createChannel(false)).thenReturn(channel1);
-			when(channel1.queueDeclare("foo", true, false, false, null))
+			when(channel1.queueDeclare("foo", true, false, false, new HashMap<>()))
 					.thenReturn(new AMQImpl.Queue.DeclareOk("foo", 0, 0));
 			doAnswer(invocation -> {
 				listener1 = invocation.getArgument(0);

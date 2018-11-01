@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2017 the original author or authors.
+ * Copyright 2014-2018 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,6 +16,11 @@
 
 package org.springframework.amqp.rabbit.listener.adapter;
 
+import java.io.IOException;
+import java.lang.reflect.Type;
+import java.util.Arrays;
+import java.util.function.Consumer;
+
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 
@@ -25,11 +30,11 @@ import org.springframework.amqp.core.Message;
 import org.springframework.amqp.core.MessageListener;
 import org.springframework.amqp.core.MessagePostProcessor;
 import org.springframework.amqp.core.MessageProperties;
-import org.springframework.amqp.rabbit.core.ChannelAwareMessageListener;
-import org.springframework.amqp.rabbit.listener.exception.ListenerExecutionFailedException;
+import org.springframework.amqp.rabbit.listener.api.ChannelAwareMessageListener;
 import org.springframework.amqp.rabbit.support.DefaultMessagePropertiesConverter;
 import org.springframework.amqp.rabbit.support.MessagePropertiesConverter;
 import org.springframework.amqp.rabbit.support.RabbitExceptionTranslator;
+import org.springframework.amqp.support.SendRetryContextAccessor;
 import org.springframework.amqp.support.converter.MessageConversionException;
 import org.springframework.amqp.support.converter.MessageConverter;
 import org.springframework.amqp.support.converter.SimpleMessageConverter;
@@ -41,9 +46,14 @@ import org.springframework.expression.common.TemplateParserContext;
 import org.springframework.expression.spel.standard.SpelExpressionParser;
 import org.springframework.expression.spel.support.StandardEvaluationContext;
 import org.springframework.expression.spel.support.StandardTypeConverter;
+import org.springframework.retry.RecoveryCallback;
+import org.springframework.retry.support.RetryTemplate;
 import org.springframework.util.Assert;
+import org.springframework.util.ClassUtils;
+import org.springframework.util.concurrent.ListenableFuture;
 
 import com.rabbitmq.client.Channel;
+import reactor.core.publisher.Mono;
 
 /**
  * An abstract {@link MessageListener} adapter providing the necessary infrastructure
@@ -54,10 +64,10 @@ import com.rabbitmq.client.Channel;
  * @author Artem Bilan
  *
  * @since 1.4
- * @see MessageListener
+ *
  * @see ChannelAwareMessageListener
  */
-public abstract class AbstractAdaptableMessageListener implements MessageListener, ChannelAwareMessageListener {
+public abstract class AbstractAdaptableMessageListener implements ChannelAwareMessageListener {
 
 	private static final String DEFAULT_RESPONSE_ROUTING_KEY = "";
 
@@ -66,6 +76,9 @@ public abstract class AbstractAdaptableMessageListener implements MessageListene
 	private static final SpelExpressionParser PARSER = new SpelExpressionParser();
 
 	private static final ParserContext PARSER_CONTEXT = new TemplateParserContext("!{", "}");
+
+	private static final boolean monoPresent =
+			ClassUtils.isPresent("reactor.core.publisher.Mono", ChannelAwareMessageListener.class.getClassLoader());;
 
 	/** Logger available to subclasses. */
 	protected final Log logger = LogFactory.getLog(getClass());
@@ -88,7 +101,12 @@ public abstract class AbstractAdaptableMessageListener implements MessageListene
 
 	private String encoding = DEFAULT_ENCODING;
 
-	private MessagePostProcessor replyPostProcessor;
+	private MessagePostProcessor[] beforeSendReplyPostProcessors;
+
+	private RetryTemplate retryTemplate;
+
+	private RecoveryCallback<?> recoveryCallback;
+
 
 	/**
 	 * Set the routing key to use when sending response messages.
@@ -143,7 +161,7 @@ public abstract class AbstractAdaptableMessageListener implements MessageListene
 	 * that return result objects, which will be wrapped in
 	 * a response message and sent to a response destination.
 	 * <p>
-	 * Can be a string starting with "SpEL:" in which case the expression is
+	 * It can be a string surrounded by "!{...}" in which case the expression is
 	 * evaluated at runtime; see the reference manual for more information.
 	 * @param defaultReplyTo The exchange.
 	 * @since 1.6
@@ -173,12 +191,45 @@ public abstract class AbstractAdaptableMessageListener implements MessageListene
 	}
 
 	/**
-	 * Set a post processor to process the reply immediately before {@code Channel#basicPublish()}.
-	 * Often used to compress the data.
+	 * Set a post processor to process the reply immediately before
+	 * {@code Channel#basicPublish()}. Often used to compress the data.
 	 * @param replyPostProcessor the reply post processor.
+	 * @deprecated in favor of {@link #setBeforeSendReplyPostProcessors(MessagePostProcessor...)}.
 	 */
+	@Deprecated
 	public void setReplyPostProcessor(MessagePostProcessor replyPostProcessor) {
-		this.replyPostProcessor = replyPostProcessor;
+		setBeforeSendReplyPostProcessors(replyPostProcessor);
+	}
+
+	/**
+	 * Set post processors that will be applied before sending replies.
+	 * @param beforeSendReplyPostProcessors the post processors.
+	 * @since 2.0.3
+	 */
+	public void setBeforeSendReplyPostProcessors(MessagePostProcessor... beforeSendReplyPostProcessors) {
+		Assert.noNullElements(beforeSendReplyPostProcessors, "'replyPostProcessors' must not have any null elements");
+		this.beforeSendReplyPostProcessors = Arrays.copyOf(beforeSendReplyPostProcessors,
+				beforeSendReplyPostProcessors.length);
+	}
+
+	/**
+	 * Set a {@link RetryTemplate} to use when sending replies.
+	 * @param retryTemplate the template.
+	 * @since 2.0.6
+	 * @see #setRecoveryCallback(RecoveryCallback)
+	 */
+	public void setRetryTemplate(RetryTemplate retryTemplate) {
+		this.retryTemplate = retryTemplate;
+	}
+
+	/**
+	 * Set a {@link RecoveryCallback} to invoke when retries are exhausted.
+	 * @param recoveryCallback the recovery callback.
+	 * @since 2.0.6
+	 * @see #setRetryTemplate(RetryTemplate)
+	 */
+	public void setRecoveryCallback(RecoveryCallback<?> recoveryCallback) {
+		this.recoveryCallback = recoveryCallback;
 	}
 
 	/**
@@ -200,27 +251,6 @@ public abstract class AbstractAdaptableMessageListener implements MessageListene
 	 */
 	protected MessageConverter getMessageConverter() {
 		return this.messageConverter;
-	}
-
-	/**
-	 * Rabbit {@link MessageListener} entry point.
-	 * <p>
-	 * Delegates the message to the target listener method, with appropriate conversion of the message argument.
-	 * <p>
-	 * <b>Note:</b> Does not support sending response messages based on result objects returned from listener methods.
-	 * Use the {@link ChannelAwareMessageListener} entry point (typically through a Spring message listener container)
-	 * for handling result objects as well.
-	 * @param message the incoming Rabbit message
-	 * @see #onMessage(Message, com.rabbitmq.client.Channel)
-	 */
-	@Override
-	public void onMessage(Message message) {
-		try {
-			onMessage(message, null);
-		}
-		catch (Exception e) {
-			throw new ListenerExecutionFailedException("Listener threw exception", e, message);
-		}
 	}
 
 	/**
@@ -254,13 +284,12 @@ public abstract class AbstractAdaptableMessageListener implements MessageListene
 	 * @param resultArg the result object to handle (never <code>null</code>)
 	 * @param request the original request message
 	 * @param channel the Rabbit channel to operate on (may be <code>null</code>)
-	 * @throws Exception if thrown by Rabbit API methods
 	 * @see #buildMessage
 	 * @see #postProcessResponse
-	 * @see #getReplyToAddress(Message, Object, Object)
+	 * @see #getReplyToAddress(Message, Object, InvocationResult)
 	 * @see #sendResponse
 	 */
-	protected void handleResult(Object resultArg, Message request, Channel channel) throws Exception {
+	protected void handleResult(InvocationResult resultArg, Message request, Channel channel) {
 		handleResult(resultArg, request, channel, null);
 	}
 
@@ -272,32 +301,67 @@ public abstract class AbstractAdaptableMessageListener implements MessageListene
 	 * @param channel the Rabbit channel to operate on (may be <code>null</code>)
 	 * @param source the source data for the method invocation - e.g.
 	 * {@code o.s.messaging.Message<?>}; may be null
-	 * @throws Exception if thrown by Rabbit API methods
 	 * @see #buildMessage
 	 * @see #postProcessResponse
-	 * @see #getReplyToAddress(Message, Object, Object)
+	 * @see #getReplyToAddress(Message, Object, InvocationResult)
 	 * @see #sendResponse
 	 */
-	protected void handleResult(Object resultArg, Message request, Channel channel, Object source) throws Exception {
+	protected void handleResult(InvocationResult resultArg, Message request, Channel channel, Object source) {
 		if (channel != null) {
-			if (this.logger.isDebugEnabled()) {
-				this.logger.debug("Listener method returned result [" + resultArg
-						+ "] - generating response message for it");
+			if (resultArg.getReturnValue() instanceof ListenableFuture) {
+				((ListenableFuture<?>) resultArg.getReturnValue()).addCallback(
+						r -> asyncSuccess(resultArg, request, channel, source, r),
+						t -> asyncFailure(request, channel, t));
 			}
-			try {
-				Object result = resultArg instanceof ResultHolder ? ((ResultHolder) resultArg).result : resultArg;
-				Message response = buildMessage(channel, result);
-				postProcessResponse(request, response);
-				Address replyTo = getReplyToAddress(request, source, resultArg);
-				sendResponse(channel, replyTo, response);
+			else if (monoPresent && MonoHandler.isMono(resultArg.getReturnValue())) {
+				MonoHandler.subscribe(resultArg.getReturnValue(),
+						r -> asyncSuccess(resultArg, request, channel, source, r),
+						t -> asyncFailure(request, channel, t));
 			}
-			catch (Exception ex) {
-				throw new ReplyFailureException("Failed to send reply with payload '" + resultArg + "'", ex);
+			else {
+				doHandleResult(resultArg, request, channel, source);
 			}
 		}
 		else if (this.logger.isWarnEnabled()) {
 			this.logger.warn("Listener method returned result [" + resultArg
 					+ "]: not generating response message for it because no Rabbit Channel given");
+		}
+	}
+
+	private void asyncSuccess(InvocationResult resultArg, Message request, Channel channel, Object source, Object r) {
+		doHandleResult(new InvocationResult(r, resultArg.getSendTo(), resultArg.getReturnType()), request,
+				channel, source);
+		try {
+			channel.basicAck(request.getMessageProperties().getDeliveryTag(), false);
+		}
+		catch (IOException e) {
+			this.logger.error("Failed to nack message", e);
+		}
+	}
+
+	private void asyncFailure(Message request, Channel channel, Throwable t) {
+		this.logger.error("Future was completed with an exception for " + request, t);
+		try {
+			channel.basicNack(request.getMessageProperties().getDeliveryTag(), false, true);
+		}
+		catch (IOException e) {
+			this.logger.error("Failed to nack message", e);
+		}
+	}
+
+	protected void doHandleResult(InvocationResult resultArg, Message request, Channel channel, Object source) {
+		if (this.logger.isDebugEnabled()) {
+			this.logger.debug("Listener method returned result [" + resultArg
+					+ "] - generating response message for it");
+		}
+		try {
+			Message response = buildMessage(channel, resultArg.getReturnValue(), resultArg.getReturnType());
+			postProcessResponse(request, response);
+			Address replyTo = getReplyToAddress(request, source, resultArg);
+			sendResponse(channel, replyTo, response);
+		}
+		catch (Exception ex) {
+			throw new ReplyFailureException("Failed to send reply with payload '" + resultArg + "'", ex);
 		}
 	}
 
@@ -307,16 +371,17 @@ public abstract class AbstractAdaptableMessageListener implements MessageListene
 
 	/**
 	 * Build a Rabbit message to be sent as response based on the given result object.
-	 * @param channel the Rabbit Channel to operate on
-	 * @param result the content of the message, as returned from the listener method
-	 * @return the Rabbit <code>Message</code> (never <code>null</code>)
-	 * @throws Exception if thrown by Rabbit API methods
+	 * @param channel the Rabbit Channel to operate on.
+	 * @param result the content of the message, as returned from the listener method.
+	 * @param genericType the generic type to populate type headers.
+	 * @return the Rabbit <code>Message</code> (never <code>null</code>).
+	 * @throws Exception if thrown by Rabbit API methods.
 	 * @see #setMessageConverter
 	 */
-	protected Message buildMessage(Channel channel, Object result) throws Exception {
+	protected Message buildMessage(Channel channel, Object result, Type genericType) throws Exception {
 		MessageConverter converter = getMessageConverter();
 		if (converter != null && !(result instanceof Message)) {
-			return converter.toMessage(result, new MessageProperties());
+			return converter.toMessage(result, new MessageProperties(), genericType);
 		}
 		else {
 			if (!(result instanceof Message)) {
@@ -334,9 +399,8 @@ public abstract class AbstractAdaptableMessageListener implements MessageListene
 	 * otherwise to the request message id.
 	 * @param request the original incoming Rabbit message
 	 * @param response the outgoing Rabbit message about to be sent
-	 * @throws Exception if thrown by Rabbit API methods
 	 */
-	protected void postProcessResponse(Message request, Message response) throws Exception {
+	protected void postProcessResponse(Message request, Message response) {
 		String correlation = request.getMessageProperties().getCorrelationId();
 
 		if (correlation == null) {
@@ -359,24 +423,23 @@ public abstract class AbstractAdaptableMessageListener implements MessageListene
 	 * @param source the source data (e.g. {@code o.s.messaging.Message<?>}).
 	 * @param result the result.
 	 * @return the reply-to Address (never <code>null</code>)
-	 * @throws Exception if thrown by Rabbit API methods
 	 * @throws org.springframework.amqp.AmqpException if no {@link Address} can be determined
 	 * @see #setResponseAddress(String)
 	 * @see #setResponseRoutingKey(String)
 	 * @see org.springframework.amqp.core.Message#getMessageProperties()
 	 * @see org.springframework.amqp.core.MessageProperties#getReplyTo()
 	 */
-	protected Address getReplyToAddress(Message request, Object source, Object result) throws Exception {
+	protected Address getReplyToAddress(Message request, Object source, InvocationResult result) {
 		Address replyTo = request.getMessageProperties().getReplyToAddress();
 		if (replyTo == null) {
 			if (this.responseAddress == null && this.responseExchange != null) {
 				this.responseAddress = new Address(this.responseExchange, this.responseRoutingKey);
 			}
-			if (result instanceof ResultHolder) {
-				replyTo = evaluateReplyTo(request, source, result, ((ResultHolder) result).sendTo);
+			if (result.getSendTo() != null) {
+				replyTo = evaluateReplyTo(request, source, result.getReturnValue(), result.getSendTo());
 			}
 			else if (this.responseExpression != null) {
-				replyTo = evaluateReplyTo(request, source, result, this.responseExpression);
+				replyTo = evaluateReplyTo(request, source, result.getReturnValue(), this.responseExpression);
 			}
 			else if (this.responseAddress == null) {
 				throw new AmqpException(
@@ -410,29 +473,50 @@ public abstract class AbstractAdaptableMessageListener implements MessageListene
 	 * @param channel the Rabbit channel to operate on
 	 * @param replyTo the Rabbit ReplyTo string to use when sending. Currently interpreted to be the routing key.
 	 * @param messageIn the Rabbit message to send
-	 * @throws Exception if thrown by Rabbit API methods
 	 * @see #postProcessResponse(Message, Message)
 	 */
-	protected void sendResponse(Channel channel, Address replyTo, Message messageIn) throws Exception {
-		Message message;
-		if (this.replyPostProcessor == null) {
-			message = messageIn;
-		}
-		else {
-			message = this.replyPostProcessor.postProcessMessage(messageIn);
+	protected void sendResponse(Channel channel, Address replyTo, Message messageIn) {
+		Message message = messageIn;
+		if (this.beforeSendReplyPostProcessors != null) {
+			for (MessagePostProcessor postProcessor : this.beforeSendReplyPostProcessors) {
+				message = postProcessor.postProcessMessage(message);
+			}
 		}
 		postProcessChannel(channel, message);
 
 		try {
 			this.logger.debug("Publishing response to exchange = [" + replyTo.getExchangeName() + "], routingKey = ["
 					+ replyTo.getRoutingKey() + "]");
-			channel.basicPublish(replyTo.getExchangeName(), replyTo.getRoutingKey(), this.mandatoryPublish,
-					this.messagePropertiesConverter.fromMessageProperties(message.getMessageProperties(), this.encoding),
-					message.getBody());
+			if (this.retryTemplate == null) {
+				doPublish(channel, replyTo, message);
+			}
+			else {
+				final Message messageToSend = message;
+				this.retryTemplate.execute(ctx -> {
+					doPublish(channel, replyTo, messageToSend);
+					return null;
+				}, ctx -> {
+					if (this.recoveryCallback != null) {
+						ctx.setAttribute(SendRetryContextAccessor.MESSAGE, messageToSend);
+						ctx.setAttribute(SendRetryContextAccessor.ADDRESS, replyTo);
+						this.recoveryCallback.recover(ctx);
+						return null;
+					}
+					else {
+						throw RabbitExceptionTranslator.convertRabbitAccessException(ctx.getLastThrowable());
+					}
+				});
+			}
 		}
 		catch (Exception ex) {
 			throw RabbitExceptionTranslator.convertRabbitAccessException(ex);
 		}
+	}
+
+	protected void doPublish(Channel channel, Address replyTo, Message message) throws IOException {
+		channel.basicPublish(replyTo.getExchangeName(), replyTo.getRoutingKey(), this.mandatoryPublish,
+				this.messagePropertiesConverter.fromMessageProperties(message.getMessageProperties(), this.encoding),
+				message.getBody());
 	}
 
 	/**
@@ -442,30 +526,8 @@ public abstract class AbstractAdaptableMessageListener implements MessageListene
 	 *
 	 * @param channel The channel.
 	 * @param response the outgoing Rabbit message about to be sent
-	 * @throws Exception if thrown by Rabbit API methods
 	 */
-	protected void postProcessChannel(Channel channel, Message response) throws Exception {
-	}
-
-	/**
-	 * Result holder.
-	 */
-	public static final class ResultHolder {
-
-		private final Object result;
-
-		private final Expression sendTo;
-
-		public ResultHolder(Object result, Expression sendTo) {
-			this.result = result;
-			this.sendTo = sendTo;
-		}
-
-		@Override
-		public String toString() {
-			return this.result.toString();
-		}
-
+	protected void postProcessChannel(Channel channel, Message response) {
 	}
 
 	/**
@@ -479,7 +541,7 @@ public abstract class AbstractAdaptableMessageListener implements MessageListene
 
 		private final Object result;
 
-		public ReplyExpressionRoot(Message request, Object source, Object result) {
+		protected ReplyExpressionRoot(Message request, Object source, Object result) {
 			this.request = request;
 			this.source = source;
 			this.result = result;
@@ -495,6 +557,21 @@ public abstract class AbstractAdaptableMessageListener implements MessageListene
 
 		public Object getResult() {
 			return this.result;
+		}
+
+	}
+
+	private static class MonoHandler {
+
+		static boolean isMono(Object result) {
+			return result instanceof Mono;
+		}
+
+		@SuppressWarnings("unchecked")
+		static void subscribe(Object returnValue, Consumer<? super Object> success,
+				Consumer<? super Throwable> failure) {
+
+			((Mono<? super Object>) returnValue).subscribe(success, failure);
 		}
 
 	}

@@ -1,5 +1,5 @@
 /*
- * Copyright 2016-2017 the original author or authors.
+ * Copyright 2016-2018 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -22,6 +22,7 @@ import java.util.concurrent.Executor;
 import org.aopalliance.aop.Advice;
 
 import org.springframework.amqp.core.AcknowledgeMode;
+import org.springframework.amqp.core.MessageListener;
 import org.springframework.amqp.core.MessagePostProcessor;
 import org.springframework.amqp.core.Queue;
 import org.springframework.amqp.rabbit.connection.ConnectionFactory;
@@ -82,7 +83,7 @@ public class ListenerContainerFactoryBean extends AbstractFactoryBean<AbstractMe
 
 	private Boolean exposeListenerChannel;
 
-	private Object messageListener;
+	private MessageListener messageListener;
 
 	private ErrorHandler errorHandler;
 
@@ -211,7 +212,7 @@ public class ListenerContainerFactoryBean extends AbstractFactoryBean<AbstractMe
 		this.exposeListenerChannel = exposeListenerChannel;
 	}
 
-	public void setMessageListener(Object messageListener) {
+	public void setMessageListener(MessageListener messageListener) {
 		this.messageListener = messageListener;
 	}
 
@@ -219,6 +220,21 @@ public class ListenerContainerFactoryBean extends AbstractFactoryBean<AbstractMe
 		this.errorHandler = errorHandler;
 	}
 
+	/*
+	 * Unlikely this FB is used for a RabbitListener (it's only used by the
+	 * XML parser and this property is never set). We could probably just
+	 * remove this, but deprecating, just in case.
+	 */
+	/**
+	 * Set the {@link MessageConverter} strategy for converting AMQP Messages.
+	 * @param messageConverter the message converter to use
+	 * @deprecated - this converter is not used by the container; it was only
+	 * used to configure the converter for a {@code @RabbitListener} adapter.
+	 * That is now handled differently. If you are manually creating a listener
+	 * container, the converter must be configured in a listener adapter (if
+	 * present).
+	 */
+	@Deprecated
 	public void setMessageConverter(MessageConverter messageConverter) {
 		this.messageConverter = messageConverter;
 	}
@@ -388,6 +404,7 @@ public class ListenerContainerFactoryBean extends AbstractFactoryBean<AbstractMe
 		return this.container == null ? AbstractMessageListenerContainer.class : this.container.getClass();
 	}
 
+	@SuppressWarnings("deprecation")
 	@Override
 	protected AbstractMessageListenerContainer createInstance() throws Exception {
 		if (this.container == null) {
@@ -486,7 +503,7 @@ public class ListenerContainerFactoryBean extends AbstractFactoryBean<AbstractMe
 				container.setMessagePropertiesConverter(this.messagePropertiesConverter);
 			}
 			if (this.rabbitAdmin != null) {
-				container.setRabbitAdmin(this.rabbitAdmin);
+				container.setAmqpAdmin(this.rabbitAdmin);
 			}
 			if (this.missingQueuesFatal != null) {
 				container.setMissingQueuesFatal(this.missingQueuesFatal);
@@ -562,23 +579,6 @@ public class ListenerContainerFactoryBean extends AbstractFactoryBean<AbstractMe
 		}
 	}
 
-	/**
-	 * The container type.
-	 */
-	public enum Type {
-
-		/**
-		 * {@link SimpleMessageListenerContainer}.
-		 */
-		simple,
-
-		/**
-		 * {@link DirectMessageListenerContainer}.
-		 */
-		direct
-
-	}
-
 	@Override
 	public void start() {
 		if (this.container != null) {
@@ -613,6 +613,23 @@ public class ListenerContainerFactoryBean extends AbstractFactoryBean<AbstractMe
 		if (this.container != null) {
 			this.container.stop(callback);
 		}
+	}
+
+	/**
+	 * The container type.
+	 */
+	public enum Type {
+
+		/**
+		 * {@link SimpleMessageListenerContainer}.
+		 */
+		simple,
+
+		/**
+		 * {@link DirectMessageListenerContainer}.
+		 */
+		direct
+
 	}
 
 }

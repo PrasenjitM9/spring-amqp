@@ -49,6 +49,7 @@ import java.util.Arrays;
 import java.util.Collection;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.Properties;
 import java.util.UUID;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
@@ -64,6 +65,7 @@ import org.apache.commons.logging.LogFactory;
 import org.apache.logging.log4j.Level;
 import org.junit.After;
 import org.junit.Before;
+import org.junit.Ignore;
 import org.junit.Rule;
 import org.junit.Test;
 import org.junit.rules.TestName;
@@ -85,10 +87,12 @@ import org.springframework.amqp.core.ReceiveAndReplyMessageCallback;
 import org.springframework.amqp.core.ReplyToAddressCallback;
 import org.springframework.amqp.rabbit.connection.CachingConnectionFactory;
 import org.springframework.amqp.rabbit.connection.ChannelListener;
+import org.springframework.amqp.rabbit.connection.ClosingRecoveryListener;
 import org.springframework.amqp.rabbit.connection.Connection;
 import org.springframework.amqp.rabbit.connection.ConnectionFactory;
 import org.springframework.amqp.rabbit.connection.ConnectionFactoryUtils;
 import org.springframework.amqp.rabbit.connection.ConnectionListener;
+import org.springframework.amqp.rabbit.connection.PublisherCallbackChannelImpl;
 import org.springframework.amqp.rabbit.connection.RabbitResourceHolder;
 import org.springframework.amqp.rabbit.connection.SingleConnectionFactory;
 import org.springframework.amqp.rabbit.junit.BrokerRunning;
@@ -98,7 +102,6 @@ import org.springframework.amqp.rabbit.listener.adapter.MessageListenerAdapter;
 import org.springframework.amqp.rabbit.support.ConsumerCancelledException;
 import org.springframework.amqp.rabbit.support.DefaultMessagePropertiesConverter;
 import org.springframework.amqp.rabbit.support.MessagePropertiesConverter;
-import org.springframework.amqp.rabbit.support.PublisherCallbackChannelImpl;
 import org.springframework.amqp.rabbit.test.LogLevelAdjuster;
 import org.springframework.amqp.support.converter.SimpleMessageConverter;
 import org.springframework.amqp.support.postprocessor.GUnzipPostProcessor;
@@ -163,17 +166,17 @@ public class RabbitTemplateIntegrationTests {
 
 	@Rule
 	public LogLevelAdjuster logAdjuster = new LogLevelAdjuster(Level.DEBUG, RabbitTemplate.class,
-			RabbitAdmin.class, RabbitTemplateIntegrationTests.class, BrokerRunning.class);
+			RabbitAdmin.class, RabbitTemplateIntegrationTests.class, BrokerRunning.class, ClosingRecoveryListener.class);
 
 	@Rule
 	public TestName testName = new TestName();
 
 	private CachingConnectionFactory connectionFactory;
 
-	private RabbitTemplate template;
+	protected RabbitTemplate template;
 
 	@Autowired
-	private RabbitTemplate routingTemplate;
+	protected RabbitTemplate routingTemplate;
 
 	@Autowired
 	private ConnectionFactory cf1;
@@ -238,6 +241,37 @@ public class RabbitTemplateIntegrationTests {
 		finally {
 			TransactionSynchronizationManager.unbindResource(this.connectionFactory);
 		}
+		channel.close();
+	}
+
+	@Test
+	@DirtiesContext
+	public void testTemplateUsesPublisherConnectionUnlessInTx() throws Exception {
+		this.connectionFactory.destroy();
+		this.template.setUsePublisherConnection(true);
+		this.template.convertAndSend("dummy", "foo");
+		assertNull(TestUtils.getPropertyValue(this.connectionFactory, "connection.target"));
+		assertNotNull(TestUtils.getPropertyValue(
+				this.connectionFactory, "publisherConnectionFactory.connection.target"));
+		this.connectionFactory.destroy();
+		assertNull(TestUtils.getPropertyValue(this.connectionFactory, "connection.target"));
+		assertNull(TestUtils.getPropertyValue(
+				this.connectionFactory, "publisherConnectionFactory.connection.target"));
+		Channel channel = this.connectionFactory.createConnection().createChannel(true);
+		assertNotNull(TestUtils.getPropertyValue(this.connectionFactory, "connection.target"));
+		RabbitResourceHolder holder = new RabbitResourceHolder(channel, true);
+		TransactionSynchronizationManager.bindResource(this.connectionFactory, holder);
+		try {
+			this.template.setChannelTransacted(true);
+			this.template.convertAndSend("dummy", "foo");
+			assertNotNull(TestUtils.getPropertyValue(this.connectionFactory, "connection.target"));
+			assertNull(TestUtils.getPropertyValue(
+					this.connectionFactory, "publisherConnectionFactory.connection.target"));
+		}
+		finally {
+			TransactionSynchronizationManager.unbindResource(this.connectionFactory);
+		}
+		channel.close();
 	}
 
 	@Test
@@ -444,6 +478,7 @@ public class RabbitTemplateIntegrationTests {
 
 	@Test
 	public void testSendAndReceiveUndeliverable() throws Exception {
+		this.connectionFactory.setBeanName("testSendAndReceiveUndeliverable");
 		template.setMandatory(true);
 		try {
 			template.convertSendAndReceive(ROUTE + "xxxxxxxx", "undeliverable");
@@ -650,6 +685,50 @@ public class RabbitTemplateIntegrationTests {
 		reply = template.receive();
 		assertEquals(null, reply);
 		template.stop();
+		cachingConnectionFactory.destroy();
+	}
+
+	@Test
+	public void testAtomicSendAndReceiveUserCorrelation() throws Exception {
+		final CachingConnectionFactory cachingConnectionFactory = new CachingConnectionFactory();
+		cachingConnectionFactory.setHost("localhost");
+		final RabbitTemplate template = createSendAndReceiveRabbitTemplate(cachingConnectionFactory);
+		template.setRoutingKey(ROUTE);
+		template.setQueue(ROUTE);
+		final AtomicReference<String> remoteCorrelationId = new AtomicReference<>();
+		ExecutorService executor = Executors.newFixedThreadPool(1);
+		// Set up a consumer to respond to our producer
+		Future<Message> received = executor.submit(() -> {
+			Message message = null;
+			message = template.receive(10000);
+			assertNotNull("No message received", message);
+			remoteCorrelationId.set(message.getMessageProperties().getCorrelationId());
+			template.send(message.getMessageProperties().getReplyTo(), message);
+			return message;
+		});
+		RabbitAdmin admin = new RabbitAdmin(cachingConnectionFactory);
+		Queue replyQueue = admin.declareQueue();
+		template.setReplyAddress(replyQueue.getName());
+		template.setUserCorrelationId(true);
+		template.setReplyTimeout(10000);
+		SimpleMessageListenerContainer container = new SimpleMessageListenerContainer(cachingConnectionFactory);
+		container.setQueues(replyQueue);
+		container.setMessageListener(template);
+		container.afterPropertiesSet();
+		container.start();
+		MessageProperties messageProperties = new MessageProperties();
+		messageProperties.setCorrelationId("myCorrelationId");
+		Message message = new Message("test-message".getBytes(), messageProperties);
+		Message reply = template.sendAndReceive(message);
+		assertEquals(new String(message.getBody()), new String(received.get(1000, TimeUnit.MILLISECONDS).getBody()));
+		assertNotNull("Reply is expected", reply);
+		assertThat(remoteCorrelationId.get(), equalTo("myCorrelationId"));
+		assertEquals(new String(message.getBody()), new String(reply.getBody()));
+		// Message was consumed so nothing left on queue
+		reply = template.receive();
+		assertEquals(null, reply);
+		template.stop();
+		container.stop();
 		cachingConnectionFactory.destroy();
 	}
 
@@ -992,25 +1071,27 @@ public class RabbitTemplateIntegrationTests {
 	}
 
 	@Test
-	public void testReceiveAndReplyBlocking() {
+	public void testReceiveAndReplyBlocking() throws Exception {
 		testReceiveAndReply(10000);
 	}
 
 	@Test
-	public void testReceiveAndReplyNonBlocking() {
+	public void testReceiveAndReplyNonBlocking() throws Exception {
 		testReceiveAndReply(0);
 	}
 
-	private void testReceiveAndReply(long timeout) {
+	private void testReceiveAndReply(long timeout) throws Exception {
 		this.template.setQueue(ROUTE);
 		this.template.setRoutingKey(ROUTE);
 		this.template.convertAndSend(ROUTE, "test");
 		template.setReceiveTimeout(timeout);
 
-		boolean received = this.template.receiveAndReply((ReceiveAndReplyMessageCallback) message -> {
-			message.getMessageProperties().setHeader("foo", "bar");
-			return message;
-		});
+		boolean received = receiveAndReply();
+		int n = 0;
+		while (timeout == 0 && !received && n++ < 100) {
+			Thread.sleep(100);
+			received = receiveAndReply();
+		}
 		assertTrue(received);
 
 		Message receive = this.template.receive();
@@ -1130,6 +1211,13 @@ public class RabbitTemplateIntegrationTests {
 			assertTrue(e.getCause().getCause() instanceof ClassCastException);
 		}
 
+	}
+
+	private boolean receiveAndReply() {
+		return this.template.receiveAndReply((ReceiveAndReplyMessageCallback) message -> {
+			message.getMessageProperties().setHeader("foo", "bar");
+			return message;
+		});
 	}
 
 	@Test
@@ -1297,7 +1385,7 @@ public class RabbitTemplateIntegrationTests {
 				return message.toUpperCase();
 			}
 		});
-		messageListener.setReplyPostProcessor(new GZipPostProcessor());
+		messageListener.setBeforeSendReplyPostProcessors(new GZipPostProcessor());
 		container.setMessageListener(messageListener);
 		container.setReceiveTimeout(100);
 		container.afterPropertiesSet();
@@ -1517,6 +1605,46 @@ public class RabbitTemplateIntegrationTests {
 			return true;
 		});
 		assertTrue(result);
+	}
+
+	@Test
+	@Ignore("Not an automated test - requires broker restart")
+	public void testReceiveNoAutoRecovery() throws Exception {
+		CachingConnectionFactory ccf = new CachingConnectionFactory("localhost");
+		ccf.getRabbitConnectionFactory().setAutomaticRecoveryEnabled(true);
+		RabbitAdmin admin = new RabbitAdmin(ccf);
+		ExecutorService exec = Executors.newSingleThreadExecutor();
+		final RabbitTemplate template = new RabbitTemplate(ccf);
+		template.setReceiveTimeout(30_000);
+		exec.execute(() -> {
+			while (true) {
+				try {
+					Thread.sleep(2000);
+					template.receive(ROUTE);
+				}
+				catch (AmqpException e) {
+					e.printStackTrace();
+					if (e.getCause() != null
+						&& e.getCause().getClass().equals(InterruptedException.class)) {
+						Thread.currentThread().interrupt();
+						return;
+					}
+				}
+				catch (InterruptedException e) {
+					Thread.currentThread().interrupt();
+					return;
+				}
+			}
+		});
+		System .out .println("Wait for consumer; then bounce broker; then enter after it's back up");
+		System.in.read();
+		for (int i = 0; i < 20; i++) {
+			Properties queueProperties = admin.getQueueProperties(ROUTE);
+			System .out .println(queueProperties);
+			Thread.sleep(1000);
+		}
+		exec.shutdownNow();
+		ccf.destroy();
 	}
 
 	private Collection<String> getMessagesToSend() {

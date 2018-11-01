@@ -1,5 +1,5 @@
 /*
- * Copyright 2002-2015 the original author or authors.
+ * Copyright 2002-2018 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -27,7 +27,7 @@ import org.springframework.amqp.AmqpIllegalStateException;
 import org.springframework.amqp.core.Message;
 import org.springframework.amqp.core.MessageListener;
 import org.springframework.amqp.core.MessageProperties;
-import org.springframework.amqp.rabbit.core.ChannelAwareMessageListener;
+import org.springframework.amqp.rabbit.listener.api.ChannelAwareMessageListener;
 import org.springframework.amqp.rabbit.listener.exception.ListenerExecutionFailedException;
 import org.springframework.amqp.support.converter.MessageConverter;
 import org.springframework.amqp.support.converter.SimpleMessageConverter;
@@ -123,8 +123,8 @@ import com.rabbitmq.client.Channel;
  * @see #setResponseRoutingKey(String)
  * @see #setMessageConverter
  * @see org.springframework.amqp.support.converter.SimpleMessageConverter
- * @see org.springframework.amqp.rabbit.core.ChannelAwareMessageListener
- * @see org.springframework.amqp.rabbit.listener.AbstractMessageListenerContainer#setMessageListener
+ * @see org.springframework.amqp.rabbit.listener.api.ChannelAwareMessageListener
+ * @see org.springframework.amqp.rabbit.listener.AbstractMessageListenerContainer#setMessageListener(MessageListener)
  */
 public class MessageListenerAdapter extends AbstractAdaptableMessageListener {
 
@@ -269,16 +269,10 @@ public class MessageListenerAdapter extends AbstractAdaptableMessageListener {
 		Object delegate = getDelegate();
 		if (delegate != this) {
 			if (delegate instanceof ChannelAwareMessageListener) {
-				if (channel != null) {
-					((ChannelAwareMessageListener) delegate).onMessage(message, channel);
-					return;
-				}
-				else if (!(delegate instanceof MessageListener)) {
-					throw new AmqpIllegalStateException("MessageListenerAdapter cannot handle a "
-							+ "ChannelAwareMessageListener delegate if it hasn't been invoked with a Channel itself");
-				}
+				((ChannelAwareMessageListener) delegate).onMessage(message, channel);
+				return;
 			}
-			if (delegate instanceof MessageListener) {
+			else if (delegate instanceof MessageListener) {
 				((MessageListener) delegate).onMessage(message);
 				return;
 			}
@@ -297,7 +291,7 @@ public class MessageListenerAdapter extends AbstractAdaptableMessageListener {
 		Object[] listenerArguments = buildListenerArguments(convertedMessage);
 		Object result = invokeListenerMethod(methodName, listenerArguments, message);
 		if (result != null) {
-			handleResult(result, message, channel);
+			handleResult(new InvocationResult(result, null, null), message, channel);
 		}
 		else {
 			logger.trace("No result object given - no result to handle");

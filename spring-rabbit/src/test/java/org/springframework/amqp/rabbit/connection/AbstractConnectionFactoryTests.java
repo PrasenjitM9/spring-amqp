@@ -1,5 +1,5 @@
 /*
- * Copyright 2010-2017 the original author or authors.
+ * Copyright 2010-2018 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -46,6 +46,7 @@ import org.springframework.amqp.utils.test.TestUtils;
 import org.springframework.beans.DirectFieldAccessor;
 import org.springframework.scheduling.concurrent.CustomizableThreadFactory;
 
+import com.rabbitmq.client.Channel;
 import com.rabbitmq.client.ConnectionFactory;
 
 /**
@@ -88,7 +89,9 @@ public abstract class AbstractConnectionFactoryTests {
 		Connection con = connectionFactory.createConnection();
 		assertEquals(1, called.get());
 		ArgumentCaptor<String> captor = ArgumentCaptor.forClass(String.class);
-		verify(logger).info(captor.capture());
+		verify(logger, times(2)).info(captor.capture());
+		assertThat(captor.getAllValues().get(0),
+				containsString("Attempting to connect to: null:0"));
 		assertThat(captor.getValue(),
 				allOf(containsString("Created new connection: "), containsString("SimpleConnection")));
 
@@ -105,6 +108,19 @@ public abstract class AbstractConnectionFactoryTests {
 
 		verify(mockConnectionFactory, times(1)).newConnection(any(ExecutorService.class), anyString());
 
+		connectionFactory.setAddresses("foo:5672,bar:5672");
+		con = connectionFactory.createConnection();
+		assertEquals(1, called.get());
+		captor = ArgumentCaptor.forClass(String.class);
+		verify(logger, times(4)).info(captor.capture());
+		assertThat(captor.getAllValues().get(2),
+				containsString("Attempting to connect to: [foo:5672, bar:5672]"));
+		assertThat(captor.getValue(),
+				allOf(containsString("Created new connection: "), containsString("SimpleConnection")));
+
+		con.close();
+		connectionFactory.destroy();
+		assertEquals(0, called.get());
 	}
 
 	@Test
@@ -161,6 +177,7 @@ public abstract class AbstractConnectionFactoryTests {
 				.thenReturn(mockConnection1, mockConnection2);
 		// simulate a dead connection
 		when(mockConnection1.isOpen()).thenReturn(false);
+		when(mockConnection2.createChannel()).thenReturn(mock(Channel.class));
 
 		AbstractConnectionFactory connectionFactory = createConnectionFactory(mockConnectionFactory);
 

@@ -1,5 +1,5 @@
 /*
- * Copyright 2002-2017 the original author or authors.
+ * Copyright 2002-2018 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -14,9 +14,10 @@
  * limitations under the License.
  */
 
-package org.springframework.amqp.rabbit.support;
+package org.springframework.amqp.rabbit.connection;
 
 import java.io.IOException;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
@@ -31,12 +32,21 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.ConcurrentSkipListMap;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 import java.util.concurrent.TimeoutException;
 
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 
+import org.springframework.amqp.core.Message;
+import org.springframework.amqp.core.MessageProperties;
+import org.springframework.amqp.rabbit.connection.CorrelationData.Confirm;
+import org.springframework.amqp.rabbit.support.DefaultMessagePropertiesConverter;
+import org.springframework.amqp.rabbit.support.MessagePropertiesConverter;
+import org.springframework.lang.Nullable;
 import org.springframework.util.Assert;
+import org.springframework.util.StringUtils;
 
 import com.rabbitmq.client.AMQP;
 import com.rabbitmq.client.AMQP.Basic.RecoverOk;
@@ -60,12 +70,15 @@ import com.rabbitmq.client.Connection;
 import com.rabbitmq.client.Consumer;
 import com.rabbitmq.client.ConsumerShutdownSignalCallback;
 import com.rabbitmq.client.DeliverCallback;
+import com.rabbitmq.client.Envelope;
 import com.rabbitmq.client.GetResponse;
+import com.rabbitmq.client.LongString;
 import com.rabbitmq.client.Method;
 import com.rabbitmq.client.ReturnCallback;
 import com.rabbitmq.client.ReturnListener;
 import com.rabbitmq.client.ShutdownListener;
 import com.rabbitmq.client.ShutdownSignalException;
+import com.rabbitmq.client.impl.recovery.AutorecoveringChannel;
 
 /**
  * Channel wrapper to allow a single listener able to handle
@@ -79,21 +92,46 @@ import com.rabbitmq.client.ShutdownSignalException;
 public class PublisherCallbackChannelImpl
 		implements PublisherCallbackChannel, ConfirmListener, ReturnListener, ShutdownListener {
 
+	private static final ExecutorService DEFAULT_EXECUTOR = Executors.newSingleThreadExecutor();
+
+	private static final MessagePropertiesConverter converter = new DefaultMessagePropertiesConverter();
+
 	private final Log logger = LogFactory.getLog(this.getClass());
 
 	private final Channel delegate;
 
-	private final ConcurrentMap<String, Listener> listeners = new ConcurrentHashMap<String, Listener>();
+	private final ConcurrentMap<String, Listener> listeners = new ConcurrentHashMap<>();
 
-	private final Map<Listener, SortedMap<Long, PendingConfirm>> pendingConfirms
-		= new ConcurrentHashMap<PublisherCallbackChannel.Listener, SortedMap<Long, PendingConfirm>>();
+	private final Map<Listener, SortedMap<Long, PendingConfirm>> pendingConfirms = new ConcurrentHashMap<>();
 
-	private final SortedMap<Long, Listener> listenerForSeq = new ConcurrentSkipListMap<Long, Listener>();
+	private final Map<String, PendingConfirm> pendingReturns = new ConcurrentHashMap<>();
+
+	private final SortedMap<Long, Listener> listenerForSeq = new ConcurrentSkipListMap<>();
+
+	private final ExecutorService executor;
+
+	private volatile java.util.function.Consumer<Channel> afterAckCallback;
 
 	public PublisherCallbackChannelImpl(Channel delegate) {
+		this(delegate, null);
+	}
+
+	public PublisherCallbackChannelImpl(Channel delegate, @Nullable ExecutorService executor) {
 		delegate.addShutdownListener(this);
 		this.delegate = delegate;
+		this.executor = executor != null ? executor : DEFAULT_EXECUTOR;
 	}
+
+	@Override
+	public synchronized void setAfterAckCallback(java.util.function.Consumer<Channel> callback) {
+		if (getPendingConfirmsCount() == 0 && callback != null) {
+			callback.accept(this);
+		}
+		else {
+			this.afterAckCallback = callback;
+		}
+	}
+
 
 //////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 // BEGIN PURE DELEGATE METHODS
@@ -137,6 +175,9 @@ public class PublisherCallbackChannelImpl
 	@Override
 	public void close(int closeCode, String closeMessage) throws IOException, TimeoutException {
 		this.delegate.close(closeCode, closeMessage);
+		if (this.delegate instanceof AutorecoveringChannel) {
+			ClosingRecoveryListener.removeChannel((AutorecoveringChannel) this.delegate);
+		}
 	}
 
 	@Override
@@ -761,6 +802,9 @@ public class PublisherCallbackChannelImpl
 
 	@Override
 	public void close() throws IOException, TimeoutException {
+		if (this.logger.isDebugEnabled()) {
+			this.logger.debug("Closing " + this.delegate);
+		}
 		try {
 			this.delegate.close();
 		}
@@ -769,7 +813,11 @@ public class PublisherCallbackChannelImpl
 				this.logger.trace(this.delegate + " is already closed");
 			}
 		}
-		generateNacksForPendingAcks("Channel closed by application");
+		shutdownCompleted("Channel closed by application");
+	}
+
+	private void shutdownCompleted(String cause) {
+		this.executor.execute(() -> generateNacksForPendingAcks(cause));
 	}
 
 	private synchronized void generateNacksForPendingAcks(String cause) {
@@ -792,16 +840,24 @@ public class PublisherCallbackChannelImpl
 		this.listeners.clear();
 	}
 
-    @Override
-    public synchronized int getPendingConfirmsCount(Listener listener) {
-        SortedMap<Long, PendingConfirm> pendingConfirmsForListener = this.pendingConfirms.get(listener);
-        if (pendingConfirmsForListener == null) {
-            return 0;
-        }
-        else {
-            return pendingConfirmsForListener.entrySet().size();
-        }
-    }
+	@Override
+	public synchronized int getPendingConfirmsCount(Listener listener) {
+		SortedMap<Long, PendingConfirm> pendingConfirmsForListener = this.pendingConfirms.get(listener);
+		if (pendingConfirmsForListener == null) {
+			return 0;
+		}
+		else {
+			return pendingConfirmsForListener.entrySet().size();
+		}
+	}
+
+	@Override
+	public synchronized int getPendingConfirmsCount() {
+		return this.pendingConfirms.values().stream()
+				.map(m -> m.size())
+				.mapToInt(Integer::valueOf)
+				.sum();
+	}
 
 	/**
 	 * Add the listener and return the internal map of pending confirmations for that listener.
@@ -836,6 +892,10 @@ public class PublisherCallbackChannelImpl
 				if (pendingConfirm.getTimestamp() < cutoffTime) {
 					expired.add(pendingConfirm);
 					iterator.remove();
+					CorrelationData correlationData = pendingConfirm.getCorrelationData();
+					if (correlationData != null && StringUtils.hasText(correlationData.getId())) {
+						this.pendingReturns.remove(correlationData.getId());
+					}
 				}
 				else {
 					break;
@@ -853,7 +913,7 @@ public class PublisherCallbackChannelImpl
 		if (this.logger.isDebugEnabled()) {
 			this.logger.debug(this.toString() + " PC:Ack:" + seq + ":" + multiple);
 		}
-		this.processAck(seq, true, multiple, true);
+		processAck(seq, true, multiple, true);
 	}
 
 	@Override
@@ -862,10 +922,22 @@ public class PublisherCallbackChannelImpl
 		if (this.logger.isDebugEnabled()) {
 			this.logger.debug(this.toString() + " PC:Nack:" + seq + ":" + multiple);
 		}
-		this.processAck(seq, false, multiple, true);
+		processAck(seq, false, multiple, true);
 	}
 
 	private synchronized void processAck(long seq, boolean ack, boolean multiple, boolean remove) {
+		try {
+			doProcessAck(seq, ack, multiple, remove);
+		}
+		finally {
+			if (this.afterAckCallback != null && getPendingConfirmsCount() == 0) {
+				this.afterAckCallback.accept(this);
+				this.afterAckCallback = null;
+			}
+		}
+	}
+
+	private void doProcessAck(long seq, boolean ack, boolean multiple, boolean remove) {
 		if (multiple) {
 			/*
 			 * Piggy-backed ack - extract all Listeners for this and earlier
@@ -884,6 +956,13 @@ public class PublisherCallbackChannelImpl
 					while (iterator.hasNext()) {
 						Entry<Long, PendingConfirm> entry = iterator.next();
 						PendingConfirm value = entry.getValue();
+						CorrelationData correlationData = value.getCorrelationData();
+						if (correlationData != null) {
+							correlationData.getFuture().set(new Confirm(ack, value.getCause()));
+							if (StringUtils.hasText(correlationData.getId())) {
+								this.pendingReturns.remove(correlationData.getId());
+							}
+						}
 						iterator.remove();
 						doHandleConfirm(ack, involvedListener, value);
 					}
@@ -906,6 +985,13 @@ public class PublisherCallbackChannelImpl
 					pendingConfirm = confirmsForListener.get(seq);
 				}
 				if (pendingConfirm != null) {
+					CorrelationData correlationData = pendingConfirm.getCorrelationData();
+					if (correlationData != null) {
+						correlationData.getFuture().set(new Confirm(ack, pendingConfirm.getCause()));
+						if (StringUtils.hasText(correlationData.getId())) {
+							this.pendingReturns.remove(correlationData.getId());
+						}
+					}
 					doHandleConfirm(ack, listener, pendingConfirm);
 				}
 			}
@@ -938,6 +1024,12 @@ public class PublisherCallbackChannelImpl
 				"Listener not registered: " + listener + " " + this.pendingConfirms.keySet());
 		pendingConfirmsForListener.put(seq, pendingConfirm);
 		this.listenerForSeq.put(seq, listener);
+		if (pendingConfirm.getCorrelationData() != null) {
+			String returnCorrelation = pendingConfirm.getCorrelationData().getId();
+			if (StringUtils.hasText(returnCorrelation)) {
+				this.pendingReturns.put(returnCorrelation, pendingConfirm);
+			}
+		}
 	}
 
 //  ReturnListener
@@ -949,7 +1041,16 @@ public class PublisherCallbackChannelImpl
 			String routingKey,
 			AMQP.BasicProperties properties,
 			byte[] body) throws IOException {
-		String uuidObject = properties.getHeaders().get(RETURN_CORRELATION_KEY).toString();
+		LongString returnCorrelation = (LongString) properties.getHeaders().get(RETURNED_MESSAGE_CORRELATION_KEY);
+		if (returnCorrelation != null) {
+			PendingConfirm confirm = this.pendingReturns.remove(returnCorrelation.toString());
+			if (confirm != null) {
+				MessageProperties messageProperties = converter.toMessageProperties(properties,
+						new Envelope(0L, false, exchange, routingKey), StandardCharsets.UTF_8.name());
+				confirm.getCorrelationData().setReturnedMessage(new Message(body, messageProperties));
+			}
+		}
+		String uuidObject = properties.getHeaders().get(RETURN_LISTENER_CORRELATION_KEY).toString();
 		Listener listener = this.listeners.get(uuidObject);
 		if (listener == null || !listener.isReturnListener()) {
 			if (this.logger.isWarnEnabled()) {
@@ -965,7 +1066,7 @@ public class PublisherCallbackChannelImpl
 
 	@Override
 	public void shutdownCompleted(ShutdownSignalException cause) {
-		generateNacksForPendingAcks(cause.getMessage());
+		shutdownCompleted(cause.getMessage());
 	}
 
 // Object

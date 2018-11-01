@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2017 the original author or authors.
+ * Copyright 2014-2018 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -26,6 +26,7 @@ import java.util.Set;
 import java.util.Timer;
 import java.util.TimerTask;
 import java.util.UUID;
+import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.LinkedBlockingQueue;
@@ -43,13 +44,14 @@ import org.springframework.amqp.core.MessageProperties;
 import org.springframework.amqp.core.TopicExchange;
 import org.springframework.amqp.rabbit.connection.AbstractConnectionFactory;
 import org.springframework.amqp.rabbit.connection.CachingConnectionFactory;
+import org.springframework.amqp.rabbit.connection.ConnectionFactoryConfigurationUtils;
 import org.springframework.amqp.rabbit.connection.RabbitConnectionFactoryBean;
 import org.springframework.amqp.rabbit.core.DeclareExchangeConnectionListener;
 import org.springframework.amqp.rabbit.core.RabbitAdmin;
 import org.springframework.amqp.rabbit.core.RabbitTemplate;
-import org.springframework.amqp.rabbit.support.LogAppenderUtils;
 import org.springframework.core.io.Resource;
 import org.springframework.core.io.support.PathMatchingResourcePatternResolver;
+import org.springframework.util.StringUtils;
 
 import ch.qos.logback.classic.Level;
 import ch.qos.logback.classic.PatternLayout;
@@ -148,7 +150,7 @@ public class AmqpAppender extends AppenderBase<ILoggingEvent> {
 	/**
 	 * Where LoggingEvents are queued to send.
 	 */
-	private final LinkedBlockingQueue<Event> events = new LinkedBlockingQueue<Event>();
+	private BlockingQueue<Event> events;
 
 	/**
 	 * The pool of senders.
@@ -174,6 +176,11 @@ public class AmqpAppender extends AppenderBase<ILoggingEvent> {
 	 * RabbitMQ ConnectionFactory.
 	 */
 	private AbstractConnectionFactory connectionFactory;
+
+	/**
+	 * A name for the connection (appears on the RabbitMQ Admin UI).
+	 */
+	private String connectionName;
 
 	/**
 	 * Additional client connection properties added to the rabbit connection, with the form
@@ -569,6 +576,15 @@ public class AmqpAppender extends AppenderBase<ILoggingEvent> {
 	}
 
 	/**
+	 * Set a name for the connection which will appear on the RabbitMQ Admin UI.
+	 * @param connectionName the connection name.
+	 * @since 2.1.1
+	 */
+	public void setConnectionName(String connectionName) {
+		this.connectionName = connectionName;
+	}
+
+	/**
 	 * Set additional client connection properties to be added to the rabbit connection,
 	 * with the form {@code key:value[,key:value]...}.
 	 *
@@ -596,6 +612,8 @@ public class AmqpAppender extends AppenderBase<ILoggingEvent> {
 
 	@Override
 	public void start() {
+		this.events = createEventQueue();
+
 		ConnectionFactory rabbitConnectionFactory = createRabbitConnectionFactory();
 		if (rabbitConnectionFactory != null) {
 			super.start();
@@ -606,10 +624,14 @@ public class AmqpAppender extends AppenderBase<ILoggingEvent> {
 			this.locationLayout.setContext(getContext());
 			this.locationLayout.start();
 			this.connectionFactory = new CachingConnectionFactory(rabbitConnectionFactory);
+			if (StringUtils.hasText(this.connectionName)) {
+				this.connectionFactory.setConnectionNameStrategy(cf -> this.connectionName);
+			}
 			if (this.addresses != null) {
 				this.connectionFactory.setAddresses(this.addresses);
 			}
-			LogAppenderUtils.updateClientConnectionProperties(this.connectionFactory, this.clientConnectionProperties);
+			ConnectionFactoryConfigurationUtils.updateClientConnectionProperties(this.connectionFactory,
+					this.clientConnectionProperties);
 			updateConnectionClientProperties(this.connectionFactory.getRabbitConnectionFactory().getClientProperties());
 			setUpExchangeDeclaration();
 			this.senderPool = Executors.newCachedThreadPool();
@@ -691,6 +713,16 @@ public class AmqpAppender extends AppenderBase<ILoggingEvent> {
 	protected void updateConnectionClientProperties(Map<String, Object> clientProperties) {
 	}
 
+	/**
+	 * Subclasses can override this method to inject a custom queue implementation.
+	 *
+	 * @return the queue to use for queueing logging events before processing them.
+	 * @since 2.0.1
+	 */
+	protected BlockingQueue<Event> createEventQueue() {
+		return new LinkedBlockingQueue<>();
+	}
+
 	@Override
 	public void stop() {
 		super.stop();
@@ -745,7 +777,7 @@ public class AmqpAppender extends AppenderBase<ILoggingEvent> {
 	 * @return The modified message.
 	 * @since 1.4
 	 */
-	public Message postProcessMessageBeforeSend(Message message, Event event) {
+	protected Message postProcessMessageBeforeSend(Message message, Event event) {
 		return message;
 	}
 
@@ -835,10 +867,12 @@ public class AmqpAppender extends AppenderBase<ILoggingEvent> {
 						if (retries < AmqpAppender.this.maxSenderRetries) {
 							// Schedule a retry based on the number of times I've tried to re-send this
 							AmqpAppender.this.retryTimer.schedule(new TimerTask() {
+
 								@Override
 								public void run() {
 									AmqpAppender.this.events.add(event);
 								}
+
 							}, (long) (Math.pow(retries, Math.log(retries)) * 1000));
 						}
 						else {

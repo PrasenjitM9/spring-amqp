@@ -1,5 +1,5 @@
 /*
- * Copyright 2002-2017 the original author or authors.
+ * Copyright 2002-2018 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -23,9 +23,8 @@ import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 
 import org.springframework.amqp.AmqpIOException;
-import org.springframework.amqp.AmqpRejectAndDontRequeueException;
-import org.springframework.amqp.rabbit.listener.MessageRejectedWhileStoppingException;
 import org.springframework.amqp.rabbit.support.RabbitExceptionTranslator;
+import org.springframework.lang.Nullable;
 import org.springframework.util.Assert;
 
 import com.rabbitmq.client.AMQP;
@@ -39,21 +38,20 @@ import com.rabbitmq.client.impl.recovery.AutorecoveringChannel;
  * @author Mark Fisher
  * @author Mark Pollack
  * @author Gary Russell
+ * @author Artem Bilan
  */
 public abstract class RabbitUtils {
 
-	public static final int DEFAULT_PORT = AMQP.PROTOCOL.PORT;
-
 	private static final Log logger = LogFactory.getLog(RabbitUtils.class);
 
-	private static final ThreadLocal<Boolean> physicalCloseRequired = new ThreadLocal<Boolean>();
+	private static final ThreadLocal<Boolean> physicalCloseRequired = new ThreadLocal<>();
 
 	/**
 	 * Close the given RabbitMQ Connection and ignore any thrown exception. This is useful for typical
 	 * <code>finally</code> blocks in manual RabbitMQ code.
 	 * @param connection the RabbitMQ Connection to close (may be <code>null</code>)
 	 */
-	public static void closeConnection(Connection connection) {
+	public static void closeConnection(@Nullable Connection connection) {
 		if (connection != null) {
 			try {
 				connection.close();
@@ -72,7 +70,7 @@ public abstract class RabbitUtils {
 	 * blocks in manual RabbitMQ code.
 	 * @param channel the RabbitMQ Channel to close (may be <code>null</code>)
 	 */
-	public static void closeChannel(Channel channel) {
+	public static void closeChannel(@Nullable Channel channel) {
 		if (channel != null) {
 			try {
 				channel.close();
@@ -159,7 +157,6 @@ public abstract class RabbitUtils {
 
 	/**
 	 * Declare to that broker that a channel is going to be used transactionally, and convert exceptions that arise.
-	 *
 	 * @param channel the channel to use
 	 */
 	public static void declareTransactional(Channel channel) {
@@ -316,29 +313,21 @@ public abstract class RabbitUtils {
 	}
 
 	/**
-	 * Determine whether a message should be requeued; returns true if the throwable is a
-	 * {@link MessageRejectedWhileStoppingException} or defaultRequeueRejected is true and
-	 * there is not an {@link AmqpRejectAndDontRequeueException} in the cause chain.
-	 * @param defaultRequeueRejected the default requeue rejected.
-	 * @param throwable the throwable.
-	 * @param logger the logger to use for debug.
-	 * @return true to requeue.
-	 * @since 2.0
+	 * Return the negotiated frame_max.
+	 * @param connectionFactory the connection factory.
+	 * @return the size or -1 if it cannot be determined.
 	 */
-	public static boolean shouldRequeue(boolean defaultRequeueRejected, Throwable throwable, Log logger) {
-		boolean shouldRequeue = defaultRequeueRejected ||
-				throwable instanceof MessageRejectedWhileStoppingException;
-		Throwable t = throwable;
-		while (shouldRequeue && t != null) {
-			if (t instanceof AmqpRejectAndDontRequeueException) {
-				shouldRequeue = false;
+	public static int getMaxFrame(ConnectionFactory connectionFactory) {
+		try (Connection	connection = connectionFactory.createConnection()) {
+			com.rabbitmq.client.Connection rcon = connection.getDelegate();
+			if (rcon != null) {
+				return rcon.getFrameMax();
 			}
-			t = t.getCause();
 		}
-		if (logger.isDebugEnabled()) {
-			logger.debug("Rejecting messages (requeue=" + shouldRequeue + ")");
+		catch (RuntimeException e) {
+			// NOSONAR
 		}
-		return shouldRequeue;
+		return -1;
 	}
 
 }

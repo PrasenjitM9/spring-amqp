@@ -1,5 +1,5 @@
 /*
- * Copyright 2002-2017 the original author or authors.
+ * Copyright 2002-2018 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -29,6 +29,7 @@ import org.springframework.amqp.AmqpException;
 import org.springframework.amqp.AmqpIOException;
 import org.springframework.amqp.rabbit.core.RabbitTemplate;
 import org.springframework.amqp.rabbit.transaction.RabbitTransactionManager;
+import org.springframework.lang.Nullable;
 import org.springframework.transaction.support.ResourceHolderSupport;
 import org.springframework.util.Assert;
 import org.springframework.util.CollectionUtils;
@@ -37,7 +38,8 @@ import org.springframework.util.MultiValueMap;
 
 import com.rabbitmq.client.Channel;
 /**
- * Rabbit resource holder, wrapping a RabbitMQ Connection and Channel. RabbitTransactionManager binds instances of this
+ * Rabbit resource holder, wrapping a RabbitMQ Connection and Channel.
+ * RabbitTransactionManager binds instances of this
  * class to the thread, for a given Rabbit ConnectionFactory.
  *
  * <p>
@@ -56,13 +58,13 @@ public class RabbitResourceHolder extends ResourceHolderSupport {
 
 	private final boolean frozen = false;
 
-	private final List<Connection> connections = new LinkedList<Connection>();
+	private final List<Connection> connections = new LinkedList<>();
 
-	private final List<Channel> channels = new LinkedList<Channel>();
+	private final List<Channel> channels = new LinkedList<>();
 
-	private final Map<Connection, List<Channel>> channelsPerConnection = new HashMap<Connection, List<Channel>>();
+	private final Map<Connection, List<Channel>> channelsPerConnection = new HashMap<>();
 
-	private final MultiValueMap<Channel, Long> deliveryTags = new LinkedMultiValueMap<Channel, Long>();
+	private final MultiValueMap<Channel, Long> deliveryTags = new LinkedMultiValueMap<>();
 
 	private final boolean releaseAfterCompletion;
 
@@ -121,7 +123,7 @@ public class RabbitResourceHolder extends ResourceHolderSupport {
 		addChannel(channel, null);
 	}
 
-	public final void addChannel(Channel channel, Connection connection) {
+	public final void addChannel(Channel channel, @Nullable Connection connection) {
 		Assert.isTrue(!this.frozen, "Cannot add Channel because RabbitResourceHolder is frozen");
 		Assert.notNull(channel, "Channel must not be null");
 		if (!this.channels.contains(channel)) {
@@ -141,6 +143,7 @@ public class RabbitResourceHolder extends ResourceHolderSupport {
 		return this.channels.contains(channel);
 	}
 
+	@Nullable
 	public Connection getConnection() {
 		return (!this.connections.isEmpty() ? this.connections.get(0) : null);
 	}
@@ -149,6 +152,7 @@ public class RabbitResourceHolder extends ResourceHolderSupport {
 		return CollectionUtils.findValueOfType(this.connections, connectionType);
 	}
 
+	@Nullable
 	public Channel getChannel() {
 		return (!this.channels.isEmpty() ? this.channels.get(0) : null);
 	}
@@ -216,16 +220,6 @@ public class RabbitResourceHolder extends ResourceHolderSupport {
 				RabbitUtils.commitIfNecessary(channel);
 			}
 		}
-	}
-
-	/**
-	 * Invalid - always returned false.
-	 * @return true if the channels in this holder are transactional
-	 * @deprecated Not used
-	 */
-	@Deprecated
-	public boolean isChannelTransactional() {
-		return false;
 	}
 
 }
